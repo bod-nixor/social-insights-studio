@@ -1,0 +1,30 @@
+{
+  "timeZone": "America/Los_Angeles",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "dataStudio": {
+    "name": "TikTok Analytics Connector",
+    "logoUrl": "https://drive.google.com/file/d/1NVnQGaPVCkX6WJjyamxO8JrSNf3E5pF_/view?usp=drive_link",
+    "company": "Board of Directors",
+    "companyUrl": "https://business.tiktok.com/",
+    "addonUrl": "https://github.com/bod-nixor/lookerstudio-tiktok-connector",
+    "supportUrl": "https://github.com/bod-nixor/lookerstudio-tiktok-connector",
+    "description": "Fetch TikTok campaign analytics data for Looker Studio.",
+    "sources": [
+      "TikTok Display API"
+    ]
+  },
+  "dependencies": {
+    "libraries": [
+      {
+        "userSymbol": "OAuth2",
+        "version": "43",
+        "libraryId": "1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF"
+      }
+    ]
+  },
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE"
+  }
+}

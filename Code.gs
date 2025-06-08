@@ -736,27 +736,29 @@ function getOAuthService() {
   }
 
   // Use the service URL as redirect URI
-  const redirectUri = ScriptApp.getService().getUrl();
+  const redirectUri = "https://script.google.com/macros/s/AKfycbyCcIeaqb2K8X_WeEJexpmgSOOg0bCEqm8ZsssnrmDIKkbcNINlvqagHjjLm63AugH_/exec"
 
   return OAuth2.createService('TikTok')
     .setAuthorizationBaseUrl(TIKTOK_AUTH_URL)
     .setTokenUrl(TIKTOK_TOKEN_URL)
     .setClientId(clientId)
+    .setParam('client_key', clientId) // TikTok expects this
     .setClientSecret(clientSecret)
     .setCallbackFunction('doGet')
     .setPropertyStore(PropertiesService.getUserProperties())
     .setScope(REQUIRED_SCOPES)
     .setRedirectUri(redirectUri)
     .setTokenPayloadHandler(function(payload) {
+      // Transform the payload to TikTok's requirements
       const tiktokPayload = {
-        client_key: clientId,
+        client_key: clientId,  // Use client_key instead of client_id
         client_secret: clientSecret,
-        grant_type: payload.grant_type,
-        redirect_uri: payload.redirect_uri
+        grant_type: payload.grant_type
       };
 
       if (payload.grant_type === 'authorization_code') {
         tiktokPayload.code = payload.code;
+        tiktokPayload.redirect_uri = payload.redirect_uri;
       } else if (payload.grant_type === 'refresh_token') {
         tiktokPayload.refresh_token = payload.refresh_token || 
           PropertiesService.getUserProperties().getProperty(TOKEN_PROPERTIES.REFRESH_TOKEN);

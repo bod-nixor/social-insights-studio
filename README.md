@@ -1,4 +1,4 @@
-# TikTok User & Video Data Connector for Looker Studio
+# Social Insights Studio
 
 ![Version](https://img.shields.io/badge/Version-9.0.0-blue.svg)
 
@@ -88,7 +88,7 @@ Follow these steps carefully to set up and deploy your connector.
 ### Step 2: Create a Google Apps Script Project
 
 1. Go to [Google Apps Script](https://script.google.com/home).
-2. Click `New project` and give it a name (e.g., `TikTok Looker Studio Connector`).
+2. Click `New project` and give it a name (e.g., `Social Insights Studio Connector`).
 3. Replace the default `Code.gs` content with the entire code provided.
 4. **Add the OAuth2 for Apps Script Library**:
    * Click on **Libraries** (`+` icon) in the left sidebar.
@@ -121,7 +121,7 @@ Follow these steps carefully to set up and deploy your connector.
 2. In the connector gallery, search for and select the **"Build Your Own"** connector (sometimes called "Deploy from ID").
 3. Go back to your Apps Script project, click `Deploy > Manage deployments`, and copy the **Deployment ID**.
 4. Paste the Deployment ID into Looker Studio and click `Validate`.
-5. Your TikTok connector should appear. Select it.
+5. Your connector should appear. Select it.
 6. Click `Authorize` and follow the pop-up prompts to sign in to your TikTok account and grant the necessary permissions.
 7. Once authorized, click `Connect` to add the data source to your report.
 

@@ -1,20 +1,87 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Looker Studio TikTok Connector</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Social Insights Studio</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: #f5f7fa;
+      color: #333;
+    }
+    header {
+      background: linear-gradient(to right, #8e44ad, #e74c3c);
+      padding: 40px 20px;
+      color: white;
+      text-align: center;
+    }
+    header img {
+      max-width: 150px;
+      margin-bottom: 20px;
+    }
+    main {
+      padding: 40px 20px;
+      max-width: 800px;
+      margin: auto;
+      background: white;
+      box-shadow: 0 0 10px rgba(0,0,0,0.05);
+    }
+    footer {
+      text-align: center;
+      font-size: 14px;
+      margin: 40px auto;
+    }
+    a {
+      color: #e74c3c;
+    }
+  </style>
 </head>
 <body>
-  <h1>Looker Studio TikTok Connector</h1>
-  <p>This tool connects your TikTok account to Looker Studio to visualize your video and profile analytics.</p>
-  <p>OAuth2 is used for secure authorization. Your data stays safe.</p>
-  <p>For setup and support, visit the <a href="https://github.com/bod-nixor/lookerstudio-tiktok-connector">GitHub Repo</a>.</p>
+  <header>
+    <img src="https://raw.githubusercontent.com/bod-nixor/lookerstudio-tiktok-connector/main/logo.png" alt="Social Insights Studio Logo">
+    <h1>Social Insights Studio</h1>
+    <p>Connect and visualize your TikTok performance data in Looker Studio.</p>
+  </header>
 
-  <hr>
+  <main>
+    <h2>What is Social Insights Studio?</h2>
+    <p>
+      Social Insights Studio is a secure, production-ready connector for Google Looker Studio that allows TikTok creators to visualize
+      their performance data — including follower counts, video metrics, and audience engagement — in powerful dashboards.
+    </p>
 
-  <p>
-    <a href="https://bod-nixor.github.io/lookerstudio-tiktok-connector/privacy.html" target="_blank">Privacy Policy</a> |
-    <a href="https://bod-nixor.github.io/lookerstudio-tiktok-connector/tos.html" target="_blank">Terms of Service</a>
-  </p>
+    <h2>Why Use It?</h2>
+    <ul>
+      <li>View profile metrics like followers and likes over time</li>
+      <li>Analyze video performance (views, shares, comments)</li>
+      <li>Connect directly via TikTok's secure Login Kit (OAuth2)</li>
+    </ul>
+
+    <h2>How It Works</h2>
+    <ol>
+      <li>Authorize with TikTok via a secure login</li>
+      <li>Your data is pulled securely from TikTok APIs</li>
+      <li>Customize and build your own dashboards in Looker Studio</li>
+    </ol>
+
+    <p>
+      Learn more or contribute on GitHub: 
+      <a href="https://github.com/bod-nixor/lookerstudio-tiktok-connector" target="_blank">View the Project</a>
+    </p>
+
+    <hr>
+
+    <p>
+      <a href="https://bod-nixor.github.io/lookerstudio-tiktok-connector/privacy.html" target="_blank">Privacy Policy</a> |
+      <a href="https://bod-nixor.github.io/lookerstudio-tiktok-connector/tos.html" target="_blank">Terms of Service</a>
+    </p>
+  </main>
+
+  <footer>
+    &copy; 2025 Social Insights Studio. All rights reserved.
+  </footer>
 </body>
 </html>

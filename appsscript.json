@@ -2,14 +2,21 @@
   "timeZone": "America/Los_Angeles",
   "exceptionLogging": "STACKDRIVER",
   "runtimeVersion": "V8",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/script.locale",
+    "https://www.googleapis.com/auth/script.scriptapp",
+    "https://www.googleapis.com/auth/userinfo.email"
+  ],
   "dataStudio": {
-    "name": "TikTok Analytics Connector",
-    "logoUrl": "https://drive.google.com/file/d/1NVnQGaPVCkX6WJjyamxO8JrSNf3E5pF_/view?usp=drive_link",
+    "name": "Social Insights Studio",
+    "logoUrl": "https://raw.githubusercontent.com/bod-nixor/social-insights-studio/refs/heads/main/docs/logo.png",
     "company": "Board of Directors",
-    "companyUrl": "https://business.tiktok.com/",
-    "addonUrl": "https://github.com/bod-nixor/lookerstudio-tiktok-connector",
-    "supportUrl": "https://github.com/bod-nixor/lookerstudio-tiktok-connector",
-    "description": "Fetch TikTok campaign analytics data for Looker Studio.",
+    "companyUrl": "https://bod-nixor.github.io/social-insights-studio/",
+    "addonUrl": "https://github.com/bod-nixor/social-insights-studio",
+    "supportUrl": "https://github.com/bod-nixor/social-insights-studio",
+    "description": "Connects to the TikTok API to pull user profile metrics and individual video performance data. This allows you to analyze your TikTok presence directly in Looker Studio.",
+    "shortDescription": "Analyzes TikTok user and video performance.",
     "sources": [
       "TikTok Display API"
     ]

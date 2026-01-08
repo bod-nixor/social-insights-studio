@@ -59,7 +59,15 @@ function decryptValue(payload, key) {
 
     return data;
   } catch (error) {
-    console.error('decryptValue failed to decrypt payload');
+    console.error('decryptValue failed to decrypt payload:', {
+      error: error.message,
+      hasIv: Boolean(payload.iv),
+      hasTag: Boolean(payload.tag),
+      hasData: Boolean(payload.data),
+      ivLength: payload.iv ? String(payload.iv).length : 0,
+      tagLength: payload.tag ? String(payload.tag).length : 0,
+      dataLength: payload.data ? String(payload.data).length : 0
+    });
     return null;
   }
 }

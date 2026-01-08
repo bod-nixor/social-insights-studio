@@ -172,8 +172,13 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     const tokenPayload = tokenResult.data.data || tokenResult.data;
 
     if (!tokenResult.ok || tokenPayload.error) {
+      console.error('Token exchange failed', {
+        status: tokenResult.status,
+        error: tokenResult.error,
+        tokenPayload
+      });
       return res.status(400).send(
-        `<h1>Token Exchange Failed</h1><pre>${JSON.stringify(tokenPayload, null, 2)}</pre>`
+        '<h1>Token Exchange Failed</h1><p>Please retry authentication.</p>'
       );
     }
 

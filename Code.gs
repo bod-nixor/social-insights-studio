@@ -13,7 +13,7 @@ var cc = DataStudioApp.createCommunityConnector();
 // ------------------------ Constants & Configuration ------------------------
 
 // API Configuration
-const BACKEND_API_BASE_URL = scriptProps.getProperty('DEPLOYED_DOMAIN');;
+const BACKEND_API_BASE_URL = null;
 const MAX_VIDEOS_TO_FETCH = 200; // Safe default limit to prevent excessive API usage
 const MAX_API_RETRIES = 3;
 const API_RATE_LIMIT_DELAY_MS = 500;
@@ -276,7 +276,8 @@ function getFields() {
  */
 function getBackendBaseUrl() {
   const scriptProps = PropertiesService.getScriptProperties();
-  const configuredUrl = scriptProps.getProperty('BACKEND_API_BASE_URL');
+  const configuredUrl = scriptProps.getProperty('BACKEND_API_BASE_URL') ||
+    scriptProps.getProperty('DEPLOYED_DOMAIN');
   const baseUrl = configuredUrl || BACKEND_API_BASE_URL;
 
   if (!baseUrl || baseUrl === 'https://YOUR_DOMAIN_HERE') {
@@ -373,7 +374,7 @@ function getData(request) {
 
 /**
  * Fetches user info from TikTok API.
- * @param {string} connectorToken The connector token from the backend.0
+ * @param {string} connectorToken The connector token from the backend.
  * @return {object|null} The user data object or null on failure.
  */
 function fetchUserInfo(connectorToken) {
@@ -457,7 +458,7 @@ function fetchPaginatedVideos(openId, connectorToken, fields, maxVideos = MAX_VI
       queryParams.push(`cursor=${encodeURIComponent(cursor)}`);
     }
     const pagedUrl = `${videoListUrl}&${queryParams.join('&')}`;
-    const response = fetchWithRetry(pagedUrl, options);0
+    const response = fetchWithRetry(pagedUrl, options);
 
     if (response.getResponseCode() !== 200) {
       handleApiError(response.getResponseCode(), response.getContentText(), videoListUrl, `fetchPaginatedVideos (page ${requestCount})`);

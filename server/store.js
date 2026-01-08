@@ -45,16 +45,21 @@ function decryptValue(payload, key) {
     return null;
   }
 
-  const iv = Buffer.from(payload.iv, 'base64');
-  const tag = Buffer.from(payload.tag, 'base64');
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(tag);
-  const data = Buffer.concat([
-    decipher.update(Buffer.from(payload.data, 'base64')),
-    decipher.final()
-  ]).toString('utf8');
+  try {
+    const iv = Buffer.from(payload.iv, 'base64');
+    const tag = Buffer.from(payload.tag, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    const data = Buffer.concat([
+      decipher.update(Buffer.from(payload.data, 'base64')),
+      decipher.final()
+    ]).toString('utf8');
 
-  return data;
+    return data;
+  } catch (error) {
+    console.error('decryptValue failed to decrypt payload', { message: error.message });
+    return null;
+  }
 }
 
 function safeTokenLabel(token) {
@@ -73,7 +78,12 @@ async function writeFileAtomic(filePath, contents) {
   } finally {
     await handle.close();
   }
-  await fs.promises.rename(tempPath, filePath);
+  try {
+    await fs.promises.rename(tempPath, filePath);
+  } catch (error) {
+    await fs.promises.unlink(tempPath).catch(() => {});
+    throw error;
+  }
 }
 
 class FileTokenStore {
@@ -95,6 +105,10 @@ class FileTokenStore {
         if (error.code !== 'EEXIST') {
           throw error;
         }
+        const staleCleared = this.tryClearStaleLock();
+        if (staleCleared) {
+          continue;
+        }
         if (Date.now() - start > LOCK_TIMEOUT_MS) {
           throw new Error('Token store lock timeout.');
         }
@@ -115,6 +129,33 @@ class FileTokenStore {
       } catch (error) {
         // ignore
       }
+    }
+  }
+
+  tryClearStaleLock() {
+    try {
+      const pidText = fs.readFileSync(this.lockPath, 'utf8').trim();
+      const pid = Number.parseInt(pidText, 10);
+      if (!Number.isNaN(pid) && this.isProcessAlive(pid)) {
+        return false;
+      }
+    } catch (error) {
+      // ignore and attempt cleanup
+    }
+    try {
+      fs.unlinkSync(this.lockPath);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  isProcessAlive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === 'EPERM';
     }
   }
 

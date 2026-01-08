@@ -17,6 +17,20 @@ const TIKTOK_API_BASE_URL = 'https://open.tiktokapis.com/v2/';
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 const BACKEND_TOKEN_TTL_SECONDS = 60 * 60;
 
+function validateRequiredEnv() {
+  if (!process.env.ENCRYPTION_KEY) {
+    throw new Error('Missing ENCRYPTION_KEY environment variable.');
+  }
+  if (!BACKEND_JWT_SECRET) {
+    throw new Error('Missing BACKEND_JWT_SECRET environment variable.');
+  }
+  if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) {
+    throw new Error('Missing TikTok client credentials. Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET.');
+  }
+}
+
+validateRequiredEnv();
+
 const app = express();
 const tokenStore = new FileTokenStore({
   filePath: path.join(__dirname, 'data', 'tokens.json'),
@@ -209,7 +223,7 @@ function verifyBackendJwt(token) {
 function isAllowedRedirect(redirectUri) {
   try {
     const parsed = new URL(redirectUri);
-    return parsed.hostname === 'script.google.com';
+    return parsed.protocol === 'https:' && parsed.hostname === 'script.google.com';
   } catch (error) {
     return false;
   }

@@ -38,11 +38,15 @@ function getAuthType() {
  * @return {object} The configuration object.
  */
 function getConfig(request) {
-  Logger.log('getConfig called. Request: ' + JSON.stringify(redactSensitiveInfo(request)));
+  const service = getOAuthService();
+  if (!service.hasAccess()) {
+    return { errorCode: "OAUTH_LOGIN_REQUIRED", isAuthValid: false };
+  }
+
   var config = cc.getConfig();
   config.setIsSteppedConfig(false);
   return config.build();
-}
+}0
 
 /**
  * Creates the OAuth2 service for backend authorization.
@@ -58,7 +62,7 @@ function getOAuthService() {
     .setCallbackFunction('authCallback')
     .setPropertyStore(PropertiesService.getUserProperties())
     .setCache(CacheService.getUserCache())
-    .setScope('tiktok');
+    .setLock(LockService.getUserLock());
 }
 
 /**
@@ -66,9 +70,17 @@ function getOAuthService() {
  * @return {object} The authorization URL response.
  */
 function get3PAuthorizationUrls() {
+  const backendBaseUrl = getBackendBaseUrl();
   const service = getOAuthService();
+
+  Logger.log(backendBaseUrl + '/oauth/token');
+
   return {
-    authorizationUrl: service.getAuthorizationUrl()
+    type: 'OAUTH2',
+    authorizationUrl: service.getAuthorizationUrl(),
+    tokenUrl: backendBaseUrl + '/oauth/token',
+    clientId: 'looker-studio-connector',
+    clientSecret: 'unused'
   };
 }
 
@@ -78,12 +90,10 @@ function get3PAuthorizationUrls() {
  * @return {HtmlOutput} The HTML output for the callback.
  */
 function authCallback(request) {
-  const service = getOAuthService();
-  const authorized = service.handleCallback(request);
-  if (authorized) {
-    return HtmlService.createHtmlOutput('Success! You can close this tab.');
-  }
-  return HtmlService.createHtmlOutput('Authorization denied. Please try again.');
+  const authorized = getOAuthService().handleCallback(request);
+  return HtmlService.createHtmlOutput(
+    authorized ? 'Success! You can close this tab.' : 'Authorization denied.'
+  );
 }
 
 /**

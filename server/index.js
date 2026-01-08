@@ -8,7 +8,7 @@ const { InMemoryTokenStore } = require('./store');
 const app = express();
 const tokenStore = new InMemoryTokenStore();
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
 const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
@@ -24,6 +24,15 @@ const REQUIRED_SCOPES = [
 ].join(',');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
+
+app.use((req, res, next) => {
+  // Normalize repeated slashes (but keep query string)
+  if (req.url.startsWith('//')) {
+    const normalized = req.url.replace(/^\/+/, '/');
+    return res.redirect(308, normalized);
+  }
+  next();
+});
 
 app.use(express.static(PUBLIC_DIR));
 
@@ -188,6 +197,8 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     const connectorToken = generateRandomToken(32);
     const record = buildTokenRecord(tokenPayload);
     tokenStore.saveConnectorToken(connectorToken, record);
+    console.log('Saving connector token prefix=', connectorToken.slice(0, 6),
+            'totalTokens=', tokenStore.connectorStore.size);
 
     return res.send(`
       <!doctype html>
@@ -326,6 +337,16 @@ app.post('/api/connector/revoke', (req, res) => {
   const revoked = tokenStore.revokeConnectorToken(connectorToken);
   res.status(revoked ? 200 : 404).json({ revoked });
 });
+
+app.get('/debug/tokens', (req, res) => {
+  res.json({
+    connectorTokens: Array.from(tokenStore.connectorStore.keys()).map(t => ({
+      prefix: t.slice(0, 6),
+      length: t.length
+    }))
+  });
+});
+
 
 app.listen(PORT, () => {
   console.log(`Backend listening on ${BASE_URL}`);

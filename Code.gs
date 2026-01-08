@@ -296,7 +296,9 @@ function getBackendBaseUrl() {
  * @return {string|null} The connector token.
  */
 function getConnectorToken(request) {
-  return request && request.configParams ? request.configParams.connector_token : null;
+  const raw = request && request.configParams ? request.configParams.connector_token : null;
+  const token = raw ? String(raw).trim() : null;
+  return token || null;
 }
 
 // ------------------------ Data Fetching ------------------------

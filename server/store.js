@@ -73,7 +73,6 @@ async function writeFileAtomic(filePath, contents) {
   } finally {
     await handle.close();
   }
-  await fs.promises.chmod(tempPath, 0o600);
   await fs.promises.rename(tempPath, filePath);
 }
 
@@ -91,6 +90,7 @@ class FileTokenStore {
     while (!fd) {
       try {
         fd = fs.openSync(this.lockPath, 'wx', 0o600);
+        fs.writeSync(fd, `${process.pid}\n`);
       } catch (error) {
         if (error.code !== 'EEXIST') {
           throw error;
@@ -133,7 +133,6 @@ class FileTokenStore {
 
   async writeData(data) {
     await writeFileAtomic(this.filePath, JSON.stringify(data, null, 2));
-    await fs.promises.chmod(this.filePath, 0o600);
   }
 
   needsMigration(data) {

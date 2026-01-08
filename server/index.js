@@ -6,57 +6,6 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 const { FileTokenStore, StateStore } = require('./store');
 
-class AuthCodeStore {
-  constructor(ttlMs, cleanupIntervalMs) {
-    this.ttlMs = ttlMs;
-    this.store = new Map();
-    const interval = cleanupIntervalMs || Math.max(Math.floor(ttlMs / 2), 60 * 1000);
-    this.intervalId = setInterval(() => this.pruneExpiredEntries(), interval);
-  }
-
-  save(code, data) {
-    this.store.set(code, { ...data, createdAt: Date.now(), expiresAt: Date.now() + this.ttlMs });
-  }
-
-  consume(code) {
-    const entry = this.store.get(code);
-    if (!entry) {
-      return null;
-    }
-    this.store.delete(code);
-    if (entry.expiresAt <= Date.now()) {
-      return null;
-    }
-    return entry;
-  }
-
-  pruneExpiredEntries() {
-    const now = Date.now();
-    for (const [code, entry] of this.store.entries()) {
-      if (!entry || entry.expiresAt <= now) {
-        this.store.delete(code);
-      }
-    }
-  }
-
-  stop() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-  }
-}
-
-const app = express();
-const tokenStore = new FileTokenStore({
-  filePath: path.join(__dirname, 'data', 'tokens.json'),
-  lockPath: path.join(__dirname, 'data', 'tokens.json.lock'),
-  encryptionKey: process.env.ENCRYPTION_KEY,
-  pruneAfterDays: process.env.TOKEN_PRUNE_DAYS ? Number(process.env.TOKEN_PRUNE_DAYS) : undefined
-});
-const stateStore = new StateStore();
-const authCodeStore = new AuthCodeStore(AUTH_CODE_TTL_MS);
-
 const PORT = process.env.PORT || 3001;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -67,6 +16,16 @@ const TIKTOK_TOKEN_URL = 'https://open.tiktokapis.com/v2/oauth/token/';
 const TIKTOK_API_BASE_URL = 'https://open.tiktokapis.com/v2/';
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 const BACKEND_TOKEN_TTL_SECONDS = 60 * 60;
+
+const app = express();
+const tokenStore = new FileTokenStore({
+  filePath: path.join(__dirname, 'data', 'tokens.json'),
+  lockPath: path.join(__dirname, 'data', 'tokens.json.lock'),
+  encryptionKey: process.env.ENCRYPTION_KEY,
+  pruneAfterDays: process.env.TOKEN_PRUNE_DAYS ? Number(process.env.TOKEN_PRUNE_DAYS) : undefined
+});
+const stateStore = new StateStore();
+const authCodeStore = new StateStore(AUTH_CODE_TTL_MS);
 
 const REQUIRED_SCOPES = [
   'user.info.basic',
@@ -208,7 +167,7 @@ function getBearerTokenFromRequest(req) {
 
 function buildAuthorizationCode(subject, scopes) {
   const code = generateRandomToken(24);
-  authCodeStore.save(code, { subject, scopes });
+  authCodeStore.save(code, { subject, scopes, createdAt: Date.now() });
   return code;
 }
 

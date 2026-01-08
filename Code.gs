@@ -28,7 +28,7 @@ function getAuthType() {
   Logger.log('getAuthType called');
   return cc
     .newAuthTypeResponse()
-    .setAuthType(cc.AuthType.NONE)
+    .setAuthType(cc.AuthType.OAUTH2)
     .build();
 }
 
@@ -41,11 +41,65 @@ function getConfig(request) {
   Logger.log('getConfig called. Request: ' + JSON.stringify(redactSensitiveInfo(request)));
   var config = cc.getConfig();
   config.setIsSteppedConfig(false);
-  config.newTextInput()
-    .setId('connector_token')
-    .setName('Connector Token')
-    .setHelpText('Generate a connector token from your hosted /auth/tiktok/start page and paste it here.');
   return config.build();
+}
+
+/**
+ * Creates the OAuth2 service for backend authorization.
+ * @return {OAuth2} The OAuth2 service.
+ */
+function getOAuthService() {
+  const backendBaseUrl = getBackendBaseUrl();
+  return OAuth2.createService('tiktok_backend_oauth')
+    .setAuthorizationBaseUrl(backendBaseUrl + '/oauth/authorize')
+    .setTokenUrl(backendBaseUrl + '/oauth/token')
+    .setClientId('looker-studio-connector')
+    .setClientSecret('unused')
+    .setCallbackFunction('authCallback')
+    .setPropertyStore(PropertiesService.getUserProperties())
+    .setCache(CacheService.getUserCache())
+    .setScope('tiktok');
+}
+
+/**
+ * Returns the 3P authorization URL for Looker Studio.
+ * @return {object} The authorization URL response.
+ */
+function get3PAuthorizationUrls() {
+  const service = getOAuthService();
+  return {
+    authorizationUrl: service.getAuthorizationUrl()
+  };
+}
+
+/**
+ * OAuth2 callback handler.
+ * @param {object} request The request parameters.
+ * @return {HtmlOutput} The HTML output for the callback.
+ */
+function authCallback(request) {
+  const service = getOAuthService();
+  const authorized = service.handleCallback(request);
+  if (authorized) {
+    return HtmlService.createHtmlOutput('Success! You can close this tab.');
+  }
+  return HtmlService.createHtmlOutput('Authorization denied. Please try again.');
+}
+
+/**
+ * Resets the OAuth2 service.
+ */
+function resetAuth() {
+  const service = getOAuthService();
+  service.reset();
+}
+
+/**
+ * Checks if the OAuth2 service is authorized.
+ * @return {boolean} True if authorized.
+ */
+function isAuthValid() {
+  return getOAuthService().hasAccess();
 }
 
 /**
@@ -295,10 +349,17 @@ function getBackendBaseUrl() {
  * @param {object} request The request parameters.
  * @return {string|null} The connector token.
  */
-function getConnectorToken(request) {
-  const raw = request && request.configParams ? request.configParams.connector_token : null;
-  const token = raw ? String(raw).trim() : null;
-  return token || null;
+function getBackendAccessToken() {
+  const service = getOAuthService();
+  if (!service.hasAccess()) {
+    const authUrl = service.getAuthorizationUrl();
+    cc.newUserError()
+      .setDebugText('Missing OAuth access token')
+      .setText('Please authorize the connector to access TikTok data.')
+      .setHelpUrl(authUrl)
+      .throwException();
+  }
+  return service.getAccessToken();
 }
 
 // ------------------------ Data Fetching ------------------------
@@ -320,19 +381,13 @@ function getData(request) {
     request.fields.map(f => f.name).join(', '));
 
   try {
-    const connectorToken = getConnectorToken(request);
-    if (!connectorToken) {
-      cc.newUserError()
-        .setDebugText('Missing connector token')
-        .setText('A connector token is required. Please generate one and add it to the connector configuration.')
-        .throwException();
-    }
+    const backendAccessToken = getBackendAccessToken();
 
     const requestedFields = getFields().forIds(request.fields.map(f => f.name));
     const dataRows = [];
 
     // Fetch User Info
-    const userData = fetchUserInfo(connectorToken);
+    const userData = fetchUserInfo(backendAccessToken);
     if (!userData || !userData.open_id) {
       throw new Error('Failed to fetch user data or obtain open_id');
     }
@@ -347,7 +402,7 @@ function getData(request) {
 
     let videosData = [];
     try {
-      videosData = fetchPaginatedVideos(userData.open_id, connectorToken, videoApiFields);
+      videosData = fetchPaginatedVideos(userData.open_id, backendAccessToken, videoApiFields);
       Logger.log(`Retrieved ${videosData.length} videos`);
     } catch (e) {
       Logger.log("Error fetching video data: " + e.message);
@@ -382,7 +437,7 @@ function getData(request) {
  * @param {string} connectorToken The connector token from the backend.
  * @return {object|null} The user data object or null on failure.
  */
-function fetchUserInfo(connectorToken) {
+function fetchUserInfo(accessToken) {
   const userApiFields = [
     'open_id', 'union_id', 'username', 'display_name',
     'bio_description', 'profile_deep_link', 'avatar_url',
@@ -395,7 +450,7 @@ function fetchUserInfo(connectorToken) {
   const options = {
     method: 'GET',
     headers: { 
-      'Authorization': 'Bearer ' + connectorToken,
+      'Authorization': 'Bearer ' + accessToken,
       'Content-Type': 'application/json'
     },
     muteHttpExceptions: true,
@@ -430,7 +485,7 @@ function fetchUserInfo(connectorToken) {
  * @param {number} maxVideos Maximum number of videos to fetch.
  * @return {object[]} An array of video data objects.
  */
-function fetchPaginatedVideos(openId, connectorToken, fields, maxVideos = MAX_VIDEOS_TO_FETCH) {
+function fetchPaginatedVideos(openId, accessToken, fields, maxVideos = MAX_VIDEOS_TO_FETCH) {
   const allVideos = [];
   let cursor = null;
   let hasMore = true;
@@ -450,7 +505,7 @@ function fetchPaginatedVideos(openId, connectorToken, fields, maxVideos = MAX_VI
     const options = {
       method: 'GET',
       headers: {
-        'Authorization': 'Bearer ' + connectorToken,
+        'Authorization': 'Bearer ' + accessToken,
         'Content-Type': 'application/json'
       },
       muteHttpExceptions: true,

@@ -21,7 +21,15 @@
       "TikTok Display API"
     ]
   },
-  "dependencies": {},
+  "dependencies": {
+    "libraries": [
+      {
+        "userSymbol": "OAuth2",
+        "libraryId": "1B7FSrg4E5WqmNcpecVPODk6Oztd_PlrxXh8HTMrdhr6Cw6yazg4m8PTK",
+        "version": "43"
+      }
+    ]
+  },
   "webapp": {
     "executeAs": "USER_DEPLOYING",
     "access": "ANYONE_ANONYMOUS"

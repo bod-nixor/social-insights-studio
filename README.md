@@ -2,13 +2,14 @@
 
 ![Version](https://img.shields.io/badge/Version-9.0.0-blue.svg)
 
-This is a Google Apps Script-based Community Connector designed to pull user profile information and a list of their videos, complete with metrics, from the TikTok Open Platform API. It makes this data available in Google Looker Studio (formerly Google Data Studio).
+This is a Google Apps Script-based Community Connector designed to pull user profile information and a list of their videos, complete with metrics, from the TikTok Open Platform API. It makes this data available in Google Looker Studio (formerly Google Data Studio) and uses a backend OAuth provider to handle TikTok authentication securely.
 
 The connector is built to be production-ready, featuring enhanced security and reliability. It leverages a secure OAuth2 flow for authentication and handles the complexities of API interaction, including pagination, error handling, and token management, allowing you to create insightful dashboards and reports from your TikTok account data.
 
 ## Features
 
-* **Secure Authentication**: Implements the standard OAuth2 protocol to securely connect to your TikTok account, ensuring your credentials are not stored directly in the script.
+* **Secure Authentication**: Uses a backend OAuth provider to connect to your TikTok account, ensuring credentials are never stored in Apps Script.
+* **Encrypted Token Storage**: Persists TikTok tokens to disk using AES-256-GCM encryption with atomic writes and pruning.
 * **Automatic Token Refresh**: Automatically handles the refreshing of access tokens to maintain continuous data access.
 * **Comprehensive User Data**: Fetches a wide range of user profile details, including username, bio, avatar URLs, verification status, and key metrics like follower, following, and total like counts.
 * **Detailed Video Data**: Retrieves in-depth information and performance metrics for an account's videos, including descriptions, URLs, duration, and counts for likes, comments, shares, and views.
@@ -83,9 +84,21 @@ Follow these steps carefully to set up and deploy your connector.
    * `user.info.profile`
    * `video.list`
 5. Go to the **App credentials** section and note down your **Client key** and **Client secret**.
-6. You must configure the **Redirect URI**. You will get the exact URL for this in Step 4. For now, you can use a placeholder.
+6. You must configure the **Redirect URI**. This will be your backend callback URL (configured in Step 2).
 
-### Step 2: Create a Google Apps Script Project
+### Step 2: Configure the Backend Service
+
+1. Set the backend environment variables:
+   * `BASE_URL`: The base URL of your backend (e.g., `https://lstc.nixorcorporate.com`).
+   * `TIKTOK_CLIENT_KEY`: TikTok Client Key from Step 1.
+   * `TIKTOK_CLIENT_SECRET`: TikTok Client Secret from Step 1.
+   * `ENCRYPTION_KEY`: 32-byte key (base64 or hex) for AES-256-GCM encryption.
+   * `BACKEND_JWT_SECRET`: Secret used to sign backend JWTs for Looker Studio.
+2. Start the backend from `server/` using `npm start`.
+3. Update the TikTok **Redirect URI** to: `https://<your-domain>/auth/tiktok/callback`.
+4. TikTok tokens are stored at `server/data/tokens.json` (encrypted at rest). Keep this file private.
+
+### Step 3: Create a Google Apps Script Project
 
 1. Go to [Google Apps Script](https://script.google.com/home).
 2. Click `New project` and give it a name (e.g., `Social Insights Studio Connector`).
@@ -95,16 +108,15 @@ Follow these steps carefully to set up and deploy your connector.
    * In the "Script ID" field, paste: `1B7FSrg4E5WqmNcpecVPODk6Oztd_PlrxXh8HTMrdhr6Cw6yazg4m8PTK`
    * Click **Look up**. Select the latest version, ensure the "Identifier" is `OAuth2`, and click **Add**.
 
-### Step 3: Configure Script Properties
+### Step 4: Configure Script Properties
 
 1. In your Apps Script project, go to **Project settings** (gear icon).
 2. Scroll down to **Script properties** and click `Add script property`.
-3. Add two properties:
-   * `TIKTOK_CLIENT_ID`: Paste your **Client Key** from Step 1.
-   * `TIKTOK_CLIENT_SECRET`: Paste your **Client Secret** from Step 1.
+3. Add one property:
+   * `BACKEND_API_BASE_URL`: Your backend base URL (e.g., `https://lstc.nixorcorporate.com`).
 4. Click `Save script properties`.
 
-### Step 4: Deploy the Apps Script
+### Step 5: Deploy the Apps Script
 
 1. In the Apps Script editor, click `Deploy > New deployment`.
 2. From the "Select type" dropdown, choose `Web app`.
@@ -112,27 +124,37 @@ Follow these steps carefully to set up and deploy your connector.
    * **Execute as:** `Me` (your Google account).
    * **Who has access:** `Anyone`.
 4. Click `Deploy`. Authorize the script if prompted.
-5. After deployment, **copy the Web app URL**.
-6. **Update TikTok Redirect URI**: Go back to your TikTok Developer Console and paste the copied Web app URL into the **Redirect URI** field. The URL must be an exact match.
+5. After deployment, **copy the Web app URL** (used by Looker Studio).
 
-### Step 5: Use in Looker Studio
+### Step 6: Use in Looker Studio
 
 1. Go to [Google Looker Studio](https://lookerstudio.google.com/) and open a data source or report.
 2. In the connector gallery, search for and select the **"Build Your Own"** connector (sometimes called "Deploy from ID").
 3. Go back to your Apps Script project, click `Deploy > Manage deployments`, and copy the **Deployment ID**.
 4. Paste the Deployment ID into Looker Studio and click `Validate`.
 5. Your connector should appear. Select it.
-6. Click `Authorize` and follow the pop-up prompts to sign in to your TikTok account and grant the necessary permissions.
+6. Click `Authorize` and follow the prompts to sign in via your backend and grant TikTok permissions.
 7. Once authorized, click `Connect` to add the data source to your report.
 
 ## Configuration
+
+### Apps Script Properties
 
 The following properties must be set in your Apps Script project's `Project settings > Script properties`.
 
 | Property Name | Description |
 | :--- | :--- |
-| `TIKTOK_CLIENT_ID` | Your TikTok Developer App's **Client Key**. |
-| `TIKTOK_CLIENT_SECRET`| Your TikTok Developer App's **Client Secret**. |
+| `BACKEND_API_BASE_URL` | The base URL of your backend service. |
+
+### Backend Environment Variables
+
+| Property Name | Description |
+| :--- | :--- |
+| `BASE_URL` | Backend base URL (e.g., `https://lstc.nixorcorporate.com`). |
+| `TIKTOK_CLIENT_KEY` | TikTok Developer App's **Client Key**. |
+| `TIKTOK_CLIENT_SECRET`| TikTok Developer App's **Client Secret**. |
+| `ENCRYPTION_KEY` | 32-byte key (base64 or hex) for encrypting TikTok tokens. |
+| `BACKEND_JWT_SECRET` | Secret used to sign backend JWTs for Looker Studio. |
 
 ## API Scopes Used
 
@@ -146,7 +168,7 @@ This connector requests the following scopes from the TikTok API. Ensure they ar
 
 If you encounter issues, especially during authentication or data fetching:
 
-* **Redirect URI Mismatch**: This is the most common setup problem. The error often appears after authorizing in TikTok. Ensure the **Web app URL** from your Apps Script deployment is copied exactly into the **Redirect URI** field in your TikTok Developer App settings.
+* **Redirect URI Mismatch**: This is the most common setup problem. The error often appears after authorizing in TikTok. Ensure the backend callback URL (`/auth/tiktok/callback`) is copied exactly into the **Redirect URI** field in your TikTok Developer App settings.
 * **Authorization Errors (`access_denied`)**: This error in the callback URL means you did not grant all the requested permissions in the TikTok pop-up window. You must approve all requested scopes.
 * **API Errors (`invalid_token`, `permission_denied`, etc.)**: The connector will display specific error messages from TikTok.
   * `permission_denied` or `insufficient_scope`: Your TikTok App does not have the correct scopes enabled and approved.

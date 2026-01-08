@@ -517,6 +517,7 @@ app.listen(PORT, () => {
 });
 
 function shutdown() {
+  console.log('Shutting down gracefully...');
   authCodeStore.stop();
   if (typeof stateStore.stop === 'function') {
     stateStore.stop();

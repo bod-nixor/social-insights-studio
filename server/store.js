@@ -16,8 +16,10 @@ function parseEncryptionKey(rawKey) {
   let keyBuffer = null;
   if (/^[0-9a-fA-F]{64}$/.test(rawKey)) {
     keyBuffer = Buffer.from(rawKey, 'hex');
-  } else {
+  } else if (/^[A-Za-z0-9+/]{43}=?$/.test(rawKey) || /^[A-Za-z0-9+/]{42}==$/.test(rawKey)) {
     keyBuffer = Buffer.from(rawKey, 'base64');
+  } else {
+    throw new Error('ENCRYPTION_KEY must be 64 hex characters or valid base64.');
   }
 
   if (keyBuffer.length !== 32) {
@@ -100,8 +102,20 @@ class FileTokenStore {
     while (!fd) {
       try {
         fd = fs.openSync(this.lockPath, 'wx', 0o600);
-        fs.writeSync(fd, `${process.pid}\n`);
-        fs.fsyncSync(fd);
+        try {
+          fs.writeSync(fd, `${process.pid}\n`);
+          fs.fsyncSync(fd);
+        } catch (error) {
+          if (fd) {
+            try {
+              fs.closeSync(fd);
+            } catch (closeError) {
+              // ignore
+            }
+            fd = null;
+          }
+          throw error;
+        }
       } catch (error) {
         if (error.code !== 'EEXIST') {
           throw error;

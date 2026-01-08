@@ -70,15 +70,11 @@ function getOAuthService() {
  * @return {object} The authorization URL response.
  */
 function get3PAuthorizationUrls() {
-  const backendBaseUrl = getBackendBaseUrl();
   const service = getOAuthService();
+  var authUrl = service.getAuthorizationUrl();
 
   return {
-    type: 'OAUTH2',
-    authorizationUrl: service.getAuthorizationUrl(),
-    tokenUrl: backendBaseUrl + '/oauth/token',
-    clientId: 'looker-studio-connector',
-    clientSecret: 'unused'
+    authorizationUrl: authUrl
   };
 }
 

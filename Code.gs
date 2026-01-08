@@ -73,8 +73,6 @@ function get3PAuthorizationUrls() {
   const backendBaseUrl = getBackendBaseUrl();
   const service = getOAuthService();
 
-  Logger.log(backendBaseUrl + '/oauth/token');
-
   return {
     type: 'OAUTH2',
     authorizationUrl: service.getAuthorizationUrl(),

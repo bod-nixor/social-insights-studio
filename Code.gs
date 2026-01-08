@@ -3,8 +3,8 @@
  * Version: 9.0.0 (Production-ready with enhanced security)
  * 
  * Description: This connector retrieves user and video information from the TikTok API
- * and makes it available in Looker Studio. It handles OAuth2 authentication,
- * data fetching, and schema definition with improved security and reliability.
+ * and makes it available in Looker Studio. It uses a backend service for TikTok
+ * authentication, data fetching, and schema definition with improved security and reliability.
  */
 
 // Global connector instance
@@ -13,27 +13,10 @@ var cc = DataStudioApp.createCommunityConnector();
 // ------------------------ Constants & Configuration ------------------------
 
 // API Configuration
-const TIKTOK_API_BASE_URL = 'https://open.tiktokapis.com/v2/';
-const TIKTOK_AUTH_URL = 'https://www.tiktok.com/v2/auth/authorize/';
-const TIKTOK_TOKEN_URL = 'https://open.tiktokapis.com/v2/oauth/token/';
+const BACKEND_API_BASE_URL = scriptProps.getProperty('DEPLOYED_DOMAIN');;
 const MAX_VIDEOS_TO_FETCH = 200; // Safe default limit to prevent excessive API usage
 const MAX_API_RETRIES = 3;
 const API_RATE_LIMIT_DELAY_MS = 500;
-
-// Token management constants
-const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000; // 5 minutes buffer for token expiry
-const TOKEN_PROPERTIES = {
-  ACCESS_TOKEN: 'TIKTOK_ACCESS_TOKEN',
-  REFRESH_TOKEN: 'TIKTOK_REFRESH_TOKEN',
-  EXPIRY_TIME: 'TIKTOK_TOKEN_EXPIRY'
-};
-
-// OAuth Scopes required by the connector
-const REQUIRED_SCOPES = [
-  'user.info.stats',
-  'user.info.profile',
-  'video.list'
-].join(',');
 
 // ------------------------ Connector Configuration ------------------------
 
@@ -45,7 +28,7 @@ function getAuthType() {
   Logger.log('getAuthType called');
   return cc
     .newAuthTypeResponse()
-    .setAuthType(cc.AuthType.OAUTH2)
+    .setAuthType(cc.AuthType.NONE)
     .build();
 }
 
@@ -58,6 +41,10 @@ function getConfig(request) {
   Logger.log('getConfig called. Request: ' + JSON.stringify(redactSensitiveInfo(request)));
   var config = cc.getConfig();
   config.setIsSteppedConfig(false);
+  config.newTextInput()
+    .setId('connector_token')
+    .setName('Connector Token')
+    .setHelpText('Generate a connector token from your hosted /auth/tiktok/start page and paste it here.');
   return config.build();
 }
 
@@ -283,6 +270,31 @@ function getFields() {
   return fields;
 }
 
+/**
+ * Retrieves the backend base URL for API calls.
+ * @return {string} The backend base URL.
+ */
+function getBackendBaseUrl() {
+  const scriptProps = PropertiesService.getScriptProperties();
+  const configuredUrl = scriptProps.getProperty('BACKEND_API_BASE_URL');
+  const baseUrl = configuredUrl || BACKEND_API_BASE_URL;
+
+  if (!baseUrl || baseUrl === 'https://YOUR_DOMAIN_HERE') {
+    throw new Error('Backend API base URL is not configured.');
+  }
+
+  return baseUrl.replace(/\\/$/, '');
+}
+
+/**
+ * Extracts the connector token from the request config.
+ * @param {object} request The request parameters.
+ * @return {string|null} The connector token.
+ */
+function getConnectorToken(request) {
+  return request && request.configParams ? request.configParams.connector_token : null;
+}
+
 // ------------------------ Data Fetching ------------------------
 
 /**
@@ -302,11 +314,11 @@ function getData(request) {
     request.fields.map(f => f.name).join(', '));
 
   try {
-    const accessToken = getAccessToken();
-    if (!accessToken) {
+    const connectorToken = getConnectorToken(request);
+    if (!connectorToken) {
       cc.newUserError()
-        .setDebugText('No valid access token available')
-        .setText('Authentication is required. Please re-authenticate the connector.')
+        .setDebugText('Missing connector token')
+        .setText('A connector token is required. Please generate one and add it to the connector configuration.')
         .throwException();
     }
 
@@ -314,7 +326,7 @@ function getData(request) {
     const dataRows = [];
 
     // Fetch User Info
-    const userData = fetchUserInfo(accessToken);
+    const userData = fetchUserInfo(connectorToken);
     if (!userData || !userData.open_id) {
       throw new Error('Failed to fetch user data or obtain open_id');
     }
@@ -329,7 +341,7 @@ function getData(request) {
 
     let videosData = [];
     try {
-      videosData = fetchPaginatedVideos(userData.open_id, accessToken, videoApiFields);
+      videosData = fetchPaginatedVideos(userData.open_id, connectorToken, videoApiFields);
       Logger.log(`Retrieved ${videosData.length} videos`);
     } catch (e) {
       Logger.log("Error fetching video data: " + e.message);
@@ -361,10 +373,10 @@ function getData(request) {
 
 /**
  * Fetches user info from TikTok API.
- * @param {string} accessToken The OAuth2 access token.
+ * @param {string} connectorToken The connector token from the backend.0
  * @return {object|null} The user data object or null on failure.
  */
-function fetchUserInfo(accessToken) {
+function fetchUserInfo(connectorToken) {
   const userApiFields = [
     'open_id', 'union_id', 'username', 'display_name',
     'bio_description', 'profile_deep_link', 'avatar_url',
@@ -373,18 +385,19 @@ function fetchUserInfo(accessToken) {
     'video_count'
   ];
 
+  const backendBaseUrl = getBackendBaseUrl();
   const options = {
     method: 'GET',
     headers: { 
-      'Authorization': 'Bearer ' + accessToken,
+      'Authorization': 'Bearer ' + connectorToken,
       'Content-Type': 'application/json'
     },
     muteHttpExceptions: true,
     validateHttpsCertificates: true // Ensure SSL certificate validation
   };
 
-  const url = `${TIKTOK_API_BASE_URL}user/info/?fields=${encodeURIComponent(userApiFields.join(','))}`;
-  Logger.log('Fetching user info from: ' + url);
+  const url = `${backendBaseUrl}/api/tiktok/user?fields=${encodeURIComponent(userApiFields.join(','))}`;
+  Logger.log('Fetching user info from backend: ' + url);
   const response = fetchWithRetry(url, options);
 
   if (response.getResponseCode() !== 200) {
@@ -406,12 +419,12 @@ function fetchUserInfo(accessToken) {
 /**
  * Fetches videos with pagination handling.
  * @param {string} openId The user's open_id.
- * @param {string} accessToken The OAuth2 access token.
+ * @param {string} connectorToken The connector token from the backend.
  * @param {string[]} fields The list of video fields to request.
  * @param {number} maxVideos Maximum number of videos to fetch.
  * @return {object[]} An array of video data objects.
  */
-function fetchPaginatedVideos(openId, accessToken, fields, maxVideos = MAX_VIDEOS_TO_FETCH) {
+function fetchPaginatedVideos(openId, connectorToken, fields, maxVideos = MAX_VIDEOS_TO_FETCH) {
   const allVideos = [];
   let cursor = null;
   let hasMore = true;
@@ -419,7 +432,8 @@ function fetchPaginatedVideos(openId, accessToken, fields, maxVideos = MAX_VIDEO
   const maxRequests = 10; // Prevent infinite loops
 
   const fieldQuery = encodeURIComponent(fields.join(','));
-  const videoListUrl = `${TIKTOK_API_BASE_URL}video/list/?fields=${fieldQuery}`;
+  const backendBaseUrl = getBackendBaseUrl();
+  const videoListUrl = `${backendBaseUrl}/api/tiktok/videos?fields=${fieldQuery}`;
 
   Logger.log(`Fetching paginated videos. URL base: ${videoListUrl}, Max videos: ${maxVideos}`);
 
@@ -427,25 +441,23 @@ function fetchPaginatedVideos(openId, accessToken, fields, maxVideos = MAX_VIDEO
     requestCount++;
     Logger.log(`Fetching video page ${requestCount}. Current videos: ${allVideos.length}`);
 
-    const payload = {
-      max_count: 20 // Max allowed by TikTok API
-    };
-    if (cursor) {
-      payload.cursor = cursor;
-    }
-
     const options = {
-      method: 'POST',
+      method: 'GET',
       headers: {
-        'Authorization': 'Bearer ' + accessToken,
+        'Authorization': 'Bearer ' + connectorToken,
         'Content-Type': 'application/json'
       },
-      payload: JSON.stringify(payload),
       muteHttpExceptions: true,
       validateHttpsCertificates: true
     };
 
-    const response = fetchWithRetry(videoListUrl, options);
+    const queryParams = [];
+    queryParams.push(`max_count=20`);
+    if (cursor) {
+      queryParams.push(`cursor=${encodeURIComponent(cursor)}`);
+    }
+    const pagedUrl = `${videoListUrl}&${queryParams.join('&')}`;
+    const response = fetchWithRetry(pagedUrl, options);0
 
     if (response.getResponseCode() !== 200) {
       handleApiError(response.getResponseCode(), response.getContentText(), videoListUrl, `fetchPaginatedVideos (page ${requestCount})`);
@@ -649,254 +661,6 @@ function handleTikTokApiError(error, context) {
     .setDebugText(`TikTok API Error (${context}): ${error.code} - ${error.message}`)
     .setText(userMessage)
     .throwException();
-}
-
-// ------------------------ OAuth2 Handling ------------------------
-
-/**
- * Handles GET requests for OAuth callback.
- * @param {object} e The event parameter for a GET request.
- * @return {HtmlOutput} The HTML response.
- */
-function doGet(e) {
-  Logger.log("doGet called with params: " + JSON.stringify(redactSensitiveInfo(e.parameter)));
-  
-  const params = e.parameter;
-  if (params.code || params.error) {
-    Logger.log("Processing OAuth2 callback.");
-    const service = getOAuthService();
-
-    if (params.error) {
-      const errorDescription = params.error_description || 'No description provided.';
-      let friendlyMessage = `Authorization failed: ${params.error}. ${errorDescription}`;
-      if (params.error === 'access_denied') {
-        friendlyMessage = 'Access was denied. Please grant the requested permissions.';
-      }
-      return HtmlService.createHtmlOutput(
-        `<h1>Authorization Error</h1><p>${friendlyMessage}</p><p>Please try again from Looker Studio.</p>`
-      );
-    }
-
-    try {
-      const authorized = service.handleCallback(e);
-      if (authorized) {
-        // Store tokens explicitly
-        const userProps = PropertiesService.getUserProperties();
-        const accessToken = service.getAccessToken();
-        userProps.setProperty(TOKEN_PROPERTIES.ACCESS_TOKEN, accessToken);
-
-        const tokenData = service.getToken();
-        if (tokenData) {
-          if (tokenData.refresh_token) {
-            userProps.setProperty(TOKEN_PROPERTIES.REFRESH_TOKEN, tokenData.refresh_token);
-          }
-          if (tokenData.expires_in) {
-            const expiryTime = Date.now() + (parseInt(tokenData.expires_in, 10) * 1000);
-            userProps.setProperty(TOKEN_PROPERTIES.EXPIRY_TIME, expiryTime.toString());
-          }
-        }
-        
-        return HtmlService.createHtmlOutput(
-          '<h1>Success!</h1><p>TikTok authentication complete. Close this tab and return to Looker Studio.</p>' +
-          '<script>setTimeout(function(){ window.close(); }, 2000);</script>'
-        );
-      } else {
-        return HtmlService.createHtmlOutput(
-          '<h1>Authorization Denied</h1><p>The authorization was not successful. Please try again.</p>'
-        );
-      }
-    } catch (err) {
-      logError('Exception in OAuth2 callback', err);
-      return HtmlService.createHtmlOutput(
-        `<h1>Authentication Error</h1><p>An error occurred: ${err.message}</p><p>Please try again.</p>`
-      );
-    }
-  }
-
-  // Default view if not a callback
-  return HtmlService.createHtmlOutput(
-    '<h1>TikTok Looker Studio Connector</h1><p>Please initiate authentication from Looker Studio.</p>'
-  );
-}
-
-/**
- * Configures the OAuth2 service for TikTok.
- * @return {Service} The configured OAuth2 service.
- */
-function getOAuthService() {
-  Logger.log('Initializing OAuth2 service.');
-  const scriptProps = PropertiesService.getScriptProperties();
-  const clientId = scriptProps.getProperty('TIKTOK_CLIENT_ID');
-  const clientSecret = scriptProps.getProperty('TIKTOK_CLIENT_SECRET');
-
-  if (!clientId || !clientSecret) {
-    const errorMessage = 'Client ID or Secret not set in Script Properties.';
-    Logger.log(errorMessage);
-    throw new Error(errorMessage);
-  }
-
-  // Use the service URL as redirect URI
-  const redirectUri = "https://script.google.com/macros/s/AKfycbyCcIeaqb2K8X_WeEJexpmgSOOg0bCEqm8ZsssnrmDIKkbcNINlvqagHjjLm63AugH_/exec"
-
-  return OAuth2.createService('TikTok')
-    .setAuthorizationBaseUrl(TIKTOK_AUTH_URL)
-    .setTokenUrl(TIKTOK_TOKEN_URL)
-    .setClientId(clientId)
-    .setParam('client_key', clientId) // TikTok expects this
-    .setClientSecret(clientSecret)
-    .setCallbackFunction('doGet')
-    .setPropertyStore(PropertiesService.getUserProperties())
-    .setScope(REQUIRED_SCOPES)
-    .setRedirectUri(redirectUri)
-    .setTokenPayloadHandler(function(payload) {
-      // Transform the payload to TikTok's requirements
-      const tiktokPayload = {
-        client_key: clientId,  // Use client_key instead of client_id
-        client_secret: clientSecret,
-        grant_type: payload.grant_type
-      };
-
-      if (payload.grant_type === 'authorization_code') {
-        tiktokPayload.code = payload.code;
-        tiktokPayload.redirect_uri = payload.redirect_uri;
-      } else if (payload.grant_type === 'refresh_token') {
-        tiktokPayload.refresh_token = payload.refresh_token || 
-          PropertiesService.getUserProperties().getProperty(TOKEN_PROPERTIES.REFRESH_TOKEN);
-      }
-      return tiktokPayload;
-    })
-    .setLock(LockService.getUserLock());
-}
-
-/**
- * Checks if the user has valid authentication.
- * @return {boolean} True if authenticated, false otherwise.
- */
-function isAuthValid() {
-  Logger.log('Checking authentication status.');
-  try {
-    const service = getOAuthService();
-    const hasAccess = service.hasAccess();
-    Logger.log('OAuth2 service.hasAccess() result: ' + hasAccess);
-
-    if (hasAccess) {
-      const explicitToken = PropertiesService.getUserProperties().getProperty(TOKEN_PROPERTIES.ACCESS_TOKEN);
-      if (!explicitToken || isAccessTokenExpired()) {
-        Logger.log('Checking token via getAccessToken.');
-        return !!getAccessToken();
-      }
-    }
-    return hasAccess;
-  } catch (e) {
-    logError('Error checking auth status', e);
-    return false;
-  }
-}
-
-/**
- * Resets the OAuth2 authorization.
- */
-function resetAuth() {
-  Logger.log('Resetting authentication.');
-  try {
-    const service = getOAuthService();
-    service.reset();
-
-    const userProps = PropertiesService.getUserProperties();
-    Object.values(TOKEN_PROPERTIES).forEach(key => {
-      userProps.deleteProperty(key);
-    });
-  } catch (e) {
-    logError('Error during resetAuth', e);
-  }
-}
-
-/**
- * Generates the authorization URL.
- * @return {string} The authorization URL.
- */
-function get3PAuthorizationUrls() {
-  Logger.log('Generating authorization URL.');
-  try {
-    const service = getOAuthService();
-    return service.getAuthorizationUrl();
-  } catch (e) {
-    logError('Error generating authorization URL', e);
-    cc.newUserError()
-      .setDebugText('Error generating authorization URL: ' + e.message)
-      .setText('Could not initiate authentication with TikTok.')
-      .throwException();
-  }
-}
-
-// ------------------------ Token Management ------------------------
-
-/**
- * Retrieves a valid access token, refreshing if necessary.
- * @return {string|null} The access token or null if unavailable.
- */
-function getAccessToken() {
-  Logger.log('Retrieving access token.');
-  const userProps = PropertiesService.getUserProperties();
-  let accessToken = userProps.getProperty(TOKEN_PROPERTIES.ACCESS_TOKEN);
-
-  if (accessToken && !isAccessTokenExpired()) {
-    Logger.log('Using valid existing token.');
-    return accessToken;
-  }
-
-  Logger.log('Token needs refresh.');
-  try {
-    const service = getOAuthService();
-    if (service.hasAccess()) {
-      accessToken = service.getAccessToken();
-      userProps.setProperty(TOKEN_PROPERTIES.ACCESS_TOKEN, accessToken);
-
-      const tokenData = service.getToken();
-      if (tokenData) {
-        if (tokenData.refresh_token) {
-          userProps.setProperty(TOKEN_PROPERTIES.REFRESH_TOKEN, tokenData.refresh_token);
-        }
-        if (tokenData.expires_in) {
-          const expiryTime = Date.now() + (parseInt(tokenData.expires_in, 10) * 1000);
-          userProps.setProperty(TOKEN_PROPERTIES.EXPIRY_TIME, expiryTime.toString());
-        }
-      }
-      return accessToken;
-    } else {
-      Logger.log('service.hasAccess() returned false.');
-      resetAuth();
-      return null;
-    }
-  } catch (e) {
-    logError('Error getting access token', e);
-    resetAuth();
-    return null;
-  }
-}
-
-/**
- * Checks if the access token is expired.
- * @return {boolean} True if expired, false otherwise.
- */
-function isAccessTokenExpired() {
-  const expiryTimeStr = PropertiesService.getUserProperties().getProperty(TOKEN_PROPERTIES.EXPIRY_TIME);
-  if (!expiryTimeStr) {
-    Logger.log('No expiry time found. Assuming expired.');
-    return true;
-  }
-
-  const expiryTime = parseInt(expiryTimeStr, 10);
-  if (isNaN(expiryTime)) {
-    Logger.log('Invalid expiry time. Assuming expired.');
-    return true;
-  }
-
-  const currentTime = Date.now();
-  const isExpired = currentTime >= (expiryTime - TOKEN_EXPIRY_BUFFER_MS);
-
-  Logger.log(`Token expiry check: Current=${new Date(currentTime)}, Expiry=${new Date(expiryTime)}, IsExpired=${isExpired}`);
-  return isExpired;
 }
 
 // ------------------------ Admin Functions ------------------------

@@ -1,0 +1,15 @@
+{
+  "name": "social-insights-studio-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend service for TikTok OAuth and API proxying for Social Insights Studio.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.6.11"
+  }
+}

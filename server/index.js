@@ -173,8 +173,9 @@ app.get('/auth/tiktok/callback', async (req, res) => {
 
     if (!tokenResult.ok || tokenPayload.error) {
       const safeLog = {
-        status: tokenResult.status,
-        error: tokenResult.error,
+        ok: tokenResult.ok,
+        tokenResultError: tokenResult.data && tokenResult.data.error,
+        tokenResultErrorDescription: tokenResult.data && tokenResult.data.error_description,
         tokenPayloadError: tokenPayload && tokenPayload.error,
         tokenPayloadErrorDescription: tokenPayload && tokenPayload.error_description
       };

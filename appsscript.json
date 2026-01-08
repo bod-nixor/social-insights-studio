@@ -1,5 +1,5 @@
 {
-  "timeZone": "America/Los_Angeles",
+  "timeZone": "Asia/Karachi",
   "exceptionLogging": "STACKDRIVER",
   "runtimeVersion": "V8",
   "oauthScopes": [
@@ -10,16 +10,20 @@
   ],
   "dataStudio": {
     "name": "Social Insights Studio",
-    "logoUrl": "https://raw.githubusercontent.com/bod-nixor/social-insights-studio/refs/heads/main/docs/logo.png",
+    "logoUrl": "https://lstc.nixorcorporate.com/logo.png",
     "company": "Board of Directors",
-    "companyUrl": "https://bod-nixor.github.io/social-insights-studio/",
-    "addonUrl": "https://github.com/bod-nixor/social-insights-studio",
-    "supportUrl": "https://github.com/bod-nixor/social-insights-studio",
+    "companyUrl": "https://lstc.nixorcorporate.com/",
+    "addonUrl": "https://lstc.nixorcorporate.com/connect/",
+    "supportUrl": "https://lstc.nixorcorporate.com/",
     "description": "Connects to the TikTok API to pull user profile metrics and individual video performance data. This allows you to analyze your TikTok presence directly in Looker Studio.",
     "shortDescription": "Analyzes TikTok user and video performance.",
     "sources": [
       "TikTok Display API"
     ]
   },
-  "dependencies": {}
+  "dependencies": {},
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE_ANONYMOUS"
+  }
 }

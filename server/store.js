@@ -280,9 +280,11 @@ class FileTokenStore {
 }
 
 class StateStore {
-  constructor(ttlMs = TOKEN_STATE_TTL_MS) {
+  constructor(ttlMs = TOKEN_STATE_TTL_MS, cleanupIntervalMs) {
     this.ttlMs = ttlMs;
     this.store = new Map();
+    const interval = cleanupIntervalMs || Math.max(Math.floor(ttlMs / 2), 60 * 1000);
+    this.intervalId = setInterval(() => this.pruneExpiredEntries(), interval);
   }
 
   save(state, data) {
@@ -299,6 +301,22 @@ class StateStore {
       return null;
     }
     return entry;
+  }
+
+  pruneExpiredEntries() {
+    const now = Date.now();
+    for (const [key, entry] of this.store.entries()) {
+      if (!entry || entry.expiresAt <= now) {
+        this.store.delete(key);
+      }
+    }
+  }
+
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
   }
 }
 

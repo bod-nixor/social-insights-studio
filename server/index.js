@@ -6,6 +6,47 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 const { FileTokenStore, StateStore } = require('./store');
 
+class AuthCodeStore {
+  constructor(ttlMs, cleanupIntervalMs) {
+    this.ttlMs = ttlMs;
+    this.store = new Map();
+    const interval = cleanupIntervalMs || Math.max(Math.floor(ttlMs / 2), 60 * 1000);
+    this.intervalId = setInterval(() => this.pruneExpiredEntries(), interval);
+  }
+
+  save(code, data) {
+    this.store.set(code, { ...data, createdAt: Date.now(), expiresAt: Date.now() + this.ttlMs });
+  }
+
+  consume(code) {
+    const entry = this.store.get(code);
+    if (!entry) {
+      return null;
+    }
+    this.store.delete(code);
+    if (entry.expiresAt <= Date.now()) {
+      return null;
+    }
+    return entry;
+  }
+
+  pruneExpiredEntries() {
+    const now = Date.now();
+    for (const [code, entry] of this.store.entries()) {
+      if (!entry || entry.expiresAt <= now) {
+        this.store.delete(code);
+      }
+    }
+  }
+
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+}
+
 const app = express();
 const tokenStore = new FileTokenStore({
   filePath: path.join(__dirname, 'data', 'tokens.json'),
@@ -14,7 +55,7 @@ const tokenStore = new FileTokenStore({
   pruneAfterDays: process.env.TOKEN_PRUNE_DAYS ? Number(process.env.TOKEN_PRUNE_DAYS) : undefined
 });
 const stateStore = new StateStore();
-const authCodeStore = new Map();
+const authCodeStore = new AuthCodeStore(AUTH_CODE_TTL_MS);
 
 const PORT = process.env.PORT || 3001;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
@@ -167,24 +208,12 @@ function getBearerTokenFromRequest(req) {
 
 function buildAuthorizationCode(subject, scopes) {
   const code = generateRandomToken(24);
-  authCodeStore.set(code, {
-    subject,
-    scopes,
-    expiresAt: Date.now() + AUTH_CODE_TTL_MS
-  });
+  authCodeStore.save(code, { subject, scopes });
   return code;
 }
 
 function consumeAuthorizationCode(code) {
-  const entry = authCodeStore.get(code);
-  if (!entry) {
-    return null;
-  }
-  authCodeStore.delete(code);
-  if (entry.expiresAt <= Date.now()) {
-    return null;
-  }
-  return entry;
+  return authCodeStore.consume(code);
 }
 
 function issueBackendTokens(subject, scopes, refreshTokenOverride) {
@@ -506,3 +535,14 @@ app.post('/api/connector/revoke', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Backend listening on ${BASE_URL}`);
 });
+
+function shutdown() {
+  authCodeStore.stop();
+  if (typeof stateStore.stop === 'function') {
+    stateStore.stop();
+  }
+  process.exit(0);
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

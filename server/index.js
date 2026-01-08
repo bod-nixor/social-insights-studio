@@ -338,16 +338,6 @@ app.post('/api/connector/revoke', (req, res) => {
   res.status(revoked ? 200 : 404).json({ revoked });
 });
 
-app.get('/debug/tokens', (req, res) => {
-  res.json({
-    connectorTokens: Array.from(tokenStore.connectorStore.keys()).map(t => ({
-      prefix: t.slice(0, 6),
-      length: t.length
-    }))
-  });
-});
-
-
 app.listen(PORT, () => {
   console.log(`Backend listening on ${BASE_URL}`);
 });

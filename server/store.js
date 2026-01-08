@@ -57,7 +57,7 @@ function decryptValue(payload, key) {
 
     return data;
   } catch (error) {
-    console.error('decryptValue failed to decrypt payload', { message: error.message });
+    console.error('decryptValue failed to decrypt payload');
     return null;
   }
 }
@@ -101,6 +101,7 @@ class FileTokenStore {
       try {
         fd = fs.openSync(this.lockPath, 'wx', 0o600);
         fs.writeSync(fd, `${process.pid}\n`);
+        fs.fsyncSync(fd);
       } catch (error) {
         if (error.code !== 'EEXIST') {
           throw error;
@@ -285,6 +286,7 @@ class FileTokenStore {
       let data = await this.readData();
       if (this.needsMigration(data)) {
         data = this.migrateData(data);
+        await this.writeData(data);
       }
       const existed = Boolean(data.tokens[connectorToken]);
       if (existed) {

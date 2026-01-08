@@ -24,6 +24,13 @@ function validateRequiredEnv() {
   if (!BACKEND_JWT_SECRET) {
     throw new Error('Missing BACKEND_JWT_SECRET environment variable.');
   }
+  const weakSecrets = new Set(['changeme', 'change-me', 'secret', 'password', 'default']);
+  if (BACKEND_JWT_SECRET.length < 32 || weakSecrets.has(BACKEND_JWT_SECRET.toLowerCase())) {
+    throw new Error(
+      'BACKEND_JWT_SECRET must be at least 32 characters and not a common placeholder. ' +
+      'Generate a cryptographically random secret (e.g., crypto.randomBytes(32).toString("hex")).'
+    );
+  }
   if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) {
     throw new Error('Missing TikTok client credentials. Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET.');
   }

@@ -276,15 +276,18 @@ function getFields() {
  */
 function getBackendBaseUrl() {
   const scriptProps = PropertiesService.getScriptProperties();
-  const configuredUrl = scriptProps.getProperty('BACKEND_API_BASE_URL') ||
-    scriptProps.getProperty('DEPLOYED_DOMAIN');
-  const baseUrl = configuredUrl || BACKEND_API_BASE_URL;
+
+  const baseUrl =
+    scriptProps.getProperty('BACKEND_API_BASE_URL') ||
+    scriptProps.getProperty('DEPLOYED_DOMAIN') ||
+    BACKEND_API_BASE_URL;
 
   if (!baseUrl || baseUrl === 'https://YOUR_DOMAIN_HERE') {
     throw new Error('Backend API base URL is not configured.');
   }
 
-  return baseUrl.replace(/\\/$/, '');
+  // Remove trailing slash if present
+  return baseUrl.replace(/\/$/, '');
 }
 
 /**

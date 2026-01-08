@@ -67,15 +67,32 @@ function getOAuthService() {
 
 /**
  * Returns the 3P authorization URL for Looker Studio.
+ * Includes ERROR TRAPPING to diagnose blank popups.
  * @return {object} The authorization URL response.
  */
 function get3PAuthorizationUrls() {
-  const service = getOAuthService();
-  var authUrl = service.getAuthorizationUrl();
-
-  return {
-    authorizationUrl: authUrl
-  };
+  try {
+    const service = getOAuthService();
+    const url = service.getAuthorizationUrl();
+    
+    // Ensure the URL is a string to prevent object type errors
+    const finalUrl = String(url);
+    
+    Logger.log("Successfully generated URL: " + finalUrl);
+    
+    return {
+      authorizationUrl: finalUrl
+    };
+    
+  } catch (e) {
+    // IF THE SCRIPT CRASHES, SEND THE USER TO GOOGLE WITH THE ERROR MESSAGE
+    Logger.log("CRASH DETECTED: " + e.toString());
+    const errorUrl = "https://www.google.com/search?q=" + encodeURIComponent("Error: " + e.message);
+    
+    return {
+      authorizationUrl: errorUrl
+    };
+  }
 }
 
 /**

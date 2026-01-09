@@ -1,13 +1,16 @@
 require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const fetch = require('node-fetch');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 const { FileTokenStore, StateStore } = require('./store');
 
-const PORT = process.env.PORT || 3001;
-const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const PORT = Number(process.env.PORT || 3001);
+const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
 const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
 const BACKEND_JWT_SECRET = process.env.BACKEND_JWT_SECRET;
@@ -16,8 +19,48 @@ const TIKTOK_TOKEN_URL = 'https://open.tiktokapis.com/v2/oauth/token/';
 const TIKTOK_API_BASE_URL = 'https://open.tiktokapis.com/v2/';
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 const BACKEND_TOKEN_TTL_SECONDS = 60 * 60;
+const DEFAULT_BODY_LIMIT = '10kb';
+const ALLOWED_USER_FIELDS = [
+  'open_id',
+  'union_id',
+  'username',
+  'display_name',
+  'bio_description',
+  'profile_deep_link',
+  'avatar_url',
+  'avatar_url_100',
+  'avatar_large_url',
+  'is_verified',
+  'follower_count',
+  'following_count',
+  'likes_count',
+  'video_count'
+];
+const ALLOWED_VIDEO_FIELDS = [
+  'id',
+  'create_time',
+  'cover_image_url',
+  'share_url',
+  'video_description',
+  'duration',
+  'height',
+  'width',
+  'title',
+  'like_count',
+  'comment_count',
+  'share_count',
+  'view_count',
+  'embed_html',
+  'embed_link'
+];
 
 function validateRequiredEnv() {
+  if (!BASE_URL) {
+    throw new Error('Missing BASE_URL environment variable.');
+  }
+  if (process.env.NODE_ENV === 'production' && !BASE_URL.startsWith('https://')) {
+    throw new Error('BASE_URL must be https:// in production.');
+  }
   if (!process.env.ENCRYPTION_KEY) {
     throw new Error('Missing ENCRYPTION_KEY environment variable.');
   }
@@ -38,10 +81,11 @@ function validateRequiredEnv() {
 
 validateRequiredEnv();
 
-const app = express();
+const tokenStorePath = process.env.TOKEN_STORE_PATH || path.join(__dirname, 'data', 'tokens.json');
+const tokenLockPath = process.env.TOKEN_LOCK_PATH || path.join(__dirname, 'data', 'tokens.json.lock');
 const tokenStore = new FileTokenStore({
-  filePath: path.join(__dirname, 'data', 'tokens.json'),
-  lockPath: path.join(__dirname, 'data', 'tokens.json.lock'),
+  filePath: tokenStorePath,
+  lockPath: tokenLockPath,
   encryptionKey: process.env.ENCRYPTION_KEY,
   pruneAfterDays: process.env.TOKEN_PRUNE_DAYS ? Number(process.env.TOKEN_PRUNE_DAYS) : undefined
 });
@@ -57,6 +101,24 @@ const REQUIRED_SCOPES = [
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
+function ensureTokenStoreOutsidePublic() {
+  const resolvedStore = path.resolve(tokenStorePath);
+  const resolvedPublic = path.resolve(PUBLIC_DIR);
+  const relative = path.relative(resolvedPublic, resolvedStore);
+  if (!relative || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+    throw new Error('TOKEN_STORE_PATH must be outside the public web root.');
+  }
+}
+
+ensureTokenStoreOutsidePublic();
+
+const app = express();
+const trustProxyValue = process.env.TRUST_PROXY;
+if (trustProxyValue) {
+  const numeric = Number(trustProxyValue);
+  app.set('trust proxy', Number.isNaN(numeric) ? trustProxyValue : numeric);
+}
+
 app.use((req, res, next) => {
   // Normalize repeated slashes (but keep query string)
   if (req.url.startsWith('//')) {
@@ -66,9 +128,83 @@ app.use((req, res, next) => {
   next();
 });
 
+app.disable('x-powered-by');
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        imgSrc: ["'self'", 'https:', 'data:'],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'"],
+        connectSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        frameAncestors: ["'none'"],
+        upgradeInsecureRequests: []
+      }
+    },
+    referrerPolicy: { policy: 'no-referrer' }
+  })
+);
+
+const allowedOrigins = new Set(
+  (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(origin => origin.trim())
+    .filter(Boolean)
+);
+const corsMiddleware = cors({
+  origin(origin, callback) {
+    if (!origin) {
+      return callback(null, true);
+    }
+    if (allowedOrigins.has(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('CORS origin not allowed'));
+  },
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Authorization', 'Content-Type'],
+  maxAge: 600
+});
+
+const authLimiter = rateLimit({
+  windowMs: (Number(process.env.RATE_LIMIT_WINDOW_MINUTES) || 15) * 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX) || 60,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+const apiLimiter = rateLimit({
+  windowMs: (Number(process.env.API_RATE_LIMIT_WINDOW_MINUTES) || 5) * 60 * 1000,
+  max: Number(process.env.API_RATE_LIMIT_MAX) || 120,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
 app.use(express.static(PUBLIC_DIR));
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+app.use(express.urlencoded({ extended: false, limit: DEFAULT_BODY_LIMIT }));
+app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
+
+app.use('/oauth', corsMiddleware, authLimiter);
+app.use('/auth', authLimiter);
+app.use('/api', corsMiddleware, apiLimiter);
+
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'payload_too_large' });
+  }
+  if (err && err.message === 'CORS origin not allowed') {
+    return res.status(403).json({ error: 'cors_not_allowed' });
+  }
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'invalid_json' });
+  }
+  return next(err);
+});
+
+const LOOKER_CLIENT_ID = process.env.LOOKER_CLIENT_ID || 'looker-studio-connector';
+const LOOKER_CLIENT_SECRET = process.env.LOOKER_CLIENT_SECRET || 'unused';
 
 function requireEnv() {
   if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) {
@@ -186,6 +322,32 @@ function getBearerTokenFromRequest(req) {
   return match ? match[1] : null;
 }
 
+function buildJsonError(res, status, error, message) {
+  const payload = { error };
+  if (message) {
+    payload.message = message;
+  }
+  return res.status(status).json(payload);
+}
+
+function parseFieldsParam(fieldParam, allowedFields) {
+  if (!fieldParam) {
+    return allowedFields;
+  }
+  const requested = fieldParam
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+  if (requested.length === 0) {
+    return null;
+  }
+  const invalid = requested.filter(field => !allowedFields.includes(field));
+  if (invalid.length > 0) {
+    return null;
+  }
+  return requested;
+}
+
 function buildAuthorizationCode(subject, scopes) {
   const code = generateRandomToken(24);
   authCodeStore.save(code, { subject, scopes, createdAt: Date.now() });
@@ -230,7 +392,9 @@ function verifyBackendJwt(token) {
 function isAllowedRedirect(redirectUri) {
   try {
     const parsed = new URL(redirectUri);
-    return parsed.protocol === 'https:' && parsed.hostname === 'script.google.com';
+    return parsed.protocol === 'https:'
+      && parsed.hostname === 'script.google.com'
+      && parsed.pathname.startsWith('/macros/s/');
   } catch (error) {
     return false;
   }
@@ -243,7 +407,7 @@ app.get('/auth/tiktok/start', (req, res) => {
     stateStore.save(state, { flow: 'direct', createdAt: Date.now() });
     res.redirect(buildAuthUrl(state));
   } catch (error) {
-    res.status(500).send(`<h1>Configuration error</h1><p>${error.message}</p>`);
+    res.status(500).send('<h1>Configuration error</h1><p>Backend configuration error.</p>');
   }
 });
 
@@ -271,14 +435,7 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     const tokenPayload = tokenResult.data.data || tokenResult.data;
 
     if (!tokenResult.ok || tokenPayload.error) {
-      const safeLog = {
-        ok: tokenResult.ok,
-        tokenResultError: tokenResult.data && tokenResult.data.error,
-        tokenResultErrorDescription: tokenResult.data && tokenResult.data.error_description,
-        tokenPayloadError: tokenPayload && tokenPayload.error,
-        tokenPayloadErrorDescription: tokenPayload && tokenPayload.error_description
-      };
-      console.error('Token exchange failed', safeLog);
+      console.error('Token exchange failed.');
       return res.status(400).send(
         '<h1>Token Exchange Failed</h1><p>Please retry authentication.</p>'
       );
@@ -316,16 +473,22 @@ app.get('/auth/tiktok/callback', async (req, res) => {
       </html>
     `);
   } catch (error) {
-    res.status(500).send(`<h1>Unexpected Error</h1><p>${error.message}</p>`);
+    res.status(500).send('<h1>Unexpected Error</h1><p>An unexpected error occurred.</p>');
   }
 });
 
 app.get('/oauth/authorize', (req, res) => {
   try {
     requireEnv();
-    const { state, redirect_uri: redirectUri } = req.query;
-    if (!state || !redirectUri) {
-      return res.status(400).send('<h1>Missing OAuth parameters</h1><p>State and redirect_uri are required.</p>');
+    const { state, redirect_uri: redirectUri, response_type: responseType, client_id: clientId } = req.query;
+    if (!state || !redirectUri || !responseType || !clientId) {
+      return res.status(400).send('<h1>Missing OAuth parameters</h1><p>Required parameters are missing.</p>');
+    }
+    if (responseType !== 'code') {
+      return res.status(400).send('<h1>Invalid response type</h1><p>Response type must be "code".</p>');
+    }
+    if (clientId !== LOOKER_CLIENT_ID) {
+      return res.status(400).send('<h1>Invalid client</h1><p>Client ID not allowed.</p>');
     }
     if (!isAllowedRedirect(redirectUri)) {
       return res.status(400).send('<h1>Invalid redirect URI</h1><p>Redirect URI not allowed.</p>');
@@ -338,13 +501,21 @@ app.get('/oauth/authorize', (req, res) => {
     });
     res.redirect(buildAuthUrl(tiktokState));
   } catch (error) {
-    res.status(500).send(`<h1>Configuration error</h1><p>${error.message}</p>`);
+    res.status(500).send('<h1>Configuration error</h1><p>Backend configuration error.</p>');
   }
 });
 
 app.post('/oauth/token', async (req, res) => {
   try {
     requireBackendJwt();
+    const clientId = req.body.client_id;
+    const clientSecret = req.body.client_secret;
+    if (clientId && clientId !== LOOKER_CLIENT_ID) {
+      return res.status(400).json({ error: 'invalid_client' });
+    }
+    if (clientSecret && clientSecret !== LOOKER_CLIENT_SECRET) {
+      return res.status(400).json({ error: 'invalid_client' });
+    }
     const grantType = req.body.grant_type;
     if (grantType === 'authorization_code') {
       const code = req.body.code;
@@ -377,7 +548,7 @@ app.post('/oauth/token', async (req, res) => {
 
     return res.status(400).json({ error: 'unsupported_grant_type' });
   } catch (error) {
-    res.status(500).json({ error: 'server_error', message: error.message });
+    res.status(500).json({ error: 'server_error' });
   }
 });
 
@@ -398,27 +569,15 @@ app.get('/api/tiktok/user', async (req, res) => {
 
     const tokenResult = await getAccessTokenForSubject(payload.sub);
     if (tokenResult.error) {
-      return res.status(tokenResult.status || 401).json({ error: tokenResult.error, details: tokenResult.details });
+      return res.status(tokenResult.status || 401).json({ error: tokenResult.error });
     }
 
-    const fields = req.query.fields || [
-      'open_id',
-      'union_id',
-      'username',
-      'display_name',
-      'bio_description',
-      'profile_deep_link',
-      'avatar_url',
-      'avatar_url_100',
-      'avatar_large_url',
-      'is_verified',
-      'follower_count',
-      'following_count',
-      'likes_count',
-      'video_count'
-    ].join(',');
+    const fieldList = parseFieldsParam(req.query.fields, ALLOWED_USER_FIELDS);
+    if (!fieldList) {
+      return buildJsonError(res, 400, 'invalid_fields');
+    }
 
-    const url = `${TIKTOK_API_BASE_URL}user/info/?fields=${encodeURIComponent(fields)}`;
+    const url = `${TIKTOK_API_BASE_URL}user/info/?fields=${encodeURIComponent(fieldList.join(','))}`;
     const response = await fetch(url, {
       headers: {
         Authorization: `Bearer ${tokenResult.accessToken}`
@@ -428,7 +587,7 @@ app.get('/api/tiktok/user', async (req, res) => {
     const data = await response.json();
     res.status(response.status).json(data);
   } catch (error) {
-    res.status(500).json({ error: 'server_error', message: error.message });
+    res.status(500).json({ error: 'server_error' });
   }
 });
 
@@ -449,37 +608,32 @@ app.get('/api/tiktok/videos', async (req, res) => {
 
     const tokenResult = await getAccessTokenForSubject(payloadJwt.sub);
     if (tokenResult.error) {
-      return res.status(tokenResult.status || 401).json({ error: tokenResult.error, details: tokenResult.details });
+      return res.status(tokenResult.status || 401).json({ error: tokenResult.error });
     }
 
-    const fields = req.query.fields || [
-      'id',
-      'create_time',
-      'cover_image_url',
-      'share_url',
-      'video_description',
-      'duration',
-      'height',
-      'width',
-      'title',
-      'like_count',
-      'comment_count',
-      'share_count',
-      'view_count',
-      'embed_html',
-      'embed_link'
-    ].join(',');
+    const fieldList = parseFieldsParam(req.query.fields, ALLOWED_VIDEO_FIELDS);
+    if (!fieldList) {
+      return buildJsonError(res, 400, 'invalid_fields');
+    }
 
-    const maxCount = Math.min(Number(req.query.max_count || 20), 20);
+    const rawMaxCount = Number(req.query.max_count || 20);
+    if (!Number.isFinite(rawMaxCount) || rawMaxCount <= 0) {
+      return buildJsonError(res, 400, 'invalid_max_count');
+    }
+    const maxCount = Math.min(rawMaxCount, 20);
     const payload = {
       max_count: maxCount
     };
 
     if (req.query.cursor) {
-      payload.cursor = Number(req.query.cursor);
+      const cursor = Number(req.query.cursor);
+      if (!Number.isFinite(cursor) || cursor < 0) {
+        return buildJsonError(res, 400, 'invalid_cursor');
+      }
+      payload.cursor = cursor;
     }
 
-    const url = `${TIKTOK_API_BASE_URL}video/list/?fields=${encodeURIComponent(fields)}`;
+    const url = `${TIKTOK_API_BASE_URL}video/list/?fields=${encodeURIComponent(fieldList.join(','))}`;
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -492,7 +646,7 @@ app.get('/api/tiktok/videos', async (req, res) => {
     const data = await response.json();
     res.status(response.status).json(data);
   } catch (error) {
-    res.status(500).json({ error: 'server_error', message: error.message });
+    res.status(500).json({ error: 'server_error' });
   }
 });
 
@@ -509,7 +663,7 @@ app.post('/api/connector/revoke', (req, res) => {
   }
   tokenStore.revokeConnectorToken(payload.sub)
     .then(revoked => res.status(revoked ? 200 : 404).json({ revoked }))
-    .catch(error => res.status(500).json({ error: 'server_error', message: error.message }));
+    .catch(() => res.status(500).json({ error: 'server_error' }));
 });
 
 app.listen(PORT, () => {

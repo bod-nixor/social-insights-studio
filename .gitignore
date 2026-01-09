@@ -1,2 +1,7 @@
 server/data/tokens.json
 server/data/*.lock
+server/data/*.tmp
+server/node_modules/
+.env
+.env.*
+!.env.example

@@ -8,6 +8,28 @@ const DEFAULT_PRUNE_DAYS = 30;
 const LOCK_RETRY_DELAY_MS = 50;
 const LOCK_TIMEOUT_MS = 5000;
 
+function ensureDirSecure(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(dirPath, 0o700);
+  } catch (error) {
+    // ignore chmod errors on unsupported filesystems
+  }
+}
+
+function fsyncDir(dirPath) {
+  try {
+    const dirHandle = fs.openSync(dirPath, 'r');
+    try {
+      fs.fsyncSync(dirHandle);
+    } finally {
+      fs.closeSync(dirHandle);
+    }
+  } catch (error) {
+    // ignore fsync errors on filesystems that do not support it
+  }
+}
+
 function parseEncryptionKey(rawKey) {
   if (!rawKey) {
     throw new Error('Missing ENCRYPTION_KEY for token encryption.');
@@ -72,14 +94,9 @@ function decryptValue(payload, key) {
   }
 }
 
-function safeTokenLabel(token) {
-  if (!token) return 'unknown';
-  return `${token.slice(0, 6)}...(${token.length})`;
-}
-
 async function writeFileAtomic(filePath, contents) {
   const dir = path.dirname(filePath);
-  await fs.promises.mkdir(dir, { recursive: true });
+  ensureDirSecure(dir);
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   const handle = await fs.promises.open(tempPath, 'w', 0o600);
   try {
@@ -90,6 +107,12 @@ async function writeFileAtomic(filePath, contents) {
   }
   try {
     await fs.promises.rename(tempPath, filePath);
+    try {
+      await fs.promises.chmod(filePath, 0o600);
+    } catch (error) {
+      // ignore chmod errors on unsupported filesystems
+    }
+    fsyncDir(dir);
   } catch (error) {
     await fs.promises.unlink(tempPath).catch(() => {});
     throw error;
@@ -107,6 +130,7 @@ class FileTokenStore {
   async withLock(fn) {
     const start = Date.now();
     let fd = null;
+    ensureDirSecure(path.dirname(this.lockPath));
     while (!fd) {
       try {
         fd = fs.openSync(this.lockPath, 'wx', 0o600);
@@ -316,21 +340,6 @@ class FileTokenStore {
         await this.writeData(data);
       }
       return existed;
-    });
-  }
-
-  async listTokensSafe() {
-    return this.withLock(async () => {
-      const data = await this.readData();
-      return Object.entries(data.tokens || {}).map(([token, entry]) => ({
-        token_prefix: safeTokenLabel(token),
-        open_id: entry.open_id || null,
-        scopes: entry.scopes || null,
-        expires_at: entry.expires_at || null,
-        refresh_expires_at: entry.refresh_expires_at || null,
-        created_at: entry.created_at || null,
-        updated_at: entry.updated_at || null
-      }));
     });
   }
 

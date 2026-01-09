@@ -88,15 +88,21 @@ Follow these steps carefully to set up and deploy your connector.
 
 ### Step 2: Configure the Backend Service
 
-1. Set the backend environment variables:
-   * `BASE_URL`: The base URL of your backend (e.g., `https://lstc.nixorcorporate.com`).
+1. Copy `.env.example` to `.env` and fill in values (or set environment variables directly in your hosting panel).
+2. Required backend environment variables:
+   * `BASE_URL`: The HTTPS base URL of your backend (e.g., `https://lstc.nixorcorporate.com`).
    * `TIKTOK_CLIENT_KEY`: TikTok Client Key from Step 1.
    * `TIKTOK_CLIENT_SECRET`: TikTok Client Secret from Step 1.
    * `ENCRYPTION_KEY`: 32-byte key (base64 or hex) for AES-256-GCM encryption.
    * `BACKEND_JWT_SECRET`: Secret used to sign backend JWTs for Looker Studio.
-2. Start the backend from `server/` using `npm start`.
-3. Update the TikTok **Redirect URI** to: `https://<your-domain>/auth/tiktok/callback`.
-4. TikTok tokens are stored at `server/data/tokens.json` (encrypted at rest). Keep this file private.
+3. Recommended backend environment variables:
+   * `TOKEN_STORE_PATH`: Absolute path outside the public web root (e.g., `/var/lib/social-insights-studio/tokens.json`).
+   * `TOKEN_LOCK_PATH`: Lock file path in the same private directory.
+   * `TRUST_PROXY`: Set to `1` when behind Passenger or a reverse proxy.
+   * `ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins (leave blank for server-to-server only).
+4. Start the backend from `server/` using `npm start`.
+5. Update the TikTok **Redirect URI** to: `https://<your-domain>/auth/tiktok/callback`.
+6. Ensure the token directory is private (`chmod 700`) and token files are restricted (`chmod 600`).
 
 ### Step 3: Create a Google Apps Script Project
 
@@ -155,6 +161,29 @@ The following properties must be set in your Apps Script project's `Project sett
 | `TIKTOK_CLIENT_SECRET`| TikTok Developer App's **Client Secret**. |
 | `ENCRYPTION_KEY` | 32-byte key (base64 or hex) for encrypting TikTok tokens. |
 | `BACKEND_JWT_SECRET` | Secret used to sign backend JWTs for Looker Studio. |
+| `TOKEN_STORE_PATH` | Absolute path for encrypted token storage (outside public web root). |
+| `TOKEN_LOCK_PATH` | Lock file path in the same private directory. |
+| `TOKEN_PRUNE_DAYS` | Number of days before pruning expired refresh tokens (default: 30). |
+| `LOOKER_CLIENT_ID` | Expected OAuth client ID for Looker Studio (default: `looker-studio-connector`). |
+| `LOOKER_CLIENT_SECRET` | Expected OAuth client secret (default: `unused`). |
+| `ALLOWED_ORIGINS` | Comma-separated list of allowed browser origins for API calls. |
+| `TRUST_PROXY` | Set to `1` when running behind Passenger/reverse proxy. |
+| `RATE_LIMIT_WINDOW_MINUTES` | Auth rate limit window in minutes (default: 15). |
+| `RATE_LIMIT_MAX` | Max auth requests per window (default: 60). |
+| `API_RATE_LIMIT_WINDOW_MINUTES` | API rate limit window in minutes (default: 5). |
+| `API_RATE_LIMIT_MAX` | Max API requests per window (default: 120). |
+
+## Production Deployment (cPanel/Passenger)
+
+1. Upload the repo and set the Node.js application root to `/server`.
+2. Set all required environment variables in cPanel's Node.js app settings (do not commit `.env` to git).
+3. Create a private storage directory outside `public/`, for example: `/home/<user>/secure/social-insights/`.
+4. Set permissions:
+   * `chmod 700 /home/<user>/secure/social-insights/`
+   * `chmod 600 /home/<user>/secure/social-insights/tokens.json` (after first run)
+5. Set `TOKEN_STORE_PATH` and `TOKEN_LOCK_PATH` to files in that private directory.
+6. Set `TRUST_PROXY=1` so Express honors `X-Forwarded-*` headers behind Passenger.
+7. Restart the Passenger app to pick up configuration changes.
 
 ## API Scopes Used
 

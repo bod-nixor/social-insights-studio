@@ -25,7 +25,6 @@ const API_RATE_LIMIT_DELAY_MS = 500;
  * @return {object} The AuthType response.
  */
 function getAuthType() {
-  Logger.log('getAuthType called');
   return cc
     .newAuthTypeResponse()
     .setAuthType(cc.AuthType.OAUTH2)
@@ -46,7 +45,7 @@ function getConfig(request) {
   var config = cc.getConfig();
   config.setIsSteppedConfig(false);
   return config.build();
-}0
+}
 
 /**
  * Creates the OAuth2 service for backend authorization.
@@ -74,24 +73,17 @@ function get3PAuthorizationUrls() {
   try {
     const service = getOAuthService();
     const url = service.getAuthorizationUrl();
-    
-    // Ensure the URL is a string to prevent object type errors
-    const finalUrl = String(url);
-    
-    Logger.log("Successfully generated URL: " + finalUrl);
-    
+    if (!url) {
+      throw new Error('Authorization URL unavailable.');
+    }
     return {
-      authorizationUrl: finalUrl
+      authorizationUrl: String(url)
     };
-    
   } catch (e) {
-    // IF THE SCRIPT CRASHES, SEND THE USER TO GOOGLE WITH THE ERROR MESSAGE
-    Logger.log("CRASH DETECTED: " + e.toString());
-    const errorUrl = "https://www.google.com/search?q=" + encodeURIComponent("Error: " + e.message);
-    
-    return {
-      authorizationUrl: errorUrl
-    };
+    cc.newUserError()
+      .setDebugText('Failed to generate authorization URL.')
+      .setText('Unable to start the authorization flow. Please contact support.')
+      .throwException();
   }
 }
 
@@ -129,7 +121,6 @@ function isAuthValid() {
  * @return {object} The schema response.
  */
 function getSchema(request) {
-  Logger.log('getSchema called. Request: ' + JSON.stringify(redactSensitiveInfo(request)));
   try {
     var fields = getFields();
     return { schema: fields.build() };
@@ -361,6 +352,10 @@ function getBackendBaseUrl() {
     throw new Error('Backend API base URL is not configured.');
   }
 
+  if (!/^https:\\/\\//i.test(baseUrl)) {
+    throw new Error('Backend API base URL must be HTTPS.');
+  }
+
   // Remove trailing slash if present
   return baseUrl.replace(/\/$/, '');
 }
@@ -398,9 +393,6 @@ function getData(request) {
       .throwException();
   }
 
-  Logger.log("getData request received for fields: " + 
-    request.fields.map(f => f.name).join(', '));
-
   try {
     const backendAccessToken = getBackendAccessToken();
 
@@ -424,9 +416,7 @@ function getData(request) {
     let videosData = [];
     try {
       videosData = fetchPaginatedVideos(userData.open_id, backendAccessToken, videoApiFields);
-      Logger.log(`Retrieved ${videosData.length} videos`);
     } catch (e) {
-      Logger.log("Error fetching video data: " + e.message);
       // Continue with user data only if video fetch fails
     }
 
@@ -479,7 +469,6 @@ function fetchUserInfo(accessToken) {
   };
 
   const url = `${backendBaseUrl}/api/tiktok/user?fields=${encodeURIComponent(userApiFields.join(','))}`;
-  Logger.log('Fetching user info from backend: ' + url);
   const response = fetchWithRetry(url, options);
 
   if (response.getResponseCode() !== 200) {
@@ -517,11 +506,8 @@ function fetchPaginatedVideos(openId, accessToken, fields, maxVideos = MAX_VIDEO
   const backendBaseUrl = getBackendBaseUrl();
   const videoListUrl = `${backendBaseUrl}/api/tiktok/videos?fields=${fieldQuery}`;
 
-  Logger.log(`Fetching paginated videos. URL base: ${videoListUrl}, Max videos: ${maxVideos}`);
-
   while (hasMore && allVideos.length < maxVideos && requestCount < maxRequests) {
     requestCount++;
-    Logger.log(`Fetching video page ${requestCount}. Current videos: ${allVideos.length}`);
 
     const options = {
       method: 'GET',
@@ -570,7 +556,6 @@ function fetchPaginatedVideos(openId, accessToken, fields, maxVideos = MAX_VIDEO
     }
   }
 
-  Logger.log(`Finished fetching videos. Total videos retrieved: ${allVideos.length}`);
   return allVideos.slice(0, maxVideos);
 }
 
@@ -607,7 +592,6 @@ function createCombinedRow(userData, videoData, requestedFields) {
         return null;
       }
 
-      Logger.log('Encountered unexpected fieldId: ' + fieldId);
       return null;
     })
   };
@@ -643,7 +627,6 @@ function formatFieldValue(value, fieldType) {
         return String(value);
     }
   } catch (e) {
-    Logger.log('Error formatting field value: ' + e.toString());
     return null;
   }
 }
@@ -660,7 +643,6 @@ function formatFieldValue(value, fieldType) {
 function fetchWithRetry(url, options, retries = MAX_API_RETRIES) {
   for (let i = 0; i < retries; i++) {
     try {
-      Logger.log(`fetchWithRetry: Attempt ${i + 1} for URL: ${url}`);
       const response = UrlFetchApp.fetch(url, options);
       const responseCode = response.getResponseCode();
 
@@ -668,14 +650,12 @@ function fetchWithRetry(url, options, retries = MAX_API_RETRIES) {
       if (responseCode === 429 || (responseCode >= 500 && responseCode < 600)) {
         if (i < retries - 1) {
           const sleepTime = Math.pow(2, i) * 1000 + Math.random() * 1000;
-          Logger.log(`Retrying in ${sleepTime / 1000}s...`);
           Utilities.sleep(sleepTime);
           continue;
         }
       }
       return response;
     } catch (e) {
-      Logger.log(`fetchWithRetry: Exception during fetch attempt ${i + 1}: ${e.toString()}`);
       if (i < retries - 1) {
         const sleepTime = Math.pow(2, i) * 1000 + Math.random() * 1000;
         Utilities.sleep(sleepTime);
@@ -695,8 +675,6 @@ function fetchWithRetry(url, options, retries = MAX_API_RETRIES) {
  */
 function handleApiError(responseCode, responseBody, apiUrl, context) {
   context = context || "API call";
-  Logger.log(`handleApiError (${context}): HTTP Error ${responseCode}. URL: ${apiUrl}`);
-  
   let errorMessage = `Error fetching data from TikTok API (${context}). Response code: ${responseCode}.`;
   try {
     const errorData = safeJsonParse(responseBody);
@@ -722,8 +700,6 @@ function handleApiError(responseCode, responseBody, apiUrl, context) {
  */
 function handleTikTokApiError(error, context) {
   context = context || "TikTok API";
-  Logger.log(`handleTikTokApiError (${context}): Code: ${error.code}, Message: ${error.message}`);
-
   const errorMap = {
     "invalid_params": "Invalid parameters sent to TikTok API.",
     "invalid_token": "Authentication token is invalid or expired.",
@@ -745,17 +721,6 @@ function handleTikTokApiError(error, context) {
     .throwException();
 }
 
-// ------------------------ Admin Functions ------------------------
-
-/**
- * Determines if the current user is an admin.
- * @return {boolean} True if admin, false otherwise.
- */
-function isAdminUser() {
-  // In production, implement proper admin checks
-  return false;
-}
-
 // ------------------------ Utility Functions ------------------------
 
 /**
@@ -767,7 +732,6 @@ function safeJsonParse(jsonString) {
   try {
     return JSON.parse(jsonString);
   } catch (e) {
-    Logger.log('Error parsing JSON: ' + e.toString());
     return null;
   }
 }
@@ -779,18 +743,4 @@ function safeJsonParse(jsonString) {
  */
 function logError(context, error) {
   Logger.log(`${context}: ${error.message}\nStack: ${error.stack}`);
-}
-
-/**
- * Redacts sensitive information from logs.
- * @param {object} data The data to redact.
- * @return {object} The redacted data.
- */
-function redactSensitiveInfo(data) {
-  if (!data) return data;
-  const redacted = {...data};
-  if (redacted.code) redacted.code = 'REDACTED';
-  if (redacted.access_token) redacted.access_token = 'REDACTED';
-  if (redacted.refresh_token) redacted.refresh_token = 'REDACTED';
-  return redacted;
 }

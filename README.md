@@ -40,10 +40,10 @@ The connector provides the following fields, which are defined in the script and
 
 | Field ID | Field Name | Description | Default Aggregation |
 | :--- | :--- | :--- | :--- |
-| `user_follower_count` | Follower Count | Number of followers. | SUM |
-| `user_following_count`| Following Count | Number of accounts followed. | SUM |
-| `user_likes_count` | Total Likes Received | Total likes on user's videos. | SUM |
-| `user_video_count` | Total Video Count | Number of videos posted. | SUM |
+| `user_follower_count` | Follower Count | Number of followers. | MAX |
+| `user_following_count`| Following Count | Number of accounts followed. | MAX |
+| `user_likes_count` | Total Likes Received | Total likes on user's videos. | MAX |
+| `user_video_count` | Total Video Count | Number of videos posted. | MAX |
 
 ### Video Dimensions
 
@@ -80,8 +80,9 @@ Follow these steps carefully to set up and deploy your connector.
 2. Log in and create a new application.
 3. Fill in the required application details.
 4. Under your app settings, ensure you have requested and been granted access to the following scopes:
-   * `user.info.stats`
+   * `user.info.basic`
    * `user.info.profile`
+   * `user.info.stats`
    * `video.list`
 5. Go to the **App credentials** section and note down your **Client key** and **Client secret**.
 6. You must configure the **Redirect URI**. This will be your backend callback URL (configured in Step 2).
@@ -111,7 +112,7 @@ Follow these steps carefully to set up and deploy your connector.
 3. Replace the default `Code.gs` content with the entire code provided.
 4. **Add the OAuth2 for Apps Script Library**:
    * Click on **Libraries** (`+` icon) in the left sidebar.
-   * In the "Script ID" field, paste: `1B7FSrg4E5WqmNcpecVPODk6Oztd_PlrxXh8HTMrdhr6Cw6yazg4m8PTK`
+   * In the "Script ID" field, paste: `1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF`
    * Click **Look up**. Select the latest version, ensure the "Identifier" is `OAuth2`, and click **Add**.
 
 ### Step 4: Configure Script Properties
@@ -189,8 +190,9 @@ The following properties must be set in your Apps Script project's `Project sett
 
 This connector requests the following scopes from the TikTok API. Ensure they are enabled for your TikTok application in the TikTok Developer Console.
 
-* `user.info.stats`
+* `user.info.basic`
 * `user.info.profile`
+* `user.info.stats`
 * `video.list`
 
 ## Troubleshooting

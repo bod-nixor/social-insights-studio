@@ -226,6 +226,42 @@ function getRedirectUri() {
   return `${BASE_URL}/auth/tiktok/callback`;
 }
 
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function readJsonResponse(response) {
+  const text = await response.text();
+  if (!text) {
+    return { ok: true, data: {} };
+  }
+  try {
+    return { ok: true, data: JSON.parse(text) };
+  } catch (error) {
+    return { ok: false, data: { error: 'invalid_json_response' } };
+  }
+}
+
+function getTokenPayload(tokenResponseBody) {
+  if (!tokenResponseBody || typeof tokenResponseBody !== 'object') {
+    return {};
+  }
+  return tokenResponseBody.data || tokenResponseBody;
+}
+
+function hasUsableTokenPayload(tokenPayload, fallback = {}) {
+  return Boolean(
+    tokenPayload
+    && tokenPayload.access_token
+    && (tokenPayload.refresh_token || fallback.refreshToken)
+  );
+}
+
 function buildAuthUrl(state) {
   const params = new URLSearchParams({
     client_key: TIKTOK_CLIENT_KEY,
@@ -255,8 +291,8 @@ async function exchangeCodeForToken(code) {
     body: payload.toString()
   });
 
-  const data = await response.json();
-  return { ok: response.ok, data };
+  const parsed = await readJsonResponse(response);
+  return { ok: response.ok && parsed.ok, data: parsed.data };
 }
 
 async function refreshAccessToken(refreshToken) {
@@ -275,18 +311,21 @@ async function refreshAccessToken(refreshToken) {
     body: payload.toString()
   });
 
-  const data = await response.json();
-  return { ok: response.ok, data };
+  const parsed = await readJsonResponse(response);
+  return { ok: response.ok && parsed.ok, data: parsed.data };
 }
 
-function buildTokenRecord(tokenResponse) {
+function buildTokenRecord(tokenResponse, fallback = {}) {
+  const now = Date.now();
+  const expiresIn = Number(tokenResponse.expires_in || 0);
+  const refreshExpiresIn = Number(tokenResponse.refresh_expires_in || 0);
   return {
     accessToken: tokenResponse.access_token,
-    refreshToken: tokenResponse.refresh_token,
-    expiresAt: Date.now() + Number(tokenResponse.expires_in || 0) * 1000,
-    refreshExpiresAt: Date.now() + Number(tokenResponse.refresh_expires_in || 0) * 1000,
-    openId: tokenResponse.open_id || null,
-    scopes: tokenResponse.scope || null,
+    refreshToken: tokenResponse.refresh_token || fallback.refreshToken,
+    expiresAt: expiresIn > 0 ? now + expiresIn * 1000 : fallback.expiresAt || null,
+    refreshExpiresAt: refreshExpiresIn > 0 ? now + refreshExpiresIn * 1000 : fallback.refreshExpiresAt || null,
+    openId: tokenResponse.open_id || fallback.openId || null,
+    scopes: tokenResponse.scope || fallback.scopes || null,
     tokenType: tokenResponse.token_type || 'Bearer'
   };
 }
@@ -306,11 +345,12 @@ async function getAccessTokenForSubject(subject) {
   }
 
   const refreshResult = await refreshAccessToken(tokenData.refreshToken);
-  if (!refreshResult.ok) {
+  const refreshedPayload = getTokenPayload(refreshResult.data);
+  if (!refreshResult.ok || refreshedPayload.error || !hasUsableTokenPayload(refreshedPayload, tokenData)) {
     return { error: 'token_refresh_failed', status: 401, details: refreshResult.data };
   }
 
-  const updated = buildTokenRecord(refreshResult.data.data || refreshResult.data);
+  const updated = buildTokenRecord(refreshedPayload, tokenData);
   await tokenStore.saveConnectorToken(subject, updated);
 
   return { accessToken: updated.accessToken };
@@ -392,9 +432,12 @@ function verifyBackendJwt(token) {
 function isAllowedRedirect(redirectUri) {
   try {
     const parsed = new URL(redirectUri);
-    return parsed.protocol === 'https:'
-      && parsed.hostname === 'script.google.com'
-      && parsed.pathname.startsWith('/macros/s/');
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'script.google.com') {
+      return false;
+    }
+    const isOAuth2LibraryCallback = /^\/macros\/d\/[^/]+\/usercallback$/.test(parsed.pathname);
+    const isWebAppDeployment = /^\/macros\/s\/[^/]+\/(exec|dev)$/.test(parsed.pathname);
+    return isOAuth2LibraryCallback || isWebAppDeployment;
   } catch (error) {
     return false;
   }
@@ -418,7 +461,7 @@ app.get('/auth/tiktok/callback', async (req, res) => {
 
     if (error) {
       return res.status(400).send(
-        `<h1>Authorization Error</h1><p>${error}: ${errorDescription || 'No description provided.'}</p>`
+        `<h1>Authorization Error</h1><p>${escapeHtml(error)}: ${escapeHtml(errorDescription || 'No description provided.')}</p>`
       );
     }
 
@@ -432,9 +475,9 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     }
 
     const tokenResult = await exchangeCodeForToken(code);
-    const tokenPayload = tokenResult.data.data || tokenResult.data;
+    const tokenPayload = getTokenPayload(tokenResult.data);
 
-    if (!tokenResult.ok || tokenPayload.error) {
+    if (!tokenResult.ok || tokenPayload.error || !hasUsableTokenPayload(tokenPayload)) {
       console.error('Token exchange failed.');
       return res.status(400).send(
         '<h1>Token Exchange Failed</h1><p>Please retry authentication.</p>'
@@ -584,8 +627,11 @@ app.get('/api/tiktok/user', async (req, res) => {
       }
     });
 
-    const data = await response.json();
-    res.status(response.status).json(data);
+    const parsed = await readJsonResponse(response);
+    if (!parsed.ok) {
+      return buildJsonError(res, 502, 'invalid_tiktok_response');
+    }
+    res.status(response.status).json(parsed.data);
   } catch (error) {
     res.status(500).json({ error: 'server_error' });
   }
@@ -643,8 +689,11 @@ app.get('/api/tiktok/videos', async (req, res) => {
       body: JSON.stringify(payload)
     });
 
-    const data = await response.json();
-    res.status(response.status).json(data);
+    const parsed = await readJsonResponse(response);
+    if (!parsed.ok) {
+      return buildJsonError(res, 502, 'invalid_tiktok_response');
+    }
+    res.status(response.status).json(parsed.data);
   } catch (error) {
     res.status(500).json({ error: 'server_error' });
   }
@@ -666,9 +715,13 @@ app.post('/api/connector/revoke', (req, res) => {
     .catch(() => res.status(500).json({ error: 'server_error' }));
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend listening on ${BASE_URL}`);
-});
+let server;
+
+if (require.main === module) {
+  server = app.listen(PORT, () => {
+    console.log(`Backend listening on ${BASE_URL}`);
+  });
+}
 
 function shutdown() {
   console.log('Shutting down gracefully...');
@@ -676,8 +729,30 @@ function shutdown() {
   if (typeof stateStore.stop === 'function') {
     stateStore.stop();
   }
+  if (server) {
+    server.close(() => process.exit(0));
+    return;
+  }
   process.exit(0);
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+if (require.main === module) {
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+function stopStores() {
+  authCodeStore.stop();
+  if (typeof stateStore.stop === 'function') {
+    stateStore.stop();
+  }
+}
+
+module.exports = {
+  app,
+  escapeHtml,
+  isAllowedRedirect,
+  parseFieldsParam,
+  readJsonResponse,
+  stopStores
+};

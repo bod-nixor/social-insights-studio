@@ -146,6 +146,11 @@ class FileTokenStore {
             }
             fd = null;
           }
+          try {
+            fs.unlinkSync(this.lockPath);
+          } catch (unlinkError) {
+            // ignore cleanup errors; the stale-lock path can clear it later
+          }
           throw error;
         }
       } catch (error) {
@@ -275,6 +280,9 @@ class FileTokenStore {
   }
 
   async saveConnectorToken(connectorToken, tokenData) {
+    if (!tokenData || !tokenData.accessToken || !tokenData.refreshToken) {
+      throw new Error('Cannot save incomplete connector token.');
+    }
     return this.withLock(async () => {
       let data = await this.readData();
       if (this.needsMigration(data)) {
@@ -358,6 +366,9 @@ class StateStore {
     this.store = new Map();
     const interval = cleanupIntervalMs || Math.max(Math.floor(ttlMs / 2), 60 * 1000);
     this.intervalId = setInterval(() => this.pruneExpiredEntries(), interval);
+    if (typeof this.intervalId.unref === 'function') {
+      this.intervalId.unref();
+    }
   }
 
   save(state, data) {

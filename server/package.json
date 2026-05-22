@@ -5,7 +5,8 @@
   "description": "Backend service for TikTok OAuth and API proxying for Social Insights Studio.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "cors": "^2.8.5",

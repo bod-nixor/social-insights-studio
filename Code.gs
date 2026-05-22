@@ -143,6 +143,8 @@ function getFields() {
   var fields = cc.getFields();
   var types = cc.FieldType;
   var aggregations = cc.AggregationType;
+  // Account-level metrics repeat on every video row, so MAX avoids overcounting.
+  var userMetricAggregation = aggregations.MAX;
 
   // User Info - Dimensions
   fields.newDimension()
@@ -211,28 +213,28 @@ function getFields() {
     .setName('Follower Count')
     .setDescription('Number of followers')
     .setType(types.NUMBER)
-    .setAggregation(aggregations.SUM);
+    .setAggregation(userMetricAggregation);
     
   fields.newMetric()
     .setId('user_following_count')
     .setName('Following Count')
     .setDescription('Number of accounts followed')
     .setType(types.NUMBER)
-    .setAggregation(aggregations.SUM);
+    .setAggregation(userMetricAggregation);
     
   fields.newMetric()
     .setId('user_likes_count')
     .setName('Total Likes Received')
     .setDescription('Total likes on user\'s videos')
     .setType(types.NUMBER)
-    .setAggregation(aggregations.SUM);
+    .setAggregation(userMetricAggregation);
     
   fields.newMetric()
     .setId('user_video_count')
     .setName('Total Video Count')
     .setDescription('Number of videos posted')
     .setType(types.NUMBER)
-    .setAggregation(aggregations.SUM);
+    .setAggregation(userMetricAggregation);
 
   // Video Info - Dimensions
   fields.newDimension()
@@ -352,7 +354,7 @@ function getBackendBaseUrl() {
     throw new Error('Backend API base URL is not configured.');
   }
 
-  if (!/^https:\\/\\//i.test(baseUrl)) {
+  if (!/^https:\/\//i.test(baseUrl)) {
     throw new Error('Backend API base URL must be HTTPS.');
   }
 
@@ -476,8 +478,7 @@ function fetchUserInfo(accessToken) {
     return null;
   }
 
-  const responseText = response.getContentText();
-  const data = safeJsonParse(responseText);
+  const data = parseBackendJsonResponse(response, 'fetchUserInfo');
   
   if (data.error && data.error.code && data.error.code !== "ok") {
     handleTikTokApiError(data.error, "fetchUserInfo");
@@ -533,8 +534,7 @@ function fetchPaginatedVideos(openId, accessToken, fields, maxVideos = MAX_VIDEO
       break;
     }
 
-    const responseText = response.getContentText();
-    const data = safeJsonParse(responseText);
+    const data = parseBackendJsonResponse(response, `fetchPaginatedVideos (page ${requestCount})`);
 
     if (data.error && data.error.code && data.error.code !== "ok") {
       handleTikTokApiError(data.error, `fetchPaginatedVideos (page ${requestCount})`);
@@ -619,7 +619,7 @@ function formatFieldValue(value, fieldType) {
         if (isNaN(Number(value))) return null;
         return Utilities.formatDate(new Date(Number(value) * 1000), 'UTC', 'yyyyMMddHH');
       case types.BOOLEAN:
-        return Boolean(value);
+        return formatBooleanValue(value);
       case types.TEXT:
       case types.URL:
         return String(value);
@@ -641,23 +641,24 @@ function formatFieldValue(value, fieldType) {
  * @return {HTTPResponse} The HTTPResponse object.
  */
 function fetchWithRetry(url, options, retries = MAX_API_RETRIES) {
-  for (let i = 0; i < retries; i++) {
+  const attempts = Math.max(1, Number(retries) || 1);
+  for (let i = 0; i < attempts; i++) {
     try {
       const response = UrlFetchApp.fetch(url, options);
       const responseCode = response.getResponseCode();
 
       // Retry on 429 or 5xx errors
       if (responseCode === 429 || (responseCode >= 500 && responseCode < 600)) {
-        if (i < retries - 1) {
-          const sleepTime = Math.pow(2, i) * 1000 + Math.random() * 1000;
+        if (i < attempts - 1) {
+          const sleepTime = Math.round(Math.pow(2, i) * 1000 + Math.random() * 1000);
           Utilities.sleep(sleepTime);
           continue;
         }
       }
       return response;
     } catch (e) {
-      if (i < retries - 1) {
-        const sleepTime = Math.pow(2, i) * 1000 + Math.random() * 1000;
+      if (i < attempts - 1) {
+        const sleepTime = Math.round(Math.pow(2, i) * 1000 + Math.random() * 1000);
         Utilities.sleep(sleepTime);
       } else {
         throw e;
@@ -734,6 +735,47 @@ function safeJsonParse(jsonString) {
   } catch (e) {
     return null;
   }
+}
+
+/**
+ * Parses a backend JSON response and surfaces malformed responses clearly.
+ * @param {HTTPResponse} response The backend response.
+ * @param {string} context Additional context for diagnostics.
+ * @return {object} The parsed JSON response.
+ */
+function parseBackendJsonResponse(response, context) {
+  const data = safeJsonParse(response.getContentText());
+  if (!data || typeof data !== 'object') {
+    cc.newUserError()
+      .setDebugText(`Invalid JSON response from backend (${context}).`)
+      .setText('The connector backend returned an invalid response. Please try again later.')
+      .throwException();
+  }
+  return data;
+}
+
+/**
+ * Converts API values to Looker Studio booleans without treating "false" as true.
+ * @param {*} value The raw value from the API.
+ * @return {boolean} The normalized boolean value.
+ */
+function formatBooleanValue(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') {
+      return true;
+    }
+    if (normalized === 'false' || normalized === '0' || normalized === '') {
+      return false;
+    }
+  }
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+  return Boolean(value);
 }
 
 /**

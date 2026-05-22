@@ -7,8 +7,7 @@ const rateLimit = require('express-rate-limit');
 const fetch = require('node-fetch');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const { FileTokenStore, StateStore } = require('./store');
-const PORT = getListenTarget();
+const { FileStateStore, FileTokenStore } = require('./store');
 
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -17,6 +16,7 @@ const BACKEND_JWT_SECRET = process.env.BACKEND_JWT_SECRET;
 const TIKTOK_AUTH_URL = 'https://www.tiktok.com/v2/auth/authorize/';
 const TIKTOK_TOKEN_URL = 'https://open.tiktokapis.com/v2/oauth/token/';
 const TIKTOK_API_BASE_URL = 'https://open.tiktokapis.com/v2/';
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 const BACKEND_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_BODY_LIMIT = '10kb';
@@ -83,14 +83,26 @@ validateRequiredEnv();
 
 const tokenStorePath = process.env.TOKEN_STORE_PATH || path.join(__dirname, 'data', 'tokens.json');
 const tokenLockPath = process.env.TOKEN_LOCK_PATH || path.join(__dirname, 'data', 'tokens.json.lock');
+const stateStorePath = process.env.STATE_STORE_PATH || path.join(__dirname, 'data', 'oauth-state.json');
+const stateLockPath = process.env.STATE_LOCK_PATH || `${stateStorePath}.lock`;
 const tokenStore = new FileTokenStore({
   filePath: tokenStorePath,
   lockPath: tokenLockPath,
   encryptionKey: process.env.ENCRYPTION_KEY,
   pruneAfterDays: process.env.TOKEN_PRUNE_DAYS ? Number(process.env.TOKEN_PRUNE_DAYS) : undefined
 });
-const stateStore = new StateStore();
-const authCodeStore = new StateStore(AUTH_CODE_TTL_MS);
+const stateStore = new FileStateStore({
+  filePath: stateStorePath,
+  lockPath: stateLockPath,
+  ttlMs: OAUTH_STATE_TTL_MS,
+  namespace: 'tiktok_oauth_state'
+});
+const authCodeStore = new FileStateStore({
+  filePath: stateStorePath,
+  lockPath: stateLockPath,
+  ttlMs: AUTH_CODE_TTL_MS,
+  namespace: 'backend_authorization_code'
+});
 
 const REQUIRED_SCOPES = [
   'user.info.basic',
@@ -101,22 +113,22 @@ const REQUIRED_SCOPES = [
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
-function ensureTokenStoreOutsidePublic() {
-  const resolvedStore = path.resolve(tokenStorePath);
+function ensureStoreOutsidePublic(storePath, envName) {
+  const resolvedStore = path.resolve(storePath);
   const resolvedPublic = path.resolve(PUBLIC_DIR);
   const relative = path.relative(resolvedPublic, resolvedStore);
   if (!relative || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
-    throw new Error('TOKEN_STORE_PATH must be outside the public web root.');
+    throw new Error(`${envName} must be outside the public web root.`);
   }
 }
 
-ensureTokenStoreOutsidePublic();
+ensureStoreOutsidePublic(tokenStorePath, 'TOKEN_STORE_PATH');
+ensureStoreOutsidePublic(stateStorePath, 'STATE_STORE_PATH');
 
 const app = express();
-const trustProxyValue = process.env.TRUST_PROXY;
-if (trustProxyValue) {
-  const numeric = Number(trustProxyValue);
-  app.set('trust proxy', Number.isNaN(numeric) ? trustProxyValue : numeric);
+const trustProxySetting = getTrustProxySetting();
+if (trustProxySetting !== false) {
+  app.set('trust proxy', trustProxySetting);
 }
 
 app.use((req, res, next) => {
@@ -220,6 +232,60 @@ function requireBackendJwt() {
 
 function generateRandomToken(size = 32) {
   return crypto.randomBytes(size).toString('base64url');
+}
+
+function isPassengerRuntime() {
+  return Boolean(
+    process.env.PASSENGER_APP_ENV
+    || process.env.PASSENGER_APP_ROOT
+    || process.env.PASSENGER_BASE_URI
+    || process.env.PASSENGER_SPAWN_METHOD
+  );
+}
+
+function parseTrustProxyValue(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (['0', 'false', 'off', 'no'].includes(normalized)) {
+    return false;
+  }
+  if (['1', 'true', 'on', 'yes'].includes(normalized)) {
+    return 1;
+  }
+  const numeric = Number(value);
+  if (Number.isInteger(numeric) && numeric > 0) {
+    return numeric;
+  }
+  return value;
+}
+
+function getTrustProxySetting() {
+  const configured = parseTrustProxyValue(process.env.TRUST_PROXY);
+  if (configured !== null) {
+    return configured;
+  }
+  return isPassengerRuntime() ? 1 : false;
+}
+
+function getStateFingerprint(value) {
+  if (!value) {
+    return null;
+  }
+  return crypto
+    .createHash('sha256')
+    .update(String(value))
+    .digest('hex')
+    .slice(0, 12);
+}
+
+function logOAuthState(event, state, details = {}) {
+  console.info('oauth_state', {
+    event,
+    state_fingerprint: getStateFingerprint(state),
+    ...details
+  });
 }
 
 function getRedirectUri() {
@@ -388,13 +454,13 @@ function parseFieldsParam(fieldParam, allowedFields) {
   return requested;
 }
 
-function buildAuthorizationCode(subject, scopes) {
+async function buildAuthorizationCode(subject, scopes) {
   const code = generateRandomToken(24);
-  authCodeStore.save(code, { subject, scopes, createdAt: Date.now() });
+  await authCodeStore.save(code, { subject, scopes, createdAt: Date.now() });
   return code;
 }
 
-function consumeAuthorizationCode(code) {
+async function consumeAuthorizationCode(code) {
   return authCodeStore.consume(code);
 }
 
@@ -443,11 +509,12 @@ function isAllowedRedirect(redirectUri) {
   }
 }
 
-app.get('/auth/tiktok/start', (req, res) => {
+app.get('/auth/tiktok/start', async (req, res) => {
   try {
     requireEnv();
     const state = generateRandomToken(16);
-    stateStore.save(state, { flow: 'direct', createdAt: Date.now() });
+    await stateStore.save(state, { flow: 'direct', createdAt: Date.now() });
+    logOAuthState('create', state, { flow: 'direct', outcome: 'saved' });
     res.redirect(buildAuthUrl(state));
   } catch (error) {
     res.status(500).send('<h1>Configuration error</h1><p>Backend configuration error.</p>');
@@ -469,8 +536,17 @@ app.get('/auth/tiktok/callback', async (req, res) => {
       return res.status(400).send('<h1>Missing code or state</h1><p>Please restart authentication.</p>');
     }
 
-    const stateEntry = stateStore.consume(state);
-    if (!stateEntry) {
+    const stateResult = await stateStore.consumeWithResult(state);
+    logOAuthState('consume', state, {
+      outcome: stateResult.status,
+      flow: stateResult.entry ? stateResult.entry.flow : stateResult.metadata && stateResult.metadata.flow
+    });
+    if (stateResult.status !== 'consumed') {
+      return res.status(400).send('<h1>Invalid state</h1><p>Please restart authentication.</p>');
+    }
+    const stateEntry = stateResult.entry;
+    if (!stateEntry || !['direct', 'oauth'].includes(stateEntry.flow)) {
+      logOAuthState('consume', state, { outcome: 'mismatched', flow: stateEntry && stateEntry.flow });
       return res.status(400).send('<h1>Invalid state</h1><p>Please restart authentication.</p>');
     }
 
@@ -491,7 +567,7 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     await tokenStore.saveConnectorToken(record.openId, record);
 
     if (stateEntry.flow === 'oauth') {
-      const authCode = buildAuthorizationCode(record.openId, record.scopes);
+      const authCode = await buildAuthorizationCode(record.openId, record.scopes);
       const redirect = new URL(stateEntry.redirectUri);
       redirect.searchParams.set('code', authCode);
       redirect.searchParams.set('state', stateEntry.lookerState);
@@ -520,7 +596,7 @@ app.get('/auth/tiktok/callback', async (req, res) => {
   }
 });
 
-app.get('/oauth/authorize', (req, res) => {
+app.get('/oauth/authorize', async (req, res) => {
   try {
     requireEnv();
     const { state, redirect_uri: redirectUri, response_type: responseType, client_id: clientId } = req.query;
@@ -537,11 +613,12 @@ app.get('/oauth/authorize', (req, res) => {
       return res.status(400).send('<h1>Invalid redirect URI</h1><p>Redirect URI not allowed.</p>');
     }
     const tiktokState = generateRandomToken(16);
-    stateStore.save(tiktokState, {
+    await stateStore.save(tiktokState, {
       flow: 'oauth',
       redirectUri,
       lookerState: state
     });
+    logOAuthState('create', tiktokState, { flow: 'oauth', outcome: 'saved' });
     res.redirect(buildAuthUrl(tiktokState));
   } catch (error) {
     res.status(500).send('<h1>Configuration error</h1><p>Backend configuration error.</p>');
@@ -565,7 +642,7 @@ app.post('/oauth/token', async (req, res) => {
       if (!code) {
         return res.status(400).json({ error: 'invalid_request', error_description: 'Missing code.' });
       }
-      const entry = consumeAuthorizationCode(code);
+      const entry = await consumeAuthorizationCode(code);
       if (!entry) {
         return res.status(400).json({ error: 'invalid_grant', error_description: 'Code expired or invalid.' });
       }
@@ -770,7 +847,10 @@ function stopStores() {
 module.exports = {
   app,
   escapeHtml,
+  getStateFingerprint,
+  getTrustProxySetting,
   isAllowedRedirect,
+  parseTrustProxyValue,
   parseFieldsParam,
   readJsonResponse,
   stopStores

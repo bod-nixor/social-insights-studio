@@ -404,7 +404,232 @@ class StateStore {
   }
 }
 
+function getStateStorageKey(namespace, state) {
+  return crypto
+    .createHash('sha256')
+    .update(`${namespace}:${String(state)}`)
+    .digest('hex');
+}
+
+class FileStateStore {
+  constructor(options = {}) {
+    this.filePath = options.filePath || path.join(__dirname, 'data', 'oauth-state.json');
+    this.lockPath = options.lockPath || `${this.filePath}.lock`;
+    this.ttlMs = options.ttlMs || TOKEN_STATE_TTL_MS;
+    this.namespace = options.namespace || 'default';
+    const cleanupIntervalMs = options.cleanupIntervalMs === undefined
+      ? Math.max(Math.floor(this.ttlMs / 2), 60 * 1000)
+      : options.cleanupIntervalMs;
+    this.intervalId = null;
+    if (cleanupIntervalMs > 0) {
+      this.intervalId = setInterval(() => {
+        this.pruneExpiredEntries().catch(error => {
+          console.error('FileStateStore prune failed:', { error: error.message, namespace: this.namespace });
+        });
+      }, cleanupIntervalMs);
+      if (typeof this.intervalId.unref === 'function') {
+        this.intervalId.unref();
+      }
+    }
+  }
+
+  getStorageKey(state) {
+    return getStateStorageKey(this.namespace, state);
+  }
+
+  async withLock(fn) {
+    const start = Date.now();
+    let fd = null;
+    ensureDirSecure(path.dirname(this.lockPath));
+    while (!fd) {
+      try {
+        fd = fs.openSync(this.lockPath, 'wx', 0o600);
+        try {
+          fs.writeSync(fd, `${process.pid}\n`);
+          fs.fsyncSync(fd);
+        } catch (error) {
+          if (fd) {
+            try {
+              fs.closeSync(fd);
+            } catch (closeError) {
+              // ignore
+            }
+            fd = null;
+          }
+          try {
+            fs.unlinkSync(this.lockPath);
+          } catch (unlinkError) {
+            // ignore cleanup errors; the stale-lock path can clear it later
+          }
+          throw error;
+        }
+      } catch (error) {
+        if (error.code !== 'EEXIST') {
+          throw error;
+        }
+        const staleCleared = this.tryClearStaleLock();
+        if (staleCleared) {
+          continue;
+        }
+        if (Date.now() - start > LOCK_TIMEOUT_MS) {
+          throw new Error('State store lock timeout.');
+        }
+        await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_DELAY_MS));
+      }
+    }
+
+    try {
+      return await fn();
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch (error) {
+        // ignore
+      }
+      try {
+        fs.unlinkSync(this.lockPath);
+      } catch (error) {
+        // ignore
+      }
+    }
+  }
+
+  tryClearStaleLock() {
+    try {
+      const pidText = fs.readFileSync(this.lockPath, 'utf8').trim();
+      const pid = Number.parseInt(pidText, 10);
+      if (!Number.isNaN(pid) && this.isProcessAlive(pid)) {
+        return false;
+      }
+    } catch (error) {
+      // ignore and attempt cleanup
+    }
+    try {
+      fs.unlinkSync(this.lockPath);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  isProcessAlive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === 'EPERM';
+    }
+  }
+
+  async readData() {
+    try {
+      const raw = await fs.promises.readFile(this.filePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') {
+        return { version: 1, states: {} };
+      }
+      return {
+        version: parsed.version || 1,
+        states: parsed.states && typeof parsed.states === 'object' ? parsed.states : {}
+      };
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        return { version: 1, states: {} };
+      }
+      throw error;
+    }
+  }
+
+  async writeData(data) {
+    await writeFileAtomic(this.filePath, JSON.stringify(data, null, 2));
+  }
+
+  pruneData(data, now = Date.now()) {
+    const states = {};
+    Object.entries(data.states || {}).forEach(([key, entry]) => {
+      if (entry && entry.expires_at > now) {
+        states[key] = entry;
+      }
+    });
+    return { ...data, states };
+  }
+
+  async save(state, record) {
+    if (!state) {
+      throw new Error('Cannot save empty OAuth state.');
+    }
+    return this.withLock(async () => {
+      const now = Date.now();
+      const data = this.pruneData(await this.readData(), now);
+      data.states[this.getStorageKey(state)] = {
+        namespace: this.namespace,
+        data: { ...record },
+        created_at: now,
+        expires_at: now + this.ttlMs
+      };
+      await this.writeData(data);
+    });
+  }
+
+  async consume(state) {
+    const result = await this.consumeWithResult(state);
+    return result.status === 'consumed' ? result.entry : null;
+  }
+
+  async consumeWithResult(state) {
+    if (!state) {
+      return { status: 'missing', entry: null };
+    }
+    return this.withLock(async () => {
+      const now = Date.now();
+      const data = await this.readData();
+      const key = this.getStorageKey(state);
+      const entry = data.states[key];
+
+      if (!entry) {
+        const pruned = this.pruneData(data, now);
+        if (Object.keys(pruned.states).length !== Object.keys(data.states || {}).length) {
+          await this.writeData(pruned);
+        }
+        return { status: 'missing', entry: null };
+      }
+
+      delete data.states[key];
+      const pruned = this.pruneData(data, now);
+      await this.writeData(pruned);
+
+      if (entry.expires_at <= now) {
+        return {
+          status: 'expired',
+          entry: null,
+          metadata: { flow: entry.data && entry.data.flow }
+        };
+      }
+
+      return { status: 'consumed', entry: entry.data };
+    });
+  }
+
+  async pruneExpiredEntries() {
+    return this.withLock(async () => {
+      const data = await this.readData();
+      const pruned = this.pruneData(data);
+      if (Object.keys(pruned.states).length !== Object.keys(data.states || {}).length) {
+        await this.writeData(pruned);
+      }
+    });
+  }
+
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+}
+
 module.exports = {
+  FileStateStore,
   FileTokenStore,
   StateStore,
   TOKEN_REFRESH_BUFFER_MS

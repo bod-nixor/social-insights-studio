@@ -1,4 +1,5 @@
 server/data/tokens.json
+server/data/oauth-state.json
 server/data/*.lock
 server/data/*.tmp
 server/node_modules/

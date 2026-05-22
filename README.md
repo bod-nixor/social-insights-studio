@@ -99,7 +99,9 @@ Follow these steps carefully to set up and deploy your connector.
 3. Recommended backend environment variables:
    * `TOKEN_STORE_PATH`: Absolute path outside the public web root (e.g., `/var/lib/social-insights-studio/tokens.json`).
    * `TOKEN_LOCK_PATH`: Lock file path in the same private directory.
-   * `TRUST_PROXY`: Set to `1` when behind Passenger or a reverse proxy.
+   * `STATE_STORE_PATH`: Absolute path for short-lived OAuth state storage (e.g., `/var/lib/social-insights-studio/oauth-state.json`).
+   * `STATE_LOCK_PATH`: Lock file path for OAuth state storage.
+   * `TRUST_PROXY`: Set to `1` when behind Passenger; use the explicit proxy hop count required by your stack (for example, `2` if Cloudflare and Passenger both sit in front of Node).
    * `ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins (leave blank for server-to-server only).
 4. Start the backend from `server/` using `npm start`.
 5. Update the TikTok **Redirect URI** to: `https://<your-domain>/auth/tiktok/callback`.
@@ -165,10 +167,12 @@ The following properties must be set in your Apps Script project's `Project sett
 | `TOKEN_STORE_PATH` | Absolute path for encrypted token storage (outside public web root). |
 | `TOKEN_LOCK_PATH` | Lock file path in the same private directory. |
 | `TOKEN_PRUNE_DAYS` | Number of days before pruning expired refresh tokens (default: 30). |
+| `STATE_STORE_PATH` | Absolute path for short-lived OAuth state storage (outside public web root, default: `server/data/oauth-state.json`). |
+| `STATE_LOCK_PATH` | Lock file path for OAuth state storage. |
 | `LOOKER_CLIENT_ID` | Expected OAuth client ID for Looker Studio (default: `looker-studio-connector`). |
 | `LOOKER_CLIENT_SECRET` | Expected OAuth client secret (default: `unused`). |
 | `ALLOWED_ORIGINS` | Comma-separated list of allowed browser origins for API calls. |
-| `TRUST_PROXY` | Set to `1` when running behind Passenger/reverse proxy. |
+| `TRUST_PROXY` | Proxy hop count for Express/rate limiting. Defaults to `1` when Passenger is detected; set explicitly for Cloudflare or additional proxies. |
 | `RATE_LIMIT_WINDOW_MINUTES` | Auth rate limit window in minutes (default: 15). |
 | `RATE_LIMIT_MAX` | Max auth requests per window (default: 60). |
 | `API_RATE_LIMIT_WINDOW_MINUTES` | API rate limit window in minutes (default: 5). |
@@ -183,8 +187,9 @@ The following properties must be set in your Apps Script project's `Project sett
    * `chmod 700 /home/<user>/secure/social-insights/`
    * `chmod 600 /home/<user>/secure/social-insights/tokens.json` (after first run)
 5. Set `TOKEN_STORE_PATH` and `TOKEN_LOCK_PATH` to files in that private directory.
-6. Set `TRUST_PROXY=1` so Express honors `X-Forwarded-*` headers behind Passenger.
-7. Restart the Passenger app to pick up configuration changes.
+6. Set `TRUST_PROXY=1` so Express honors `X-Forwarded-*` headers behind Passenger, or set the exact hop count for your full proxy chain.
+7. Set `STATE_STORE_PATH` and `STATE_LOCK_PATH` to files in the same private directory so OAuth state survives Passenger worker restarts.
+8. Restart the Passenger app to pick up configuration changes.
 
 ## API Scopes Used
 

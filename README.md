@@ -105,7 +105,7 @@ Follow these steps carefully to set up and deploy your connector.
    * `ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins (leave blank for server-to-server only).
 4. Start the backend from `server/` using `npm start`.
 5. Update the TikTok **Redirect URI** to: `https://<your-domain>/auth/tiktok/callback`.
-6. Ensure the token directory is private (`chmod 700`) and token files are restricted (`chmod 600`).
+6. Ensure the token/state directory is private (`chmod 700`) and persisted token/state files are restricted (`chmod 600`).
 
 ### Step 3: Create a Google Apps Script Project
 
@@ -186,6 +186,7 @@ The following properties must be set in your Apps Script project's `Project sett
 4. Set permissions:
    * `chmod 700 /home/<user>/secure/social-insights/`
    * `chmod 600 /home/<user>/secure/social-insights/tokens.json` (after first run)
+   * `chmod 600 /home/<user>/secure/social-insights/oauth-state.json` (after first run)
 5. Set `TOKEN_STORE_PATH` and `TOKEN_LOCK_PATH` to files in that private directory.
 6. Set `TRUST_PROXY=1` so Express honors `X-Forwarded-*` headers behind Passenger, or set the exact hop count for your full proxy chain.
 7. Set `STATE_STORE_PATH` and `STATE_LOCK_PATH` to files in the same private directory so OAuth state survives Passenger worker restarts.

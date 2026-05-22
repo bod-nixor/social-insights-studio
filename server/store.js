@@ -131,14 +131,14 @@ class FileTokenStore {
     const start = Date.now();
     let fd = null;
     ensureDirSecure(path.dirname(this.lockPath));
-    while (!fd) {
+    while (fd === null) {
       try {
         fd = fs.openSync(this.lockPath, 'wx', 0o600);
         try {
           fs.writeSync(fd, `${process.pid}\n`);
           fs.fsyncSync(fd);
         } catch (error) {
-          if (fd) {
+          if (fd !== null) {
             try {
               fs.closeSync(fd);
             } catch (closeError) {
@@ -171,10 +171,13 @@ class FileTokenStore {
     try {
       return await fn();
     } finally {
-      try {
-        fs.closeSync(fd);
-      } catch (error) {
-        // ignore
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch (error) {
+          // ignore
+        }
+        fd = null;
       }
       try {
         fs.unlinkSync(this.lockPath);
@@ -441,14 +444,14 @@ class FileStateStore {
     const start = Date.now();
     let fd = null;
     ensureDirSecure(path.dirname(this.lockPath));
-    while (!fd) {
+    while (fd === null) {
       try {
         fd = fs.openSync(this.lockPath, 'wx', 0o600);
         try {
           fs.writeSync(fd, `${process.pid}\n`);
           fs.fsyncSync(fd);
         } catch (error) {
-          if (fd) {
+          if (fd !== null) {
             try {
               fs.closeSync(fd);
             } catch (closeError) {
@@ -481,10 +484,13 @@ class FileStateStore {
     try {
       return await fn();
     } finally {
-      try {
-        fs.closeSync(fd);
-      } catch (error) {
-        // ignore
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch (error) {
+          // ignore
+        }
+        fd = null;
       }
       try {
         fs.unlinkSync(this.lockPath);

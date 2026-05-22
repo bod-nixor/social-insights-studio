@@ -9,7 +9,6 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 const { FileStateStore, FileTokenStore } = require('./store');
 
-const PORT = Number(process.env.PORT || 3001);
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
 const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
@@ -793,28 +792,47 @@ app.post('/api/connector/revoke', (req, res) => {
     .catch(() => res.status(500).json({ error: 'server_error' }));
 });
 
+function getListenTarget() {
+  if (typeof PhusionPassenger !== 'undefined') {
+    return 'passenger';
+  }
+
+  const raw = process.env.PORT || process.env.PASSENGER_PORT || '3001';
+
+  if (/^\d+$/.test(String(raw))) {
+    return Number(raw);
+  }
+
+  return raw;
+}
+
 let server;
 
-if (require.main === module) {
-  server = app.listen(PORT, () => {
-    console.log(`Backend listening on ${BASE_URL}`);
+if (process.env.NODE_ENV !== 'test') {
+  const listenTarget = getListenTarget();
+
+  server = app.listen(listenTarget, () => {
+    console.log(`Backend listening on ${BASE_URL} via ${listenTarget}`);
   });
 }
 
 function shutdown() {
   console.log('Shutting down gracefully...');
   authCodeStore.stop();
+
   if (typeof stateStore.stop === 'function') {
     stateStore.stop();
   }
+
   if (server) {
     server.close(() => process.exit(0));
     return;
   }
+
   process.exit(0);
 }
 
-if (require.main === module) {
+if (process.env.NODE_ENV !== 'test') {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }

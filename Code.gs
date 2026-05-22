@@ -70,21 +70,14 @@ function getOAuthService() {
  * @return {object} The authorization URL response.
  */
 function get3PAuthorizationUrls() {
-  try {
-    const service = getOAuthService();
-    const url = service.getAuthorizationUrl();
-    if (!url) {
-      throw new Error('Authorization URL unavailable.');
-    }
-    return {
-      authorizationUrl: String(url)
-    };
-  } catch (e) {
-    cc.newUserError()
-      .setDebugText('Failed to generate authorization URL.')
-      .setText('Unable to start the authorization flow. Please contact support.')
-      .throwException();
-  }
+  const url = getOAuthService().getAuthorizationUrl();
+  Logger.log('OAuth authorization URL: ' + url);
+  return url;
+}
+
+function debugAuthUrl() {
+  const url = get3PAuthorizationUrls();
+  Logger.log(url);
 }
 
 /**

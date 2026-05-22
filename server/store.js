@@ -119,6 +119,93 @@ async function writeFileAtomic(filePath, contents) {
   }
 }
 
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+function tryClearStaleLock(lockPath) {
+  try {
+    const pidText = fs.readFileSync(lockPath, 'utf8').trim();
+    const pid = Number.parseInt(pidText, 10);
+    if (!Number.isNaN(pid) && isProcessAlive(pid)) {
+      return false;
+    }
+  } catch (error) {
+    // ignore and attempt cleanup
+  }
+  try {
+    fs.unlinkSync(lockPath);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function withFileLock(lockPath, timeoutMessage, fn) {
+  const start = Date.now();
+  let fd = null;
+  ensureDirSecure(path.dirname(lockPath));
+  while (fd === null) {
+    try {
+      fd = fs.openSync(lockPath, 'wx', 0o600);
+      try {
+        fs.writeSync(fd, `${process.pid}\n`);
+        fs.fsyncSync(fd);
+      } catch (error) {
+        if (fd !== null) {
+          try {
+            fs.closeSync(fd);
+          } catch (closeError) {
+            // ignore
+          }
+          fd = null;
+        }
+        try {
+          fs.unlinkSync(lockPath);
+        } catch (unlinkError) {
+          // ignore cleanup errors; the stale-lock path can clear it later
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (error.code !== 'EEXIST') {
+        throw error;
+      }
+      const staleCleared = tryClearStaleLock(lockPath);
+      if (staleCleared) {
+        continue;
+      }
+      if (Date.now() - start > LOCK_TIMEOUT_MS) {
+        throw new Error(timeoutMessage);
+      }
+      await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_DELAY_MS));
+    }
+  }
+
+  try {
+    return await fn();
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (error) {
+        // ignore
+      }
+      fd = null;
+    }
+    try {
+      fs.unlinkSync(lockPath);
+    } catch (error) {
+      // ignore
+    }
+  }
+}
+
 class FileTokenStore {
   constructor(options = {}) {
     this.filePath = options.filePath || path.join(__dirname, 'data', 'tokens.json');
@@ -128,90 +215,7 @@ class FileTokenStore {
   }
 
   async withLock(fn) {
-    const start = Date.now();
-    let fd = null;
-    ensureDirSecure(path.dirname(this.lockPath));
-    while (fd === null) {
-      try {
-        fd = fs.openSync(this.lockPath, 'wx', 0o600);
-        try {
-          fs.writeSync(fd, `${process.pid}\n`);
-          fs.fsyncSync(fd);
-        } catch (error) {
-          if (fd !== null) {
-            try {
-              fs.closeSync(fd);
-            } catch (closeError) {
-              // ignore
-            }
-            fd = null;
-          }
-          try {
-            fs.unlinkSync(this.lockPath);
-          } catch (unlinkError) {
-            // ignore cleanup errors; the stale-lock path can clear it later
-          }
-          throw error;
-        }
-      } catch (error) {
-        if (error.code !== 'EEXIST') {
-          throw error;
-        }
-        const staleCleared = this.tryClearStaleLock();
-        if (staleCleared) {
-          continue;
-        }
-        if (Date.now() - start > LOCK_TIMEOUT_MS) {
-          throw new Error('Token store lock timeout.');
-        }
-        await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_DELAY_MS));
-      }
-    }
-
-    try {
-      return await fn();
-    } finally {
-      if (fd !== null) {
-        try {
-          fs.closeSync(fd);
-        } catch (error) {
-          // ignore
-        }
-        fd = null;
-      }
-      try {
-        fs.unlinkSync(this.lockPath);
-      } catch (error) {
-        // ignore
-      }
-    }
-  }
-
-  tryClearStaleLock() {
-    try {
-      const pidText = fs.readFileSync(this.lockPath, 'utf8').trim();
-      const pid = Number.parseInt(pidText, 10);
-      if (!Number.isNaN(pid) && this.isProcessAlive(pid)) {
-        return false;
-      }
-    } catch (error) {
-      // ignore and attempt cleanup
-    }
-    try {
-      fs.unlinkSync(this.lockPath);
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  isProcessAlive(pid) {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return error.code === 'EPERM';
-    }
+    return withFileLock(this.lockPath, 'Token store lock timeout.', fn);
   }
 
   async readData() {
@@ -441,90 +445,7 @@ class FileStateStore {
   }
 
   async withLock(fn) {
-    const start = Date.now();
-    let fd = null;
-    ensureDirSecure(path.dirname(this.lockPath));
-    while (fd === null) {
-      try {
-        fd = fs.openSync(this.lockPath, 'wx', 0o600);
-        try {
-          fs.writeSync(fd, `${process.pid}\n`);
-          fs.fsyncSync(fd);
-        } catch (error) {
-          if (fd !== null) {
-            try {
-              fs.closeSync(fd);
-            } catch (closeError) {
-              // ignore
-            }
-            fd = null;
-          }
-          try {
-            fs.unlinkSync(this.lockPath);
-          } catch (unlinkError) {
-            // ignore cleanup errors; the stale-lock path can clear it later
-          }
-          throw error;
-        }
-      } catch (error) {
-        if (error.code !== 'EEXIST') {
-          throw error;
-        }
-        const staleCleared = this.tryClearStaleLock();
-        if (staleCleared) {
-          continue;
-        }
-        if (Date.now() - start > LOCK_TIMEOUT_MS) {
-          throw new Error('State store lock timeout.');
-        }
-        await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_DELAY_MS));
-      }
-    }
-
-    try {
-      return await fn();
-    } finally {
-      if (fd !== null) {
-        try {
-          fs.closeSync(fd);
-        } catch (error) {
-          // ignore
-        }
-        fd = null;
-      }
-      try {
-        fs.unlinkSync(this.lockPath);
-      } catch (error) {
-        // ignore
-      }
-    }
-  }
-
-  tryClearStaleLock() {
-    try {
-      const pidText = fs.readFileSync(this.lockPath, 'utf8').trim();
-      const pid = Number.parseInt(pidText, 10);
-      if (!Number.isNaN(pid) && this.isProcessAlive(pid)) {
-        return false;
-      }
-    } catch (error) {
-      // ignore and attempt cleanup
-    }
-    try {
-      fs.unlinkSync(this.lockPath);
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  isProcessAlive(pid) {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return error.code === 'EPERM';
-    }
+    return withFileLock(this.lockPath, 'State store lock timeout.', fn);
   }
 
   async readData() {

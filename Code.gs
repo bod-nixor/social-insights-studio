@@ -779,3 +779,9 @@ function formatBooleanValue(value) {
 function logError(context, error) {
   Logger.log(`${context}: ${error.message}\nStack: ${error.stack}`);
 }
+
+function forceResetAuth() {
+  const service = getOAuthService();
+  service.reset();
+  Logger.log('Auth valid after reset: ' + service.hasAccess());
+}

@@ -517,6 +517,16 @@ app.get('/auth/tiktok/start', async (req, res) => {
     logOAuthState('create', state, { flow: 'direct', outcome: 'saved' });
     res.redirect(buildAuthUrl(state));
   } catch (error) {
+    console.error('OAuth authorize configuration error:', {
+      message: error && error.message,
+      stack: error && error.stack,
+      stateStorePath,
+      stateLockPath,
+      cwd: process.cwd(),
+      nodeEnv: process.env.NODE_ENV,
+      trustProxy: app.get('trust proxy')
+    });
+
     res.status(500).send('<h1>Configuration error</h1><p>Backend configuration error.</p>');
   }
 });
@@ -621,6 +631,16 @@ app.get('/oauth/authorize', async (req, res) => {
     logOAuthState('create', tiktokState, { flow: 'oauth', outcome: 'saved' });
     res.redirect(buildAuthUrl(tiktokState));
   } catch (error) {
+    console.error('OAuth authorize configuration error:', {
+      message: error && error.message,
+      stack: error && error.stack,
+      stateStorePath,
+      stateLockPath,
+      cwd: process.cwd(),
+      nodeEnv: process.env.NODE_ENV,
+      trustProxy: app.get('trust proxy')
+    });
+
     res.status(500).send('<h1>Configuration error</h1><p>Backend configuration error.</p>');
   }
 });

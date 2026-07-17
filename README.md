@@ -79,6 +79,9 @@ Google OIDC currently fails closed unless configured and completed; magic links 
 
 ## Production Deployment Notes
 
+For a controlled cPanel staging deployment and TikTok Sandbox verification, use
+[`docs/cpanel-staging-runbook.md`](docs/cpanel-staging-runbook.md).
+
 1. Install dependencies for `server/` and `apps/web/`.
 2. Build the web app with `npm run web:build`.
 3. Set Passenger to run `server/index.js`.

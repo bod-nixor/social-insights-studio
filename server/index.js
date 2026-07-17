@@ -11,6 +11,7 @@ const fs = require('fs');
 const { FileStateStore, FileTokenStore } = require('./store');
 const { getConnection } = require('./database');
 const { createPlatformRouter } = require('./platform/routes');
+const { validateMailConfiguration } = require('./platform/mail');
 
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -59,57 +60,100 @@ const ALLOWED_VIDEO_FIELDS = [
   'embed_link'
 ];
 
-function validateRequiredEnv() {
-  const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
-  if (!BASE_URL) {
+function isPlaceholderValue(value) {
+  return /replace_with|your_|placeholder|changeme|unused/i.test(String(value || ''));
+}
+
+function normalizeHostname(hostname) {
+  return String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+}
+
+function isLocalHostname(hostname) {
+  const normalized = normalizeHostname(hostname);
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1' || normalized.endsWith('.localhost');
+}
+
+function validateRequiredEnv(env = process.env) {
+  const isProduction = String(env.NODE_ENV || '').toLowerCase() === 'production';
+  const baseUrlValue = env.BASE_URL;
+  const tiktokClientKey = env.TIKTOK_CLIENT_KEY;
+  const tiktokClientSecret = env.TIKTOK_CLIENT_SECRET;
+  const backendJwtSecret = env.BACKEND_JWT_SECRET;
+  if (!baseUrlValue) {
     throw new Error('Missing BASE_URL environment variable.');
   }
-  if (isProduction && !BASE_URL.startsWith('https://')) {
-    throw new Error('BASE_URL must be https:// in production.');
+  let parsedBaseUrl;
+  try {
+    parsedBaseUrl = new URL(baseUrlValue);
+  } catch (error) {
+    throw new Error('BASE_URL must be a valid absolute URL.');
   }
-  if (!process.env.ENCRYPTION_KEY) {
+  if (isProduction) {
+    if (parsedBaseUrl.protocol !== 'https:') {
+      throw new Error('BASE_URL must be https:// in production.');
+    }
+    if (isLocalHostname(parsedBaseUrl.hostname)) {
+      throw new Error('BASE_URL must not use localhost in production.');
+    }
+  }
+  if (!env.ENCRYPTION_KEY) {
     throw new Error('Missing ENCRYPTION_KEY environment variable.');
   }
-  if (!BACKEND_JWT_SECRET) {
+  if (!backendJwtSecret) {
     throw new Error('Missing BACKEND_JWT_SECRET environment variable.');
   }
   const weakSecrets = new Set(['changeme', 'change-me', 'secret', 'password', 'default', 'unused']);
-  if (BACKEND_JWT_SECRET.length < 32 || weakSecrets.has(BACKEND_JWT_SECRET.toLowerCase())) {
+  if (
+    backendJwtSecret.length < 32 ||
+    weakSecrets.has(backendJwtSecret.toLowerCase()) ||
+    (isProduction && isPlaceholderValue(backendJwtSecret))
+  ) {
     throw new Error(
       'BACKEND_JWT_SECRET must be at least 32 characters and not a common placeholder. ' +
       'Generate a cryptographically random secret (e.g., crypto.randomBytes(32).toString("hex")).'
     );
   }
   if (isProduction) {
-    const placeholderPattern = /replace_with|your_|placeholder|changeme|unused/i;
-    if (!process.env.DATABASE_URL) {
+    if (!env.DATABASE_URL) {
       throw new Error('DATABASE_URL is required in production.');
     }
-    if (process.env.AUTH_DEV_MAGIC_LINKS === 'true') {
+    if (isPlaceholderValue(env.DATABASE_URL)) {
+      throw new Error('DATABASE_URL must not contain placeholders in production.');
+    }
+    if (env.AUTH_DEV_MAGIC_LINKS === 'true') {
       throw new Error('AUTH_DEV_MAGIC_LINKS must be disabled in production.');
     }
-    if (placeholderPattern.test(process.env.ENCRYPTION_KEY) || new Set(process.env.ENCRYPTION_KEY).size === 1) {
+    validateMailConfiguration(env);
+    if (isPlaceholderValue(env.ENCRYPTION_KEY) || new Set(env.ENCRYPTION_KEY).size === 1) {
       throw new Error('ENCRYPTION_KEY must be a real random 32-byte key in production.');
     }
-    if (!process.env.ENCRYPTION_KEY_VERSION || process.env.ENCRYPTION_KEY_VERSION === 'local-v1') {
+    if (!env.ENCRYPTION_KEY_VERSION || env.ENCRYPTION_KEY_VERSION === 'local-v1' || isPlaceholderValue(env.ENCRYPTION_KEY_VERSION)) {
       throw new Error('ENCRYPTION_KEY_VERSION must be set to a production key version.');
     }
-    if ((process.env.ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).includes('*')) {
+    if ((env.ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).includes('*')) {
       throw new Error('ALLOWED_ORIGINS must not contain wildcard origins in production.');
     }
-    const trustProxy = parseTrustProxyValue(process.env.TRUST_PROXY);
+    const expectedTikTokRedirect = `${parsedBaseUrl.origin}/api/integrations/tiktok/callback`;
+    const configuredTikTokRedirect = env.TIKTOK_REDIRECT_URI || expectedTikTokRedirect;
+    if (configuredTikTokRedirect !== expectedTikTokRedirect) {
+      throw new Error('TIKTOK_REDIRECT_URI must be the exact standalone callback URL for BASE_URL.');
+    }
+    const trustProxy = parseTrustProxyValue(env.TRUST_PROXY);
     const allowedTrustProxyNames = new Set(['loopback', 'linklocal', 'uniquelocal']);
     if (typeof trustProxy === 'string' && !allowedTrustProxyNames.has(trustProxy)) {
       throw new Error('TRUST_PROXY must be a numeric hop count, false, or a recognized proxy range in production.');
     }
   }
-  if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) {
+  if (!tiktokClientKey || !tiktokClientSecret) {
     throw new Error('Missing TikTok client credentials. Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET.');
   }
-  if (process.env.LOOKER_CLIENT_SECRET && weakSecrets.has(process.env.LOOKER_CLIENT_SECRET.toLowerCase())) {
+  if (isProduction && (isPlaceholderValue(tiktokClientKey) || isPlaceholderValue(tiktokClientSecret))) {
+    throw new Error('TikTok client credentials must not contain placeholders in production.');
+  }
+  if (env.LOOKER_CLIENT_SECRET && weakSecrets.has(env.LOOKER_CLIENT_SECRET.toLowerCase())) {
     throw new Error('LOOKER_CLIENT_SECRET must be omitted for the public legacy connector or set to a real secret.');
   }
-  if ((process.env.LOOKER_REDIRECT_URIS || '').includes('*')) {
+  if ((env.LOOKER_REDIRECT_URIS || '').includes('*')) {
     throw new Error('LOOKER_REDIRECT_URIS must contain exact callback URLs, not wildcards.');
   }
 }
@@ -1223,5 +1267,6 @@ module.exports = {
   parseFieldsParam,
   readJsonResponse,
   setFetchImplementation,
-  stopStores
+  stopStores,
+  validateRequiredEnv
 };

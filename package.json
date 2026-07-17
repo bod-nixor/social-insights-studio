@@ -16,6 +16,7 @@
     "db:seed": "node server/scripts/seed-development.js",
     "test:db": "node --test server/test/database.test.js",
     "coverage:backend": "node --test --experimental-test-coverage server/test/*.test.js",
+    "preflight:production": "node server/scripts/validate-production-env.js",
     "worker": "node server/worker.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

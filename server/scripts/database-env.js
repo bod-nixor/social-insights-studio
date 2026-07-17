@@ -2,7 +2,10 @@ const path = require('path');
 const dotenv = require('dotenv');
 
 const ROOT_DIR = path.resolve(__dirname, '..', '..');
-dotenv.config({ path: path.join(ROOT_DIR, '.env.database.local') });
+dotenv.config({ path: path.join(ROOT_DIR, '.env') });
+if (String(process.env.NODE_ENV || '').toLowerCase() !== 'production') {
+  dotenv.config({ path: path.join(ROOT_DIR, '.env.database.local') });
+}
 
 function getDatabaseUrl(target = 'dev') {
   const url = target === 'test'

@@ -34,7 +34,8 @@ const {
   parseFieldsParam,
   readJsonResponse,
   setFetchImplementation,
-  stopStores
+  stopStores,
+  validateRequiredEnv
 } = require('../index');
 const {
   buildAuthorizationUrl,
@@ -351,6 +352,75 @@ test('getTrustProxySetting defaults to one hop in Passenger', () => {
       process.env.TRUST_PROXY = originalTrustProxy;
     }
   }
+});
+
+test('production environment validation rejects unsafe staging values', () => {
+  const validProductionEnv = {
+    NODE_ENV: 'production',
+    BASE_URL: 'https://lstc.nixorcorporate.com',
+    DATABASE_URL: 'mariadb://social_insights:strong-db-password@localhost/social_insights_staging',
+    ENCRYPTION_KEY: '1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+    ENCRYPTION_KEY_VERSION: 'staging-2026-07-v1',
+    BACKEND_JWT_SECRET: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+    TIKTOK_CLIENT_KEY: 'sandbox-client-key',
+    TIKTOK_CLIENT_SECRET: 'sandbox-client-secret-value',
+    TIKTOK_REDIRECT_URI: 'https://lstc.nixorcorporate.com/api/integrations/tiktok/callback',
+    LOOKER_REDIRECT_URIS: 'https://script.google.com/macros/d/abc123/usercallback',
+    ALLOWED_ORIGINS: 'https://lstc.nixorcorporate.com',
+    TRUST_PROXY: '2',
+    AUTH_DEV_MAGIC_LINKS: 'false',
+    MAIL_ADAPTER: 'smtp',
+    MAIL_FROM: 'Social Insights Studio <no-reply@lstc.nixorcorporate.com>',
+    SMTP_HOST: 'mail.lstc.nixorcorporate.com',
+    SMTP_PORT: '465',
+    SMTP_SECURE: 'true',
+    SMTP_USER: 'no-reply@lstc.nixorcorporate.com',
+    SMTP_PASSWORD: 'smtp-staging-password'
+  };
+
+  assert.doesNotThrow(() => validateRequiredEnv(validProductionEnv));
+  assert.throws(
+    () => validateRequiredEnv({ ...validProductionEnv, BASE_URL: 'http://lstc.nixorcorporate.com' }),
+    /BASE_URL must be https/
+  );
+  assert.throws(
+    () => validateRequiredEnv({ ...validProductionEnv, BASE_URL: 'https://localhost:3001' }),
+    /BASE_URL must not use localhost/
+  );
+  assert.throws(
+    () => validateRequiredEnv({ ...validProductionEnv, AUTH_DEV_MAGIC_LINKS: 'true' }),
+    /AUTH_DEV_MAGIC_LINKS must be disabled/
+  );
+  assert.throws(
+    () => validateRequiredEnv({ ...validProductionEnv, MAIL_ADAPTER: 'development' }),
+    /mail_not_configured/
+  );
+  assert.throws(
+    () => validateRequiredEnv({ ...validProductionEnv, ALLOWED_ORIGINS: '*' }),
+    /ALLOWED_ORIGINS must not contain wildcard/
+  );
+  assert.throws(
+    () => validateRequiredEnv({
+      ...validProductionEnv,
+      TIKTOK_REDIRECT_URI: 'https://lstc.nixorcorporate.com/auth/tiktok/callback'
+    }),
+    /TIKTOK_REDIRECT_URI must be the exact standalone callback/
+  );
+  assert.throws(
+    () => validateRequiredEnv({ ...validProductionEnv, TIKTOK_CLIENT_SECRET: 'your_tiktok_client_secret' }),
+    /TikTok client credentials must not contain placeholders/
+  );
+  assert.throws(
+    () => validateRequiredEnv({
+      ...validProductionEnv,
+      DATABASE_URL: 'mariadb://social_insights:replace_with_password@localhost/social_insights_staging'
+    }),
+    /DATABASE_URL must not contain placeholders/
+  );
+  assert.throws(
+    () => validateRequiredEnv({ ...validProductionEnv, TRUST_PROXY: 'cloudflare' }),
+    /TRUST_PROXY must be a numeric hop count/
+  );
 });
 
 test('security helpers normalize email and serialize cookies with expected protections', () => {

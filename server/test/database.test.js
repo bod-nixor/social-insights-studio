@@ -25,6 +25,7 @@ const { app, stopStores } = require('../index');
 const { closePool } = require('../database');
 const { setGoogleOidcFetchImplementation } = require('../platform/google-oidc');
 const { setTikTokFetchImplementation, TIKTOK_SCOPES } = require('../integrations/tiktok');
+const { setMailTransportFactory } = require('../platform/mail');
 const { compareMetric, engagementRate } = require('../platform/analytics');
 const { assertCapability, hasCapability, canAssignRole } = require('../platform/rbac');
 const { runDueSyncs } = require('../platform/sync-service');
@@ -47,6 +48,7 @@ before(async () => {
 after(async () => {
   setGoogleOidcFetchImplementation(null);
   setTikTokFetchImplementation(null);
+  setMailTransportFactory(null);
   stopStores();
   await closePool();
   if (db) await db.end();
@@ -757,8 +759,17 @@ test('Google OIDC route fails closed when credentials are unavailable', async ()
 });
 
 test('production-only safety guards refuse development paths', async () => {
-  const previousNodeEnv = process.env.NODE_ENV;
-  const previousMailAdapter = process.env.MAIL_ADAPTER;
+  const names = [
+    'NODE_ENV',
+    'MAIL_ADAPTER',
+    'MAIL_FROM',
+    'SMTP_HOST',
+    'SMTP_PORT',
+    'SMTP_SECURE',
+    'SMTP_USER',
+    'SMTP_PASSWORD'
+  ];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
   try {
     process.env.NODE_ENV = 'production';
     process.env.MAIL_ADAPTER = 'development';
@@ -769,12 +780,42 @@ test('production-only safety guards refuse development paths', async () => {
     });
     assert.equal(response.statusCode, 503);
     assert.equal(response.json().error, 'mail_not_configured');
+
+    const sentMessages = [];
+    setMailTransportFactory(options => ({
+      options,
+      sendMail: async message => {
+        sentMessages.push({ options, message });
+        return { messageId: 'test-message-id' };
+      }
+    }));
+    process.env.MAIL_ADAPTER = 'smtp';
+    process.env.MAIL_FROM = 'Social Insights Studio <no-reply@example.com>';
+    process.env.SMTP_HOST = 'smtp.example.com';
+    process.env.SMTP_PORT = '465';
+    process.env.SMTP_SECURE = 'true';
+    process.env.SMTP_USER = 'no-reply@example.com';
+    process.env.SMTP_PASSWORD = 'smtp-password';
+
+    const smtpResponse = await requestApp('/api/auth/magic-link/request', {
+      method: 'POST',
+      body: { email: 'prod-smtp@example.com' }
+    });
+    assert.equal(smtpResponse.statusCode, 200);
+    assert.deepEqual(smtpResponse.json(), { sent: true });
+    assert.equal(sentMessages.length, 1);
+    assert.equal(sentMessages[0].options.host, 'smtp.example.com');
+    assert.equal(sentMessages[0].options.secure, true);
+    assert.equal(sentMessages[0].message.to, 'prod-smtp@example.com');
+    assert.equal(sentMessages[0].message.text.includes('one-time sign-in code'), true);
   } finally {
-    process.env.NODE_ENV = previousNodeEnv;
-    if (previousMailAdapter === undefined) {
-      delete process.env.MAIL_ADAPTER;
-    } else {
-      process.env.MAIL_ADAPTER = previousMailAdapter;
+    setMailTransportFactory(null);
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
     }
   }
 });

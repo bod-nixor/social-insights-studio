@@ -1,6 +1,7 @@
 const { getConnection } = require('../database');
 const repositories = require('./repositories');
 const { verifyGoogleIdToken } = require('./google-oidc');
+const { sendMagicLinkEmail, validateMailConfiguration } = require('./mail');
 const { assertCapability, canAssignRole } = require('./rbac');
 const {
   createId,
@@ -50,15 +51,10 @@ async function requestMagicLink({ email, ipHash }) {
     error.code = 'invalid_email';
     throw error;
   }
-  if (
-    String(process.env.NODE_ENV || '').toLowerCase() === 'production' &&
-    (!process.env.MAIL_ADAPTER || process.env.MAIL_ADAPTER === 'development')
-  ) {
-    const error = new Error('mail_not_configured');
-    error.status = 503;
-    error.code = 'mail_not_configured';
-    throw error;
-  }
+  validateMailConfiguration();
+  const token = randomToken(32);
+  const devMode = process.env.NODE_ENV !== 'production' && process.env.AUTH_DEV_MAGIC_LINKS === 'true';
+
   return withConnection(async connection => {
     const recentCount = await repositories.countRecentMagicLinks(connection, normalizedEmail, MAGIC_LINK_WINDOW_SECONDS);
     if (recentCount >= MAGIC_LINK_MAX_PER_WINDOW) {
@@ -68,7 +64,6 @@ async function requestMagicLink({ email, ipHash }) {
       throw error;
     }
 
-    const token = randomToken(32);
     await repositories.saveMagicLinkToken(connection, {
       id: createId(),
       email: normalizedEmail,
@@ -76,8 +71,9 @@ async function requestMagicLink({ email, ipHash }) {
       requestedIpHash: ipHash,
       ttlSeconds: MAGIC_LINK_TTL_SECONDS
     });
+  }).then(async () => {
+    await sendMagicLinkEmail({ email: normalizedEmail, token });
 
-    const devMode = process.env.NODE_ENV !== 'production' && process.env.AUTH_DEV_MAGIC_LINKS === 'true';
     return {
       sent: true,
       dev_token: devMode ? token : undefined

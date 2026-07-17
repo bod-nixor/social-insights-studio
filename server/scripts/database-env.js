@@ -48,9 +48,16 @@ function assertLocalDatabaseUrl(databaseUrl) {
   }
 }
 
+function assertNotProductionCommand(commandName) {
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    throw new Error(`Refusing to run ${commandName} in production.`);
+  }
+}
+
 module.exports = {
   ROOT_DIR,
   assertLocalDatabaseUrl,
+  assertNotProductionCommand,
   getDatabaseUrl,
   normalizeMariaDbUrl,
   parseArgs

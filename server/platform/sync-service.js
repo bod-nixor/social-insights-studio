@@ -185,7 +185,8 @@ async function refreshCredentialsIfNeeded(connection, credentials) {
   const accessToken = decryptSecret({
     ciphertext: credentials.access_token_ciphertext,
     iv: credentials.access_token_iv,
-    tag: credentials.access_token_tag
+    tag: credentials.access_token_tag,
+    keyVersion: credentials.key_version
   });
   if (tokenStillFresh(credentials.access_expires_at)) {
     return accessToken;
@@ -194,7 +195,8 @@ async function refreshCredentialsIfNeeded(connection, credentials) {
   const refreshToken = decryptSecret({
     ciphertext: credentials.refresh_token_ciphertext,
     iv: credentials.refresh_token_iv,
-    tag: credentials.refresh_token_tag
+    tag: credentials.refresh_token_tag,
+    keyVersion: credentials.key_version
   });
   const refreshed = await tiktok.refreshAccessToken(refreshToken);
   if (!refreshed.ok || !refreshed.payload || !refreshed.payload.access_token || Number(refreshed.payload.expires_in) <= 0) {

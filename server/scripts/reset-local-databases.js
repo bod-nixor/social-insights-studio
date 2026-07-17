@@ -1,7 +1,8 @@
 const mariadb = require('mariadb');
-const { assertLocalDatabaseUrl, getDatabaseUrl } = require('./database-env');
+const { assertLocalDatabaseUrl, assertNotProductionCommand, getDatabaseUrl } = require('./database-env');
 
 async function main() {
+  assertNotProductionCommand('db:reset');
   const databaseUrl = getDatabaseUrl('dev');
   const testDatabaseUrl = getDatabaseUrl('test');
   if (!databaseUrl || !testDatabaseUrl) {

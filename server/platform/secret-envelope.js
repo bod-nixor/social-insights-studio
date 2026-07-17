@@ -14,6 +14,41 @@ function parseEncryptionKey(rawKey) {
   throw new Error('ENCRYPTION_KEY must be 32 bytes as hex or base64.');
 }
 
+function getCurrentKeyVersion() {
+  return process.env.ENCRYPTION_KEY_VERSION || 'local-v1';
+}
+
+function parsePreviousKeys() {
+  const entries = String(process.env.ENCRYPTION_PREVIOUS_KEYS || '')
+    .split(',')
+    .map(entry => entry.trim())
+    .filter(Boolean);
+  const keys = new Map();
+  for (const entry of entries) {
+    const separatorIndex = entry.indexOf(':');
+    if (separatorIndex <= 0) {
+      throw new Error('ENCRYPTION_PREVIOUS_KEYS entries must use version:key format.');
+    }
+    const version = entry.slice(0, separatorIndex);
+    const rawKey = entry.slice(separatorIndex + 1);
+    keys.set(version, parseEncryptionKey(rawKey));
+  }
+  return keys;
+}
+
+function getKeyForVersion(version) {
+  const currentVersion = getCurrentKeyVersion();
+  if (!version || version === currentVersion) {
+    return parseEncryptionKey(process.env.ENCRYPTION_KEY);
+  }
+  const previous = parsePreviousKeys();
+  const key = previous.get(version);
+  if (!key) {
+    throw new Error('Encryption key version is not available.');
+  }
+  return key;
+}
+
 function encryptSecret(value) {
   const key = parseEncryptionKey(process.env.ENCRYPTION_KEY);
   const iv = crypto.randomBytes(12);
@@ -23,12 +58,12 @@ function encryptSecret(value) {
     ciphertext: ciphertext.toString('base64'),
     iv: iv.toString('base64'),
     tag: cipher.getAuthTag().toString('base64'),
-    keyVersion: process.env.ENCRYPTION_KEY_VERSION || 'local-v1'
+    keyVersion: getCurrentKeyVersion()
   };
 }
 
 function decryptSecret(envelope) {
-  const key = parseEncryptionKey(process.env.ENCRYPTION_KEY);
+  const key = getKeyForVersion(envelope && envelope.keyVersion);
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.iv, 'base64'));
   decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
   return Buffer.concat([
@@ -39,5 +74,6 @@ function decryptSecret(envelope) {
 
 module.exports = {
   decryptSecret,
-  encryptSecret
+  encryptSecret,
+  parsePreviousKeys
 };

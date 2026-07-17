@@ -50,6 +50,15 @@ async function requestMagicLink({ email, ipHash }) {
     error.code = 'invalid_email';
     throw error;
   }
+  if (
+    String(process.env.NODE_ENV || '').toLowerCase() === 'production' &&
+    (!process.env.MAIL_ADAPTER || process.env.MAIL_ADAPTER === 'development')
+  ) {
+    const error = new Error('mail_not_configured');
+    error.status = 503;
+    error.code = 'mail_not_configured';
+    throw error;
+  }
   return withConnection(async connection => {
     const recentCount = await repositories.countRecentMagicLinks(connection, normalizedEmail, MAGIC_LINK_WINDOW_SECONDS);
     if (recentCount >= MAGIC_LINK_MAX_PER_WINDOW) {

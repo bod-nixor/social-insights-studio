@@ -354,6 +354,7 @@ async function disconnectTikTok(userId, workspaceId) {
               oc.access_token_ciphertext,
               oc.access_token_iv,
               oc.access_token_tag,
+              oc.key_version,
               oc.revoked_at
        FROM data_sources ds
        LEFT JOIN oauth_credentials oc ON oc.data_source_id = ds.id
@@ -371,7 +372,8 @@ async function disconnectTikTok(userId, workspaceId) {
       const accessToken = decryptSecret({
         ciphertext: record.access_token_ciphertext,
         iv: record.access_token_iv,
-        tag: record.access_token_tag
+        tag: record.access_token_tag,
+        keyVersion: record.key_version
       });
       providerRevoke = await tiktok.revokeAccess(accessToken);
     }

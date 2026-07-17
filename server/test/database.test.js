@@ -29,6 +29,8 @@ const { compareMetric, engagementRate } = require('../platform/analytics');
 const { hasCapability, canAssignRole } = require('../platform/rbac');
 const { runDueSyncs } = require('../platform/sync-service');
 const { safeCsvCell } = require('../platform/export-service');
+const { decryptSecret, encryptSecret } = require('../platform/secret-envelope');
+const { assertNotProductionCommand } = require('../scripts/database-env');
 
 let db;
 
@@ -305,6 +307,81 @@ test('magic-link session, CSRF, workspace, cross-workspace, and role checks work
   assert.equal(crossWorkspace.json().error, 'workspace_not_found');
 });
 
+test('member invitations, role changes, admin limits, and last-owner protection work through HTTP', async () => {
+  await clearDatabase();
+  const owner = await signIn('member-owner@example.com');
+  const admin = await signIn('member-admin@example.com');
+  const viewer = await signIn('member-viewer@example.com');
+  const workspace = await createWorkspace(owner, 'Members Workspace');
+  await db.query(
+    `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+     VALUES (?, ?, 'admin', 'active'), (?, ?, 'viewer', 'active')`,
+    [workspace.id, admin.user.id, workspace.id, viewer.user.id]
+  );
+
+  const invite = await requestApp(`/api/workspaces/${workspace.id}/invitations`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { email: 'analyst@example.com', role: 'analyst' }
+  });
+  assert.equal(invite.statusCode, 201);
+  assert.equal(invite.json().invited, true);
+  assert.ok(invite.json().dev_token);
+
+  const adminCannotInviteOwner = await requestApp(`/api/workspaces/${workspace.id}/invitations`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(admin.cookies),
+      'x-csrf-token': admin.csrf
+    },
+    body: { email: 'owner2@example.com', role: 'owner' }
+  });
+  assert.equal(adminCannotInviteOwner.statusCode, 403);
+  assert.equal(adminCannotInviteOwner.json().error, 'invalid_role_assignment');
+
+  const promoteViewer = await requestApp(`/api/workspaces/${workspace.id}/members/${viewer.user.id}`, {
+    method: 'PATCH',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { role: 'analyst' }
+  });
+  assert.equal(promoteViewer.statusCode, 200);
+  assert.equal(promoteViewer.json().updated, true);
+  const promoted = await db.query(
+    `SELECT role FROM workspace_memberships
+     WHERE workspace_id = ? AND user_id = ?`,
+    [workspace.id, viewer.user.id]
+  );
+  assert.equal(promoted[0].role, 'analyst');
+
+  const ownerCannotDemoteSelf = await requestApp(`/api/workspaces/${workspace.id}/members/${owner.user.id}`, {
+    method: 'PATCH',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { role: 'admin' }
+  });
+  assert.equal(ownerCannotDemoteSelf.statusCode, 400);
+  assert.equal(ownerCannotDemoteSelf.json().error, 'last_owner_required');
+
+  const ownerCannotRemoveSelf = await requestApp(`/api/workspaces/${workspace.id}/members/${owner.user.id}`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(ownerCannotRemoveSelf.statusCode, 400);
+  assert.equal(ownerCannotRemoveSelf.json().error, 'last_owner_required');
+});
+
 test('Google OIDC route fails closed when credentials are unavailable', async () => {
   const response = await requestApp('/api/auth/google', {
     method: 'POST',
@@ -312,6 +389,66 @@ test('Google OIDC route fails closed when credentials are unavailable', async ()
   });
   assert.equal(response.statusCode, 503);
   assert.equal(response.json().error, 'google_oidc_not_configured');
+});
+
+test('production-only safety guards refuse development paths', async () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousMailAdapter = process.env.MAIL_ADAPTER;
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.MAIL_ADAPTER = 'development';
+    assert.throws(() => assertNotProductionCommand('db:reset'), /Refusing to run db:reset in production/);
+    const response = await requestApp('/api/auth/magic-link/request', {
+      method: 'POST',
+      body: { email: 'prod@example.com' }
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().error, 'mail_not_configured');
+  } finally {
+    process.env.NODE_ENV = previousNodeEnv;
+    if (previousMailAdapter === undefined) {
+      delete process.env.MAIL_ADAPTER;
+    } else {
+      process.env.MAIL_ADAPTER = previousMailAdapter;
+    }
+  }
+});
+
+test('AES-GCM secret envelopes decrypt previous key versions and write the current version', () => {
+  const previousEnv = {
+    key: process.env.ENCRYPTION_KEY,
+    version: process.env.ENCRYPTION_KEY_VERSION,
+    previous: process.env.ENCRYPTION_PREVIOUS_KEYS
+  };
+  try {
+    const oldKey = '3'.repeat(64);
+    const newKey = '4'.repeat(64);
+    process.env.ENCRYPTION_KEY = oldKey;
+    process.env.ENCRYPTION_KEY_VERSION = 'old-v1';
+    delete process.env.ENCRYPTION_PREVIOUS_KEYS;
+    const oldEnvelope = encryptSecret('old-secret');
+    assert.equal(oldEnvelope.keyVersion, 'old-v1');
+
+    process.env.ENCRYPTION_KEY = newKey;
+    process.env.ENCRYPTION_KEY_VERSION = 'new-v2';
+    process.env.ENCRYPTION_PREVIOUS_KEYS = `old-v1:${oldKey}`;
+    const newEnvelope = encryptSecret('new-secret');
+    assert.equal(newEnvelope.keyVersion, 'new-v2');
+    assert.equal(decryptSecret({ ...oldEnvelope, keyVersion: 'old-v1' }), 'old-secret');
+    assert.equal(decryptSecret(newEnvelope), 'new-secret');
+  } finally {
+    process.env.ENCRYPTION_KEY = previousEnv.key;
+    if (previousEnv.version === undefined) {
+      delete process.env.ENCRYPTION_KEY_VERSION;
+    } else {
+      process.env.ENCRYPTION_KEY_VERSION = previousEnv.version;
+    }
+    if (previousEnv.previous === undefined) {
+      delete process.env.ENCRYPTION_PREVIOUS_KEYS;
+    } else {
+      process.env.ENCRYPTION_PREVIOUS_KEYS = previousEnv.previous;
+    }
+  }
 });
 
 test('Google OIDC verifies state, nonce, issuer, audience, and creates an opaque session', async () => {
@@ -632,6 +769,17 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   assert.equal(manual.statusCode, 202);
   assert.equal(manual.json().status, 'success');
 
+  const cooldown = await requestApp(`/api/workspaces/${workspace.id}/sync-runs`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(cooldown.statusCode, 429);
+  assert.equal(cooldown.json().error, 'manual_sync_cooldown');
+
   const deniedManual = await requestApp(`/api/workspaces/${workspace.id}/sync-runs`, {
     method: 'POST',
     headers: {
@@ -647,6 +795,7 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   });
   assert.equal(dashboard.statusCode, 200);
   const dashboardBody = dashboard.json();
+  assert.equal(dashboardBody.demo_data, false);
   assert.equal(dashboardBody.connection.status, 'active');
   assert.equal(dashboardBody.metrics.find(metric => metric.key === 'follower_count').value, 150);
   assert.equal(dashboardBody.top_content[0].title, '=SUM(1,1)');
@@ -655,7 +804,20 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
     headers: { cookie: cookieHeader(owner.cookies) }
   });
   assert.equal(content.statusCode, 200);
-  assert.equal(content.json().rows[0].engagement_rate, 13);
+  const contentBody = content.json();
+  assert.equal(contentBody.rows[0].engagement_rate, 13);
+
+  const contentDetail = await requestApp(`/api/workspaces/${workspace.id}/content/${contentBody.rows[0].id}`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(contentDetail.statusCode, 200);
+  assert.equal(contentDetail.json().history[0].engagement_rate, 13);
+
+  const missingContent = await requestApp(`/api/workspaces/${workspace.id}/content/00000000-0000-4000-8000-000000000999`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(missingContent.statusCode, 404);
+  assert.equal(missingContent.json().error, 'content_not_found');
 
   const deniedCsv = await requestApp(`/api/workspaces/${workspace.id}/exports/content.csv`, {
     headers: { cookie: cookieHeader(viewer.cookies) }
@@ -703,6 +865,37 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   assert.equal(partialBody.top_content[0].provider_content_id, 'video-1');
   const sourceAfterPartial = await db.query('SELECT last_successful_sync_at FROM data_sources WHERE id = ?', [sourceRows[0].id]);
   assert.deepEqual(sourceAfterPartial[0].last_successful_sync_at, firstSuccess);
+});
+
+test('seeded fixture snapshots are exposed as clearly labeled demo data', async () => {
+  await clearDatabase();
+  const owner = await signIn('fixture-owner@example.com');
+  const workspace = await createWorkspace(owner, 'Fixture Workspace');
+  const sourceId = '20000000-0000-4000-8000-000000000501';
+  const runId = '30000000-0000-4000-8000-000000000501';
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status)
+     VALUES (?, ?, 'tiktok', 'disconnected')`,
+    [sourceId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO sync_runs (id, workspace_id, data_source_id, trigger_type, status, finished_at, profile_count)
+     VALUES (?, ?, ?, 'manual', 'success', UTC_TIMESTAMP(3), 1)`,
+    [runId, workspace.id, sourceId]
+  );
+  await db.query(
+    `INSERT INTO profile_snapshots
+      (id, workspace_id, data_source_id, sync_run_id, observed_at, follower_count, provider_metrics)
+     VALUES
+      ('40000000-0000-4000-8000-000000000501', ?, ?, ?, UTC_TIMESTAMP(3), 1200, JSON_OBJECT('fixture', TRUE))`,
+    [workspace.id, sourceId, runId]
+  );
+
+  const dashboard = await requestApp(`/api/workspaces/${workspace.id}/dashboard?range=7d`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(dashboard.statusCode, 200);
+  assert.equal(dashboard.json().demo_data, true);
 });
 
 test('analytics and CSV safety helpers preserve nulls and avoid fabricated baselines', () => {

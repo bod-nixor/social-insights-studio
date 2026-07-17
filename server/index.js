@@ -60,10 +60,11 @@ const ALLOWED_VIDEO_FIELDS = [
 ];
 
 function validateRequiredEnv() {
+  const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
   if (!BASE_URL) {
     throw new Error('Missing BASE_URL environment variable.');
   }
-  if (process.env.NODE_ENV === 'production' && !BASE_URL.startsWith('https://')) {
+  if (isProduction && !BASE_URL.startsWith('https://')) {
     throw new Error('BASE_URL must be https:// in production.');
   }
   if (!process.env.ENCRYPTION_KEY) {
@@ -79,11 +80,37 @@ function validateRequiredEnv() {
       'Generate a cryptographically random secret (e.g., crypto.randomBytes(32).toString("hex")).'
     );
   }
+  if (isProduction) {
+    const placeholderPattern = /replace_with|your_|placeholder|changeme|unused/i;
+    if (!process.env.DATABASE_URL) {
+      throw new Error('DATABASE_URL is required in production.');
+    }
+    if (process.env.AUTH_DEV_MAGIC_LINKS === 'true') {
+      throw new Error('AUTH_DEV_MAGIC_LINKS must be disabled in production.');
+    }
+    if (placeholderPattern.test(process.env.ENCRYPTION_KEY) || new Set(process.env.ENCRYPTION_KEY).size === 1) {
+      throw new Error('ENCRYPTION_KEY must be a real random 32-byte key in production.');
+    }
+    if (!process.env.ENCRYPTION_KEY_VERSION || process.env.ENCRYPTION_KEY_VERSION === 'local-v1') {
+      throw new Error('ENCRYPTION_KEY_VERSION must be set to a production key version.');
+    }
+    if ((process.env.ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).includes('*')) {
+      throw new Error('ALLOWED_ORIGINS must not contain wildcard origins in production.');
+    }
+    const trustProxy = parseTrustProxyValue(process.env.TRUST_PROXY);
+    const allowedTrustProxyNames = new Set(['loopback', 'linklocal', 'uniquelocal']);
+    if (typeof trustProxy === 'string' && !allowedTrustProxyNames.has(trustProxy)) {
+      throw new Error('TRUST_PROXY must be a numeric hop count, false, or a recognized proxy range in production.');
+    }
+  }
   if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) {
     throw new Error('Missing TikTok client credentials. Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET.');
   }
   if (process.env.LOOKER_CLIENT_SECRET && weakSecrets.has(process.env.LOOKER_CLIENT_SECRET.toLowerCase())) {
     throw new Error('LOOKER_CLIENT_SECRET must be omitted for the public legacy connector or set to a real secret.');
+  }
+  if ((process.env.LOOKER_REDIRECT_URIS || '').includes('*')) {
+    throw new Error('LOOKER_REDIRECT_URIS must contain exact callback URLs, not wildcards.');
   }
 }
 
@@ -184,6 +211,9 @@ const allowedOrigins = new Set(
     .map(origin => origin.trim())
     .filter(Boolean)
 );
+if (BASE_URL) {
+  allowedOrigins.add(new URL(BASE_URL).origin);
+}
 const corsMiddleware = cors({
   origin(origin, callback) {
     if (!origin) {

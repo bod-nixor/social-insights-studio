@@ -48,6 +48,7 @@ type DashboardMetric = {
 };
 
 type DashboardData = {
+  demo_data: boolean;
   connection: {
     status: string;
     reconnect_reason?: string | null;
@@ -113,12 +114,12 @@ const views: Array<{ id: View; label: string; icon: React.ComponentType<{ size?:
 
 async function api(path: string, options: RequestInit = {}) {
   const response = await fetch(path, {
+    ...options,
     credentials: 'include',
     headers: {
       'content-type': 'application/json',
       ...(options.headers || {})
-    },
-    ...options
+    }
   });
   const text = await response.text();
   const body = text ? JSON.parse(text) : {};
@@ -126,6 +127,14 @@ async function api(path: string, options: RequestInit = {}) {
     throw new Error(body.error || 'request_failed');
   }
   return body;
+}
+
+function readCookie(name: string) {
+  return document.cookie
+    .split(';')
+    .map(value => value.trim())
+    .find(value => value.startsWith(`${name}=`))
+    ?.slice(name.length + 1) || '';
 }
 
 function formatNumber(value: number | null | undefined) {
@@ -145,6 +154,7 @@ function resolveLoadState(dashboard: DashboardData | null): LoadState {
   if (!dashboard) return 'empty';
   if (dashboard.latest_sync?.status === 'failed') return 'error';
   if (dashboard.latest_sync?.status === 'partial') return 'partial';
+  if (dashboard.demo_data && dashboard.trend.length > 0) return 'ready';
   if (dashboard.connection.status === 'disconnected') return 'empty';
   if (dashboard.connection.status === 'reconnect_required') return 'stale';
   const lastSuccessful = dashboard.connection.last_successful_sync_at
@@ -175,6 +185,31 @@ function App() {
     () => workspaces.find(workspace => workspace.id === activeWorkspaceId) || workspaces[0],
     [activeWorkspaceId, workspaces]
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    async function resumeSession() {
+      try {
+        const session = await api('/api/session');
+        if (cancelled) return;
+        setUser(session.user);
+        setCsrf(readCookie('sis_csrf'));
+        const workspaceResult = await api('/api/workspaces');
+        if (cancelled) return;
+        setWorkspaces(workspaceResult.workspaces);
+        setActiveWorkspaceId(workspaceResult.workspaces[0]?.id || '');
+      } catch {
+        if (!cancelled) {
+          setUser(null);
+          setCsrf('');
+        }
+      }
+    }
+    void resumeSession();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function loadWorkspaces() {
     const workspaceResult = await api('/api/workspaces');
@@ -251,20 +286,24 @@ function App() {
     }
   }
 
-  async function createWorkspace(event: React.FormEvent) {
+  async function createWorkspace(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const submittedName = String(form.get('workspace_name') || workspaceName).trim();
     setBusy(true);
     setMessage('');
     try {
       const result = await api('/api/workspaces', {
         method: 'POST',
         headers: { 'x-csrf-token': csrf },
-        body: JSON.stringify({ name: workspaceName })
+        body: JSON.stringify({ name: submittedName })
       });
       const next = [...workspaces, result.workspace];
       setWorkspaces(next);
       setActiveWorkspaceId(result.workspace.id);
       setWorkspaceName('');
+      formElement.reset();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'workspace_failed');
     } finally {
@@ -444,6 +483,9 @@ function App() {
         </header>
 
         {message && <p className="notice error">{message}</p>}
+        {dashboard?.demo_data && (
+          <p className="notice">Local demo data. These fixture values are labeled and unavailable in production seed mode.</p>
+        )}
 
         {workspaces.length === 0 ? (
           <section className="empty-band">
@@ -451,7 +493,12 @@ function App() {
             <form onSubmit={createWorkspace} className="inline-form">
               <label>
                 Name
-                <input value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} required />
+                <input
+                  name="workspace_name"
+                  defaultValue={workspaceName}
+                  onChange={event => setWorkspaceName(event.target.value)}
+                  required
+                />
               </label>
               <button type="submit" disabled={busy}>
                 <Users size={18} />

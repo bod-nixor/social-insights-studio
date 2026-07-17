@@ -57,13 +57,25 @@ async function getTikTokSource(connection, workspaceId) {
 
 async function getLatestProfile(connection, workspaceId, to) {
   const rows = await connection.query(
-    `SELECT follower_count, following_count, likes_count, video_count, observed_at
+    `SELECT follower_count, following_count, likes_count, video_count, observed_at, provider_metrics
      FROM profile_snapshots
      WHERE workspace_id = ? AND observed_at <= ?
      ORDER BY observed_at DESC LIMIT 1`,
     [workspaceId, to]
   );
   return rows[0] || null;
+}
+
+function isDemoProfileSnapshot(snapshot) {
+  if (!snapshot || !snapshot.provider_metrics) return false;
+  if (typeof snapshot.provider_metrics === 'object') {
+    return snapshot.provider_metrics.fixture === true;
+  }
+  try {
+    return JSON.parse(snapshot.provider_metrics).fixture === true;
+  } catch (error) {
+    return false;
+  }
 }
 
 async function getBaselineProfile(connection, workspaceId, from) {
@@ -109,6 +121,7 @@ async function getDashboard(userId, workspaceId, query = {}) {
     });
     return {
       range: { from: range.from.toISOString(), to: range.to.toISOString() },
+      demo_data: isDemoProfileSnapshot(latest),
       connection: source ? {
         provider: source.provider,
         status: source.status,

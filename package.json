@@ -1,0 +1,23 @@
+{
+  "name": "social-insights-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Workspace scripts for Social Insights Studio.",
+  "scripts": {
+    "test": "npm --prefix server test",
+    "db:up": "docker compose --env-file .env.database.local up -d mariadb",
+    "db:wait": "node server/scripts/wait-for-mariadb.js",
+    "db:down": "docker compose --env-file .env.database.local down",
+    "db:reset": "node server/scripts/reset-local-databases.js",
+    "db:migrate": "node server/scripts/migrate.js up --database dev",
+    "db:migrate:dev": "node server/scripts/migrate.js up --database dev",
+    "db:migrate:test": "node server/scripts/migrate.js up --database test",
+    "db:status": "node server/scripts/migrate.js status --database dev",
+    "db:seed": "node server/scripts/seed-development.js",
+    "test:db": "node --test server/test/database.test.js",
+    "worker": "node server/worker.js",
+    "web:dev": "npm --prefix apps/web run dev",
+    "web:build": "npm --prefix apps/web run build",
+    "web:preview": "npm --prefix apps/web run preview"
+  }
+}

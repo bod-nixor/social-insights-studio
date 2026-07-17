@@ -4,10 +4,13 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const fetch = require('node-fetch');
+let fetchImpl = require('node-fetch');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const fs = require('fs');
 const { FileStateStore, FileTokenStore } = require('./store');
+const { getConnection } = require('./database');
+const { createPlatformRouter } = require('./platform/routes');
 
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -15,10 +18,12 @@ const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
 const BACKEND_JWT_SECRET = process.env.BACKEND_JWT_SECRET;
 const TIKTOK_AUTH_URL = 'https://www.tiktok.com/v2/auth/authorize/';
 const TIKTOK_TOKEN_URL = 'https://open.tiktokapis.com/v2/oauth/token/';
+const TIKTOK_REVOKE_URL = 'https://open.tiktokapis.com/v2/oauth/revoke/';
 const TIKTOK_API_BASE_URL = 'https://open.tiktokapis.com/v2/';
-const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
-const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
+const OAUTH_STATE_TTL_MS = Number(process.env.OAUTH_STATE_TTL_MS) || 10 * 60 * 1000;
+const AUTH_CODE_TTL_MS = Number(process.env.AUTH_CODE_TTL_MS) || 10 * 60 * 1000;
 const BACKEND_TOKEN_TTL_SECONDS = 60 * 60;
+const DEFAULT_PROVIDER_HTTP_TIMEOUT_MS = 10 * 1000;
 const DEFAULT_BODY_LIMIT = '10kb';
 const ALLOWED_USER_FIELDS = [
   'open_id',
@@ -67,7 +72,7 @@ function validateRequiredEnv() {
   if (!BACKEND_JWT_SECRET) {
     throw new Error('Missing BACKEND_JWT_SECRET environment variable.');
   }
-  const weakSecrets = new Set(['changeme', 'change-me', 'secret', 'password', 'default']);
+  const weakSecrets = new Set(['changeme', 'change-me', 'secret', 'password', 'default', 'unused']);
   if (BACKEND_JWT_SECRET.length < 32 || weakSecrets.has(BACKEND_JWT_SECRET.toLowerCase())) {
     throw new Error(
       'BACKEND_JWT_SECRET must be at least 32 characters and not a common placeholder. ' +
@@ -76,6 +81,9 @@ function validateRequiredEnv() {
   }
   if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) {
     throw new Error('Missing TikTok client credentials. Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET.');
+  }
+  if (process.env.LOOKER_CLIENT_SECRET && weakSecrets.has(process.env.LOOKER_CLIENT_SECRET.toLowerCase())) {
+    throw new Error('LOOKER_CLIENT_SECRET must be omitted for the public legacy connector or set to a real secret.');
   }
 }
 
@@ -112,6 +120,7 @@ const REQUIRED_SCOPES = [
 ].join(',');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const WEB_DIST_DIR = path.join(__dirname, '..', 'apps', 'web', 'dist');
 
 function ensureStoreOutsidePublic(storePath, envName) {
   const resolvedStore = path.resolve(storePath);
@@ -130,6 +139,15 @@ const trustProxySetting = getTrustProxySetting();
 if (trustProxySetting !== false) {
   app.set('trust proxy', trustProxySetting);
 }
+
+app.use((req, res, next) => {
+  const incoming = req.get('x-correlation-id');
+  req.correlationId = /^[A-Za-z0-9._-]{8,128}$/.test(incoming || '')
+    ? incoming
+    : crypto.randomUUID();
+  res.set('x-correlation-id', req.correlationId);
+  next();
+});
 
 app.use((req, res, next) => {
   // Normalize repeated slashes (but keep query string)
@@ -195,12 +213,47 @@ const apiLimiter = rateLimit({
 });
 
 app.use(express.static(PUBLIC_DIR));
+if (fs.existsSync(WEB_DIST_DIR)) {
+  app.use('/app', express.static(WEB_DIST_DIR));
+  app.get(['/app', '/app/*'], (req, res) => {
+    res.sendFile(path.join(WEB_DIST_DIR, 'index.html'));
+  });
+}
 app.use(express.urlencoded({ extended: false, limit: DEFAULT_BODY_LIMIT }));
 app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
 
 app.use('/oauth', corsMiddleware, authLimiter);
 app.use('/auth', authLimiter);
 app.use('/api', corsMiddleware, apiLimiter);
+
+app.get('/health/live', (req, res) => {
+  res.json({ status: 'live' });
+});
+
+app.get('/health/ready', async (req, res) => {
+  let database = 'not_configured';
+  if (process.env.DATABASE_URL) {
+    let connection;
+    try {
+      connection = await getConnection();
+      await connection.query('SELECT 1');
+      database = 'ready';
+    } catch (error) {
+      database = 'unavailable';
+    } finally {
+      if (connection) await connection.release();
+    }
+  }
+  res.status(database === 'unavailable' ? 503 : 200).json({
+    status: database === 'unavailable' ? 'not_ready' : 'ready',
+    checks: {
+      database,
+      legacy_file_store: 'configured'
+    }
+  });
+});
+
+app.use('/api', createPlatformRouter());
 
 app.use((err, req, res, next) => {
   if (err && err.type === 'entity.too.large') {
@@ -216,7 +269,16 @@ app.use((err, req, res, next) => {
 });
 
 const LOOKER_CLIENT_ID = process.env.LOOKER_CLIENT_ID || 'looker-studio-connector';
-const LOOKER_CLIENT_SECRET = process.env.LOOKER_CLIENT_SECRET || 'unused';
+const LOOKER_CLIENT_SECRET = process.env.LOOKER_CLIENT_SECRET || null;
+
+class ProviderRequestError extends Error {
+  constructor(category, message, retryable = false) {
+    super(message);
+    this.name = 'ProviderRequestError';
+    this.category = category;
+    this.retryable = retryable;
+  }
+}
 
 function requireEnv() {
   if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET) {
@@ -280,8 +342,17 @@ function getStateFingerprint(value) {
     .slice(0, 12);
 }
 
+function logEvent(level, event, details = {}) {
+  const payload = {
+    event,
+    ...details
+  };
+  const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info';
+  console[method](JSON.stringify(payload));
+}
+
 function logOAuthState(event, state, details = {}) {
-  console.info('oauth_state', {
+  logEvent('info', 'oauth_state', {
     event,
     state_fingerprint: getStateFingerprint(state),
     ...details
@@ -311,6 +382,59 @@ async function readJsonResponse(response) {
   } catch (error) {
     return { ok: false, data: { error: 'invalid_json_response' } };
   }
+}
+
+function getProviderHttpTimeoutMs() {
+  const configured = Number(process.env.PROVIDER_HTTP_TIMEOUT_MS);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return DEFAULT_PROVIDER_HTTP_TIMEOUT_MS;
+}
+
+async function fetchWithProviderTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), getProviderHttpTimeoutMs());
+  try {
+    return await fetchImpl(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw new ProviderRequestError('timeout', 'Provider request timed out.', true);
+    }
+    throw new ProviderRequestError('network', 'Provider request failed.', true);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function categorizeProviderStatus(status) {
+  if (status === 401) {
+    return { category: 'authentication', retryable: false };
+  }
+  if (status === 403) {
+    return { category: 'scope', retryable: false };
+  }
+  if (status === 429) {
+    return { category: 'rate_limit', retryable: true };
+  }
+  if (status >= 500) {
+    return { category: 'provider', retryable: true };
+  }
+  return { category: 'provider', retryable: false };
+}
+
+function getProviderFailure(error) {
+  if (error instanceof ProviderRequestError) {
+    return {
+      status: error.category === 'timeout' ? 504 : 502,
+      category: error.category,
+      retryable: error.retryable
+    };
+  }
+  return { status: 502, category: 'network', retryable: true };
 }
 
 function getTokenPayload(tokenResponseBody) {
@@ -349,16 +473,32 @@ async function exchangeCodeForToken(code) {
     redirect_uri: getRedirectUri()
   });
 
-  const response = await fetch(TIKTOK_TOKEN_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    body: payload.toString()
-  });
+  let response;
+  try {
+    response = await fetchWithProviderTimeout(TIKTOK_TOKEN_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: payload.toString()
+    });
+  } catch (error) {
+    const failure = getProviderFailure(error);
+    return { ok: false, data: { error: 'provider_request_failed' }, ...failure };
+  }
 
   const parsed = await readJsonResponse(response);
-  return { ok: response.ok && parsed.ok, data: parsed.data };
+  if (!parsed.ok) {
+    return { ok: false, data: parsed.data, category: 'malformed_response', retryable: false };
+  }
+  const statusCategory = categorizeProviderStatus(response.status);
+  return {
+    ok: response.ok,
+    data: parsed.data,
+    status: response.status,
+    category: response.ok ? null : statusCategory.category,
+    retryable: response.ok ? false : statusCategory.retryable
+  };
 }
 
 async function refreshAccessToken(refreshToken) {
@@ -369,16 +509,32 @@ async function refreshAccessToken(refreshToken) {
     refresh_token: refreshToken
   });
 
-  const response = await fetch(TIKTOK_TOKEN_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    body: payload.toString()
-  });
+  let response;
+  try {
+    response = await fetchWithProviderTimeout(TIKTOK_TOKEN_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: payload.toString()
+    });
+  } catch (error) {
+    const failure = getProviderFailure(error);
+    return { ok: false, data: { error: 'provider_request_failed' }, ...failure };
+  }
 
   const parsed = await readJsonResponse(response);
-  return { ok: response.ok && parsed.ok, data: parsed.data };
+  if (!parsed.ok) {
+    return { ok: false, data: parsed.data, category: 'malformed_response', retryable: false };
+  }
+  const statusCategory = categorizeProviderStatus(response.status);
+  return {
+    ok: response.ok,
+    data: parsed.data,
+    status: response.status,
+    category: response.ok ? null : statusCategory.category,
+    retryable: response.ok ? false : statusCategory.retryable
+  };
 }
 
 function buildTokenRecord(tokenResponse, fallback = {}) {
@@ -413,7 +569,12 @@ async function getAccessTokenForSubject(subject) {
   const refreshResult = await refreshAccessToken(tokenData.refreshToken);
   const refreshedPayload = getTokenPayload(refreshResult.data);
   if (!refreshResult.ok || refreshedPayload.error || !hasUsableTokenPayload(refreshedPayload, tokenData)) {
-    return { error: 'token_refresh_failed', status: 401, details: refreshResult.data };
+    return {
+      error: 'token_refresh_failed',
+      status: 401,
+      category: refreshResult.category || 'authentication',
+      retryable: refreshResult.retryable === true
+    };
   }
 
   const updated = buildTokenRecord(refreshedPayload, tokenData);
@@ -428,8 +589,8 @@ function getBearerTokenFromRequest(req) {
   return match ? match[1] : null;
 }
 
-function buildJsonError(res, status, error, message) {
-  const payload = { error };
+function buildJsonError(res, status, error, message, extras = {}) {
+  const payload = { error, ...extras };
   if (message) {
     payload.message = message;
   }
@@ -454,9 +615,9 @@ function parseFieldsParam(fieldParam, allowedFields) {
   return requested;
 }
 
-async function buildAuthorizationCode(subject, scopes) {
+async function buildAuthorizationCode(subject, scopes, clientId, redirectUri) {
   const code = generateRandomToken(24);
-  await authCodeStore.save(code, { subject, scopes, createdAt: Date.now() });
+  await authCodeStore.save(code, { subject, scopes, clientId, redirectUri, createdAt: Date.now() });
   return code;
 }
 
@@ -495,18 +656,108 @@ function verifyBackendJwt(token) {
   return payload;
 }
 
-function isAllowedRedirect(redirectUri) {
+function normalizeLegacyRedirectUri(redirectUri) {
   try {
+    const raw = String(redirectUri);
     const parsed = new URL(redirectUri);
-    if (parsed.protocol !== 'https:' || parsed.hostname !== 'script.google.com') {
-      return false;
+    if (raw !== parsed.toString()) {
+      return null;
+    }
+    if (
+      parsed.protocol !== 'https:'
+      || parsed.hostname !== 'script.google.com'
+      || parsed.username
+      || parsed.password
+      || parsed.port
+      || parsed.search
+      || parsed.hash
+    ) {
+      return null;
     }
     const isOAuth2LibraryCallback = /^\/macros\/d\/[^/]+\/usercallback$/.test(parsed.pathname);
     const isWebAppDeployment = /^\/macros\/s\/[^/]+\/(exec|dev)$/.test(parsed.pathname);
-    return isOAuth2LibraryCallback || isWebAppDeployment;
+    if (!isOAuth2LibraryCallback && !isWebAppDeployment) {
+      return null;
+    }
+    return parsed.toString();
   } catch (error) {
+    return null;
+  }
+}
+
+function getAllowedLegacyRedirects() {
+  const raw = process.env.LOOKER_REDIRECT_URIS || process.env.LEGACY_LOOKER_REDIRECT_URIS || '';
+  return new Set(
+    raw
+      .split(/[\n,]/)
+      .map(value => value.trim())
+      .filter(Boolean)
+      .map(normalizeLegacyRedirectUri)
+      .filter(Boolean)
+  );
+}
+
+function isAllowedRedirect(redirectUri, clientId = LOOKER_CLIENT_ID) {
+  if (clientId !== LOOKER_CLIENT_ID) {
     return false;
   }
+  const normalized = normalizeLegacyRedirectUri(redirectUri);
+  if (!normalized) {
+    return false;
+  }
+  return getAllowedLegacyRedirects().has(normalized);
+}
+
+function validateConnectorClient(clientId, clientSecret) {
+  if (!clientId || clientId !== LOOKER_CLIENT_ID) {
+    return false;
+  }
+  if (LOOKER_CLIENT_SECRET) {
+    return clientSecret === LOOKER_CLIENT_SECRET;
+  }
+  return !clientSecret;
+}
+
+async function revokeProviderAccess(accessToken) {
+  const payload = new URLSearchParams({
+    client_key: TIKTOK_CLIENT_KEY,
+    client_secret: TIKTOK_CLIENT_SECRET,
+    token: accessToken
+  });
+
+  let response;
+  try {
+    response = await fetchWithProviderTimeout(TIKTOK_REVOKE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: payload.toString()
+    });
+  } catch (error) {
+    const failure = getProviderFailure(error);
+    return { attempted: true, success: false, ...failure };
+  }
+
+  const parsed = await readJsonResponse(response);
+  if (!parsed.ok) {
+    return {
+      attempted: true,
+      success: false,
+      status: response.status,
+      category: 'malformed_response',
+      retryable: false
+    };
+  }
+
+  const statusCategory = categorizeProviderStatus(response.status);
+  return {
+    attempted: true,
+    success: response.ok,
+    status: response.status,
+    category: response.ok ? null : statusCategory.category,
+    retryable: response.ok ? false : statusCategory.retryable
+  };
 }
 
 app.get('/auth/tiktok/start', async (req, res) => {
@@ -517,12 +768,9 @@ app.get('/auth/tiktok/start', async (req, res) => {
     logOAuthState('create', state, { flow: 'direct', outcome: 'saved' });
     res.redirect(buildAuthUrl(state));
   } catch (error) {
-    console.error('OAuth authorize configuration error:', {
+    logEvent('error', 'oauth_authorize_configuration_error', {
+      correlation_id: req.correlationId,
       message: error && error.message,
-      stack: error && error.stack,
-      stateStorePath,
-      stateLockPath,
-      cwd: process.cwd(),
       nodeEnv: process.env.NODE_ENV,
       trustProxy: app.get('trust proxy')
     });
@@ -564,7 +812,11 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     const tokenPayload = getTokenPayload(tokenResult.data);
 
     if (!tokenResult.ok || tokenPayload.error || !hasUsableTokenPayload(tokenPayload)) {
-      console.error('Token exchange failed.');
+      logEvent('warn', 'tiktok_token_exchange_failed', {
+        correlation_id: req.correlationId,
+        category: tokenResult.category || 'provider',
+        retryable: tokenResult.retryable === true
+      });
       return res.status(400).send(
         '<h1>Token Exchange Failed</h1><p>Please retry authentication.</p>'
       );
@@ -577,7 +829,12 @@ app.get('/auth/tiktok/callback', async (req, res) => {
     await tokenStore.saveConnectorToken(record.openId, record);
 
     if (stateEntry.flow === 'oauth') {
-      const authCode = await buildAuthorizationCode(record.openId, record.scopes);
+      const authCode = await buildAuthorizationCode(
+        record.openId,
+        record.scopes,
+        stateEntry.clientId,
+        stateEntry.redirectUri
+      );
       const redirect = new URL(stateEntry.redirectUri);
       redirect.searchParams.set('code', authCode);
       redirect.searchParams.set('state', stateEntry.lookerState);
@@ -619,24 +876,22 @@ app.get('/oauth/authorize', async (req, res) => {
     if (clientId !== LOOKER_CLIENT_ID) {
       return res.status(400).send('<h1>Invalid client</h1><p>Client ID not allowed.</p>');
     }
-    if (!isAllowedRedirect(redirectUri)) {
+    if (!isAllowedRedirect(redirectUri, clientId)) {
       return res.status(400).send('<h1>Invalid redirect URI</h1><p>Redirect URI not allowed.</p>');
     }
     const tiktokState = generateRandomToken(16);
     await stateStore.save(tiktokState, {
       flow: 'oauth',
+      clientId,
       redirectUri,
       lookerState: state
     });
     logOAuthState('create', tiktokState, { flow: 'oauth', outcome: 'saved' });
     res.redirect(buildAuthUrl(tiktokState));
   } catch (error) {
-    console.error('OAuth authorize configuration error:', {
+    logEvent('error', 'oauth_authorize_configuration_error', {
+      correlation_id: req.correlationId,
       message: error && error.message,
-      stack: error && error.stack,
-      stateStorePath,
-      stateLockPath,
-      cwd: process.cwd(),
       nodeEnv: process.env.NODE_ENV,
       trustProxy: app.get('trust proxy')
     });
@@ -650,10 +905,7 @@ app.post('/oauth/token', async (req, res) => {
     requireBackendJwt();
     const clientId = req.body.client_id;
     const clientSecret = req.body.client_secret;
-    if (clientId && clientId !== LOOKER_CLIENT_ID) {
-      return res.status(400).json({ error: 'invalid_client' });
-    }
-    if (clientSecret && clientSecret !== LOOKER_CLIENT_SECRET) {
+    if (!validateConnectorClient(clientId, clientSecret)) {
       return res.status(400).json({ error: 'invalid_client' });
     }
     const grantType = req.body.grant_type;
@@ -662,9 +914,16 @@ app.post('/oauth/token', async (req, res) => {
       if (!code) {
         return res.status(400).json({ error: 'invalid_request', error_description: 'Missing code.' });
       }
+      const redirectUri = req.body.redirect_uri;
+      if (!redirectUri) {
+        return res.status(400).json({ error: 'invalid_request', error_description: 'Missing redirect_uri.' });
+      }
       const entry = await consumeAuthorizationCode(code);
       if (!entry) {
         return res.status(400).json({ error: 'invalid_grant', error_description: 'Code expired or invalid.' });
+      }
+      if (entry.clientId !== clientId || entry.redirectUri !== redirectUri) {
+        return res.status(400).json({ error: 'invalid_grant', error_description: 'Code client or redirect mismatch.' });
       }
       return res.json(issueBackendTokens(entry.subject, entry.scopes));
     }
@@ -709,7 +968,11 @@ app.get('/api/tiktok/user', async (req, res) => {
 
     const tokenResult = await getAccessTokenForSubject(payload.sub);
     if (tokenResult.error) {
-      return res.status(tokenResult.status || 401).json({ error: tokenResult.error });
+      return res.status(tokenResult.status || 401).json({
+        error: tokenResult.error,
+        category: tokenResult.category,
+        retryable: tokenResult.retryable
+      });
     }
 
     const fieldList = parseFieldsParam(req.query.fields, ALLOWED_USER_FIELDS);
@@ -718,15 +981,27 @@ app.get('/api/tiktok/user', async (req, res) => {
     }
 
     const url = `${TIKTOK_API_BASE_URL}user/info/?fields=${encodeURIComponent(fieldList.join(','))}`;
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${tokenResult.accessToken}`
-      }
-    });
+    let response;
+    try {
+      response = await fetchWithProviderTimeout(url, {
+        headers: {
+          Authorization: `Bearer ${tokenResult.accessToken}`
+        }
+      });
+    } catch (error) {
+      const failure = getProviderFailure(error);
+      return buildJsonError(res, failure.status, 'tiktok_request_failed', null, {
+        category: failure.category,
+        retryable: failure.retryable
+      });
+    }
 
     const parsed = await readJsonResponse(response);
     if (!parsed.ok) {
-      return buildJsonError(res, 502, 'invalid_tiktok_response');
+      return buildJsonError(res, 502, 'invalid_tiktok_response', null, {
+        category: 'malformed_response',
+        retryable: false
+      });
     }
     res.status(response.status).json(parsed.data);
   } catch (error) {
@@ -751,7 +1026,11 @@ app.get('/api/tiktok/videos', async (req, res) => {
 
     const tokenResult = await getAccessTokenForSubject(payloadJwt.sub);
     if (tokenResult.error) {
-      return res.status(tokenResult.status || 401).json({ error: tokenResult.error });
+      return res.status(tokenResult.status || 401).json({
+        error: tokenResult.error,
+        category: tokenResult.category,
+        retryable: tokenResult.retryable
+      });
     }
 
     const fieldList = parseFieldsParam(req.query.fields, ALLOWED_VIDEO_FIELDS);
@@ -777,18 +1056,30 @@ app.get('/api/tiktok/videos', async (req, res) => {
     }
 
     const url = `${TIKTOK_API_BASE_URL}video/list/?fields=${encodeURIComponent(fieldList.join(','))}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${tokenResult.accessToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+    let response;
+    try {
+      response = await fetchWithProviderTimeout(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${tokenResult.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      const failure = getProviderFailure(error);
+      return buildJsonError(res, failure.status, 'tiktok_request_failed', null, {
+        category: failure.category,
+        retryable: failure.retryable
+      });
+    }
 
     const parsed = await readJsonResponse(response);
     if (!parsed.ok) {
-      return buildJsonError(res, 502, 'invalid_tiktok_response');
+      return buildJsonError(res, 502, 'invalid_tiktok_response', null, {
+        category: 'malformed_response',
+        retryable: false
+      });
     }
     res.status(response.status).json(parsed.data);
   } catch (error) {
@@ -796,7 +1087,7 @@ app.get('/api/tiktok/videos', async (req, res) => {
   }
 });
 
-app.post('/api/connector/revoke', (req, res) => {
+app.post('/api/connector/revoke', async (req, res) => {
   const bearerToken = getBearerTokenFromRequest(req);
   if (!bearerToken) {
     return res.status(401).json({ error: 'missing_access_token' });
@@ -807,9 +1098,29 @@ app.post('/api/connector/revoke', (req, res) => {
   } catch (error) {
     return res.status(401).json({ error: 'invalid_access_token' });
   }
-  tokenStore.revokeConnectorToken(payload.sub)
-    .then(revoked => res.status(revoked ? 200 : 404).json({ revoked }))
-    .catch(() => res.status(500).json({ error: 'server_error' }));
+  try {
+    const tokenData = await tokenStore.getConnectorToken(payload.sub);
+    if (!tokenData) {
+      return res.status(200).json({
+        revoked: false,
+        provider_revoke: { attempted: false, reason: 'credential_not_found' }
+      });
+    }
+
+    const providerRevoke = await revokeProviderAccess(tokenData.accessToken);
+    const revoked = await tokenStore.revokeConnectorToken(payload.sub);
+    logEvent(providerRevoke.success ? 'info' : 'warn', 'connector_revoke', {
+      correlation_id: req.correlationId,
+      subject_fingerprint: getStateFingerprint(payload.sub),
+      local_revoked: revoked,
+      provider_success: providerRevoke.success,
+      provider_category: providerRevoke.category || null
+    });
+
+    return res.status(200).json({ revoked, provider_revoke: providerRevoke });
+  } catch (error) {
+    return res.status(500).json({ error: 'server_error' });
+  }
 });
 
 function getListenTarget() {
@@ -864,14 +1175,21 @@ function stopStores() {
   }
 }
 
+function setFetchImplementation(fetchImplementation) {
+  fetchImpl = fetchImplementation || require('node-fetch');
+}
+
 module.exports = {
   app,
+  categorizeProviderStatus,
   escapeHtml,
+  getAllowedLegacyRedirects,
   getStateFingerprint,
   getTrustProxySetting,
   isAllowedRedirect,
   parseTrustProxyValue,
   parseFieldsParam,
   readJsonResponse,
+  setFetchImplementation,
   stopStores
 };

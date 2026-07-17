@@ -57,7 +57,6 @@ function getOAuthService() {
     .setAuthorizationBaseUrl(backendBaseUrl + '/oauth/authorize')
     .setTokenUrl(backendBaseUrl + '/oauth/token')
     .setClientId('looker-studio-connector')
-    .setClientSecret('unused')
     .setCallbackFunction('authCallback')
     .setPropertyStore(PropertiesService.getUserProperties())
     .setCache(CacheService.getUserCache())
@@ -412,7 +411,8 @@ function getData(request) {
     try {
       videosData = fetchPaginatedVideos(userData.open_id, backendAccessToken, videoApiFields);
     } catch (e) {
-      // Continue with user data only if video fetch fails
+      logError('Video fetch failed in getData', e);
+      throw new Error('TikTok video fetch failed. No partial profile-only result was returned: ' + e.message);
     }
 
     // Combine data into rows

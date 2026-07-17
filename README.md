@@ -1,222 +1,124 @@
 # Social Insights Studio
 
-![Version](https://img.shields.io/badge/Version-9.0.0-blue.svg)
+Social Insights Studio is now a workspace-based TikTok analytics application with the legacy Looker Studio connector preserved beside it. The standalone dashboard uses Express, React/Vite, MariaDB, server-side sessions, database-backed TikTok OAuth credentials, one-shot worker syncs, stored snapshots, and CSV exports.
 
-This is a Google Apps Script-based Community Connector designed to pull user profile information and a list of their videos, complete with metrics, from the TikTok Open Platform API. It makes this data available in Google Looker Studio (formerly Google Data Studio) and uses a backend OAuth provider to handle TikTok authentication securely.
+The production domain assumption remains `https://lstc.nixorcorporate.com`. Production deployment is cPanel/Passenger-compatible: the web process serves the API and compiled Vite app, migrations run as an explicit release command, and cron runs the bounded worker.
 
-The connector is built to be production-ready, featuring enhanced security and reliability. It leverages a secure OAuth2 flow for authentication and handles the complexities of API interaction, including pagination, error handling, and token management, allowing you to create insightful dashboards and reports from your TikTok account data.
+## Current Architecture
 
-## Features
+- `server/index.js` keeps the legacy connector routes and mounts the new application API under `/api`.
+- `server/platform/` contains auth, sessions, RBAC, TikTok connection lifecycle, sync, dashboard, and export services.
+- `server/migrations/` contains explicit MariaDB migrations. Migrations never run from normal web requests.
+- `server/worker.js` runs bounded cron-safe jobs such as due TikTok syncs.
+- `apps/web/` contains the React/Vite dashboard shell served by Express under `/app` after `npm run web:build`.
+- `Code.gs` remains the legacy Apps Script connector. Do not delete the encrypted file store until a production migration/retirement plan is approved.
 
-* **Secure Authentication**: Uses a backend OAuth provider to connect to your TikTok account, ensuring credentials are never stored in Apps Script.
-* **Encrypted Token Storage**: Persists TikTok tokens to disk using AES-256-GCM encryption with atomic writes and pruning.
-* **Automatic Token Refresh**: Automatically handles the refreshing of access tokens to maintain continuous data access.
-* **Comprehensive User Data**: Fetches a wide range of user profile details, including username, bio, avatar URLs, verification status, and key metrics like follower, following, and total like counts.
-* **Detailed Video Data**: Retrieves in-depth information and performance metrics for an account's videos, including descriptions, URLs, duration, and counts for likes, comments, shares, and views.
-* **Video Pagination**: Automatically fetches multiple pages of video data, up to a safe limit of 200 videos, to provide a comprehensive dataset.
-* **Robust Error Handling**: Features built-in logic to handle API errors gracefully, with an automatic retry mechanism for transient issues to ensure data reliability.
-* **Rate Limit Management**: Respects API rate limits by introducing delays between paginated requests to prevent API throttling.
+## Local MariaDB
 
-## Data Schema
+Local development and integration tests use the repository-managed Docker Compose MariaDB service. It binds only to `127.0.0.1`, uses a named volume, and creates both development and test databases. Real local credentials live in ignored `.env.database.local`; `.env.example` contains only placeholders.
 
-The connector provides the following fields, which are defined in the script and fetched from the TikTok API.
-
-### User Dimensions
-
-| Field ID | Field Name | Description |
-| :--- | :--- | :--- |
-| `user_open_id` | User Open ID | Unique identifier for the TikTok user. |
-| `user_union_id` | Union ID | Union ID for the user (if available). |
-| `user_username` | Username | TikTok username. |
-| `user_display_name` | Display Name | User's display name. |
-| `user_bio_description` | Bio Description | User profile bio. |
-| `user_profile_deep_link` | Profile Deep Link | Direct link to user profile. |
-| `user_avatar_url` | Avatar URL | URL of user profile picture. |
-| `user_avatar_url_100` | Avatar URL (100px) | URL of 100px profile picture. |
-| `user_avatar_large_url` | Avatar URL (Large) | URL of large profile picture. |
-| `user_is_verified` | Is Verified | Whether the user is verified. |
-
-### User Metrics
-
-| Field ID | Field Name | Description | Default Aggregation |
-| :--- | :--- | :--- | :--- |
-| `user_follower_count` | Follower Count | Number of followers. | MAX |
-| `user_following_count`| Following Count | Number of accounts followed. | MAX |
-| `user_likes_count` | Total Likes Received | Total likes on user's videos. | MAX |
-| `user_video_count` | Total Video Count | Number of videos posted. | MAX |
-
-### Video Dimensions
-
-| Field ID | Field Name | Description |
-| :--- | :--- | :--- |
-| `video_id` | Video ID | Unique identifier for the video. |
-| `video_create_time` | Video Create Time | When the video was created (YYYYMMDDHH). |
-| `video_cover_image_url` | Video Cover Image URL | URL of video thumbnail. |
-| `video_share_url` | Video Share URL | URL to share the video. |
-| `video_description` | Video Description | Caption/text description of video. |
-| `video_title` | Video Title | Title of the video. |
-| `video_embed_html` | Video Embed HTML | HTML code to embed the video. |
-| `video_embed_link` | Video Embed Link | URL to embed the video. |
-
-### Video Metrics
-
-| Field ID | Field Name | Description | Default Aggregation |
-| :--- | :--- | :--- | :--- |
-| `video_duration` | Video Duration (seconds) | Length of video in seconds. | AVG |
-| `video_height` | Video Height | Height of video in pixels. | MAX |
-| `video_width` | Video Width | Width of video in pixels. | MAX |
-| `video_like_count` | Video Like Count | Number of likes on video. | SUM |
-| `video_comment_count` | Video Comment Count | Number of comments on video. | SUM |
-| `video_share_count` | Video Share Count | Number of shares of video. | SUM |
-| `video_view_count` | Video View Count | Number of views on video. | SUM |
-
-## Setup and Installation
-
-Follow these steps carefully to set up and deploy your connector.
-
-### Step 1: Create a TikTok Developer Application
-
-1. Navigate to the [TikTok Developer Console](https://developers.tiktok.com/).
-2. Log in and create a new application.
-3. Fill in the required application details.
-4. Under your app settings, ensure you have requested and been granted access to the following scopes:
-   * `user.info.basic`
-   * `user.info.profile`
-   * `user.info.stats`
-   * `video.list`
-5. Go to the **App credentials** section and note down your **Client key** and **Client secret**.
-6. You must configure the **Redirect URI**. This will be your backend callback URL (configured in Step 2).
-
-### Step 2: Configure the Backend Service
-
-1. Copy `.env.example` to `.env` and fill in values (or set environment variables directly in your hosting panel).
-2. Required backend environment variables:
-   * `BASE_URL`: The HTTPS base URL of your backend (e.g., `https://lstc.nixorcorporate.com`).
-   * `TIKTOK_CLIENT_KEY`: TikTok Client Key from Step 1.
-   * `TIKTOK_CLIENT_SECRET`: TikTok Client Secret from Step 1.
-   * `ENCRYPTION_KEY`: 32-byte key (base64 or hex) for AES-256-GCM encryption.
-   * `BACKEND_JWT_SECRET`: Secret used to sign backend JWTs for Looker Studio.
-3. Recommended backend environment variables:
-   * `TOKEN_STORE_PATH`: Absolute path outside the public web root (e.g., `/var/lib/social-insights-studio/tokens.json`).
-   * `TOKEN_LOCK_PATH`: Lock file path in the same private directory.
-   * `STATE_STORE_PATH`: Absolute path for short-lived OAuth state storage (e.g., `/var/lib/social-insights-studio/oauth-state.json`).
-   * `STATE_LOCK_PATH`: Lock file path for OAuth state storage.
-   * `TRUST_PROXY`: Set to `1` when behind Passenger; use the explicit proxy hop count required by your stack (for example, `2` if Cloudflare and Passenger both sit in front of Node).
-   * `ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins (leave blank for server-to-server only).
-4. Start the backend from `server/` using `npm start`.
-5. Update the TikTok **Redirect URI** to: `https://<your-domain>/auth/tiktok/callback`.
-6. Ensure the token/state directory is private (`chmod 700`) and persisted token/state files are restricted (`chmod 600`).
-
-### Step 3: Create a Google Apps Script Project
-
-1. Go to [Google Apps Script](https://script.google.com/home).
-2. Click `New project` and give it a name (e.g., `Social Insights Studio Connector`).
-3. Replace the default `Code.gs` content with the entire code provided.
-4. **Add the OAuth2 for Apps Script Library**:
-   * Click on **Libraries** (`+` icon) in the left sidebar.
-   * In the "Script ID" field, paste: `1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF`
-   * Click **Look up**. Select the latest version, ensure the "Identifier" is `OAuth2`, and click **Add**.
-
-### Step 4: Configure Script Properties
-
-1. In your Apps Script project, go to **Project settings** (gear icon).
-2. Scroll down to **Script properties** and click `Add script property`.
-3. Add one property:
-   * `BACKEND_API_BASE_URL`: Your backend base URL (e.g., `https://lstc.nixorcorporate.com`).
-4. Click `Save script properties`.
-
-### Step 5: Deploy the Apps Script
-
-1. In the Apps Script editor, click `Deploy > New deployment`.
-2. From the "Select type" dropdown, choose `Web app`.
-3. Configure the deployment:
-   * **Execute as:** `Me` (your Google account).
-   * **Who has access:** `Anyone`.
-4. Click `Deploy`. Authorize the script if prompted.
-5. After deployment, **copy the Web app URL** (used by Looker Studio).
-
-### Step 6: Use in Looker Studio
-
-1. Go to [Google Looker Studio](https://lookerstudio.google.com/) and open a data source or report.
-2. In the connector gallery, search for and select the **"Build Your Own"** connector (sometimes called "Deploy from ID").
-3. Go back to your Apps Script project, click `Deploy > Manage deployments`, and copy the **Deployment ID**.
-4. Paste the Deployment ID into Looker Studio and click `Validate`.
-5. Your connector should appear. Select it.
-6. Click `Authorize` and follow the prompts to sign in via your backend and grant TikTok permissions.
-7. Once authorized, click `Connect` to add the data source to your report.
-
-## Configuration
-
-### Apps Script Properties
-
-The following properties must be set in your Apps Script project's `Project settings > Script properties`.
-
-| Property Name | Description |
+| Command | Purpose |
 | :--- | :--- |
-| `BACKEND_API_BASE_URL` | The base URL of your backend service. |
+| `npm run db:up` | Start MariaDB 11.4 on `127.0.0.1:3307`. |
+| `npm run db:wait` | Wait until MariaDB is ready for the app user. |
+| `npm run db:migrate:dev` | Apply migrations to `social_insights_dev`. |
+| `npm run db:migrate:test` | Apply migrations to `social_insights_test`. |
+| `npm run db:status` | Show development migration status. |
+| `node server/scripts/migrate.js status --database test` | Show test migration status. |
+| `npm run db:seed` | Insert clearly labeled local demo fixtures; refuses production/non-local database URLs. |
+| `npm run db:reset` | Drop and recreate only the local development/test databases; refuses non-local hosts. |
+| `npm run test:db` | Run real MariaDB integration tests. |
+| `npm run db:down` | Stop the local service without deleting the named volume. |
 
-### Backend Environment Variables
+Do not point destructive tests or reset commands at production or shared remote data.
 
-| Property Name | Description |
+## Application Commands
+
+| Command | Purpose |
 | :--- | :--- |
-| `BASE_URL` | Backend base URL (e.g., `https://lstc.nixorcorporate.com`). |
-| `TIKTOK_CLIENT_KEY` | TikTok Developer App's **Client Key**. |
-| `TIKTOK_CLIENT_SECRET`| TikTok Developer App's **Client Secret**. |
-| `ENCRYPTION_KEY` | 32-byte key (base64 or hex) for encrypting TikTok tokens. |
-| `BACKEND_JWT_SECRET` | Secret used to sign backend JWTs for Looker Studio. |
-| `TOKEN_STORE_PATH` | Absolute path for encrypted token storage (outside public web root). |
-| `TOKEN_LOCK_PATH` | Lock file path in the same private directory. |
-| `TOKEN_PRUNE_DAYS` | Number of days before pruning expired refresh tokens (default: 30). |
-| `STATE_STORE_PATH` | Absolute path for short-lived OAuth state storage (outside public web root, default: `server/data/oauth-state.json`). |
-| `STATE_LOCK_PATH` | Lock file path for OAuth state storage. |
-| `LOOKER_CLIENT_ID` | Expected OAuth client ID for Looker Studio (default: `looker-studio-connector`). |
-| `LOOKER_CLIENT_SECRET` | Expected OAuth client secret (default: `unused`). |
-| `ALLOWED_ORIGINS` | Comma-separated list of allowed browser origins for API calls. |
-| `TRUST_PROXY` | Proxy hop count for Express/rate limiting. Defaults to `1` when Passenger is detected; set explicitly for Cloudflare or additional proxies. |
-| `RATE_LIMIT_WINDOW_MINUTES` | Auth rate limit window in minutes (default: 15). |
-| `RATE_LIMIT_MAX` | Max auth requests per window (default: 60). |
-| `API_RATE_LIMIT_WINDOW_MINUTES` | API rate limit window in minutes (default: 5). |
-| `API_RATE_LIMIT_MAX` | Max API requests per window (default: 120). |
+| `npm --prefix server test` | Run backend tests, including Phase 0 regressions and MariaDB integration tests. |
+| `npm run web:build` | Type-check and build the React dashboard. |
+| `npm run worker -- sync-due --time-budget-seconds 240` | Run a bounded due-sync worker suitable for cron. |
+| `npm --prefix server audit --omit=dev` | Audit backend production dependencies. |
+| `npm --prefix apps/web audit --omit=dev` | Audit web production dependencies. |
 
-## Production Deployment (cPanel/Passenger)
+## Implemented Platform Flows
 
-1. Upload the repo and set the Node.js application root to `/server`.
-2. Set all required environment variables in cPanel's Node.js app settings (do not commit `.env` to git).
-3. Create a private storage directory outside `public/`, for example: `/home/<user>/secure/social-insights/`.
-4. Set permissions:
-   * `chmod 700 /home/<user>/secure/social-insights/`
-   * `chmod 600 /home/<user>/secure/social-insights/tokens.json` (after first run)
-   * `chmod 600 /home/<user>/secure/social-insights/oauth-state.json` (after first run)
-5. Set `TOKEN_STORE_PATH` and `TOKEN_LOCK_PATH` to files in that private directory.
-6. Set `TRUST_PROXY=1` so Express honors `X-Forwarded-*` headers behind Passenger, or set the exact hop count for your full proxy chain.
-7. Set `STATE_STORE_PATH` and `STATE_LOCK_PATH` to files in the same private directory so OAuth state survives Passenger worker restarts.
-8. Restart the Passenger app to pick up configuration changes.
+- Email magic-link sign-in with hashed, single-use, short-lived tokens and development-only token return when `AUTH_DEV_MAGIC_LINKS=true`.
+- Opaque server-side sessions in `HttpOnly`, `SameSite=Lax` cookies with CSRF protection for state-changing routes.
+- Workspaces, owner/admin/analyst/viewer memberships, invitations, last-owner protection, and centralized server-enforced RBAC.
+- Workspace-bound TikTok OAuth start/callback flow with hashed state, relative-only internal return paths, encrypted AES-256-GCM credentials, scope state, reconnect-required handling, and audit events.
+- TikTok disconnect attempts provider revoke before local credential disabling and stops future sync jobs.
+- Bounded worker syncs use MariaDB leases, refresh credentials when needed, write immutable profile/content snapshots, record partial/failed states, preserve last valid data, and stagger six-hour schedules.
+- Dashboard APIs read stored snapshots only; page requests do not fetch TikTok directly.
+- CSV content exports are workspace-scoped, analyst-or-higher, formula-injection safe, and recorded in export tables.
 
-## API Scopes Used
+## Required Environment
 
-This connector requests the following scopes from the TikTok API. Ensure they are enabled for your TikTok application in the TikTok Developer Console.
+Copy `.env.example` to a real environment file or configure variables in the hosting panel. Never commit secrets.
 
-* `user.info.basic`
-* `user.info.profile`
-* `user.info.stats`
-* `video.list`
+Important variables:
 
-## Troubleshooting
+- `BASE_URL`
+- `DATABASE_URL`
+- `DATABASE_TEST_URL`
+- `ENCRYPTION_KEY`
+- `ENCRYPTION_KEY_VERSION`
+- `TIKTOK_CLIENT_KEY`
+- `TIKTOK_CLIENT_SECRET`
+- `TIKTOK_REDIRECT_URI`
+- `GOOGLE_OIDC_CLIENT_ID` and mail settings when production auth providers are enabled
+- `LOOKER_CLIENT_ID`
+- `LOOKER_REDIRECT_URIS`
+- `SYNC_INTERVAL_SECONDS`
+- `MANUAL_SYNC_COOLDOWN_SECONDS`
+- `WORKER_TIME_BUDGET_SECONDS`
+- `TRUST_PROXY`
 
-If you encounter issues, especially during authentication or data fetching:
+Google OIDC currently fails closed unless configured and completed; magic links are available with a development-only mail adapter boundary.
 
-* **Redirect URI Mismatch**: This is the most common setup problem. The error often appears after authorizing in TikTok. Ensure the backend callback URL (`/auth/tiktok/callback`) is copied exactly into the **Redirect URI** field in your TikTok Developer App settings.
-* **Authorization Errors (`access_denied`)**: This error in the callback URL means you did not grant all the requested permissions in the TikTok pop-up window. You must approve all requested scopes.
-* **API Errors (`invalid_token`, `permission_denied`, etc.)**: The connector will display specific error messages from TikTok.
-  * `permission_denied` or `insufficient_scope`: Your TikTok App does not have the correct scopes enabled and approved.
-  * `token_expired` or `access_token_invalid`: May require you to re-authenticate. In Looker Studio, edit the data source connection, revoke access, and authorize again.
-  * `rate_limit_exceeded`: You have made too many API requests in a short period. The connector has built-in delays, but heavy usage can still trigger this.
-* **No Data or "Failed to Fetch"**: Check the Apps Script execution logs (`View > Executions` in the Apps Script editor) for detailed error messages. This can provide clues about failed API calls or other script issues.
+## Production Deployment Notes
 
-## Contributing
+For a controlled cPanel staging deployment and TikTok Sandbox verification, use
+[`docs/cpanel-staging-runbook.md`](docs/cpanel-staging-runbook.md).
 
-Feel free to open issues or submit pull requests if you find bugs or want to add new features.
+1. Install dependencies for `server/` and `apps/web/`.
+2. Build the web app with `npm run web:build`.
+3. Set Passenger to run `server/index.js`.
+4. Configure production MariaDB and set `DATABASE_URL`.
+5. Run migrations explicitly with `node server/scripts/migrate.js up --database dev` or the production-equivalent target command.
+6. Add a cron entry similar to:
 
-## License
+   ```bash
+   cd /path/to/social && npm run worker -- sync-due --time-budget-seconds 240
+   ```
 
-This project is open-source and available under the MIT License.
+7. Keep private token/state file-store paths configured for the legacy connector until retirement is approved.
+8. Set `LOOKER_REDIRECT_URIS` to the exact Apps Script callback URI for the retained connector.
+9. Use a precise `TRUST_PROXY` hop count for Passenger/Cloudflare.
+
+Backups, restore testing, legal retention approvals, final Google OIDC verification, mail delivery, and production TikTok review are external release gates.
+
+## Legacy Looker Connector
+
+The Apps Script connector still supports the existing Looker flow. Phase 0 hardening is preserved:
+
+- exact Apps Script redirect allowlisting;
+- client and redirect binding for internal authorization codes;
+- no insecure `unused` client-secret default;
+- provider HTTP timeouts and categorized failures;
+- provider revoke attempted before local deletion;
+- no silent Apps Script partial success on video fetch failure.
+
+The legacy TikTok callback remains `/auth/tiktok/callback`; the standalone dashboard callback is `/api/integrations/tiktok/callback`.
+
+## TikTok Scopes
+
+Only these scopes are requested for the standalone dashboard:
+
+- `user.info.basic`
+- `user.info.profile`
+- `user.info.stats`
+- `video.list`
+
+TikTok cover-image URLs are treated as ephemeral and are not stored as durable media assets.

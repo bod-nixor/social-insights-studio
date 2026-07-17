@@ -2,7 +2,11 @@ server/data/tokens.json
 server/data/oauth-state.json
 server/data/*.lock
 server/data/*.tmp
+node_modules/
 server/node_modules/
+apps/web/node_modules/
+apps/web/dist/
 .env
 .env.*
 !.env.example
+!.env.staging.example

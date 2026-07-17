@@ -26,11 +26,17 @@ const { closePool } = require('../database');
 const { setGoogleOidcFetchImplementation } = require('../platform/google-oidc');
 const { setTikTokFetchImplementation, TIKTOK_SCOPES } = require('../integrations/tiktok');
 const { compareMetric, engagementRate } = require('../platform/analytics');
-const { hasCapability, canAssignRole } = require('../platform/rbac');
+const { assertCapability, hasCapability, canAssignRole } = require('../platform/rbac');
 const { runDueSyncs } = require('../platform/sync-service');
 const { safeCsvCell } = require('../platform/export-service');
-const { decryptSecret, encryptSecret } = require('../platform/secret-envelope');
-const { assertNotProductionCommand } = require('../scripts/database-env');
+const { decryptSecret, encryptSecret, parsePreviousKeys } = require('../platform/secret-envelope');
+const {
+  assertLocalDatabaseUrl,
+  assertNotProductionCommand,
+  getDatabaseUrl,
+  normalizeMariaDbUrl,
+  parseArgs
+} = require('../scripts/database-env');
 
 let db;
 
@@ -174,6 +180,247 @@ test('RBAC role matrix matches Phase 1 policy', () => {
   assert.equal(canAssignRole('owner', 'owner'), true);
 });
 
+test('RBAC helpers fail closed for unknown roles, capabilities, and invalid assignments', () => {
+  assert.equal(hasCapability('ghost', 'viewDashboard'), false);
+  assert.equal(hasCapability('owner', 'unknownCapability'), false);
+  assert.doesNotThrow(() => assertCapability('analyst', 'exportCsv'));
+  assert.throws(() => assertCapability('viewer', 'manageMembers'), error => {
+    assert.equal(error.status, 403);
+    assert.equal(error.code, 'permission_denied');
+    return true;
+  });
+  assert.equal(canAssignRole('viewer', 'viewer'), false);
+  assert.equal(canAssignRole('owner', 'superadmin'), false);
+});
+
+test('database command helpers normalize MariaDB URLs and refuse unsafe reset targets', () => {
+  const previousEnv = {
+    databaseUrl: process.env.DATABASE_URL,
+    databaseTestUrl: process.env.DATABASE_TEST_URL,
+    testDatabaseUrl: process.env.TEST_DATABASE_URL
+  };
+  try {
+    process.env.DATABASE_URL = 'mysql://local_user:local_password@127.0.0.1:3307/social_insights_dev';
+    process.env.DATABASE_TEST_URL = 'mariadb://test_user:test_password@localhost:3307/social_insights_test';
+    delete process.env.TEST_DATABASE_URL;
+
+    assert.equal(
+      getDatabaseUrl('dev'),
+      'mariadb://local_user:local_password@127.0.0.1:3307/social_insights_dev'
+    );
+    assert.equal(
+      getDatabaseUrl('test'),
+      'mariadb://test_user:test_password@localhost:3307/social_insights_test'
+    );
+    assert.equal(normalizeMariaDbUrl('postgres://example.invalid/db'), 'postgres://example.invalid/db');
+    assert.deepEqual(parseArgs(['node', 'script', 'up', '--database', 'test', '--dry-run', '--database=dev']), {
+      _: ['up', '--dry-run'],
+      database: 'dev'
+    });
+
+    delete process.env.DATABASE_URL;
+    delete process.env.DATABASE_TEST_URL;
+    process.env.TEST_DATABASE_URL = 'mysql://fallback_user:fallback_password@127.0.0.1:3307/social_insights_fallback';
+    assert.equal(getDatabaseUrl('dev'), undefined);
+    assert.equal(
+      getDatabaseUrl('test'),
+      'mariadb://fallback_user:fallback_password@127.0.0.1:3307/social_insights_fallback'
+    );
+
+    assert.doesNotThrow(() => assertLocalDatabaseUrl('mariadb://user:password@localhost:3307/social_insights_dev'));
+    assert.doesNotThrow(() => assertLocalDatabaseUrl('mariadb://user:password@[::1]:3307/social_insights_dev'));
+    assert.throws(
+      () => assertLocalDatabaseUrl('mariadb://user:password@db.example.com:3307/social_insights_dev'),
+      /non-local database host/
+    );
+    assert.throws(
+      () => assertLocalDatabaseUrl('mariadb://user:password@127.0.0.1:3306/social_insights_dev'),
+      /outside the local development port/
+    );
+  } finally {
+    if (previousEnv.databaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousEnv.databaseUrl;
+    if (previousEnv.databaseTestUrl === undefined) delete process.env.DATABASE_TEST_URL;
+    else process.env.DATABASE_TEST_URL = previousEnv.databaseTestUrl;
+    if (previousEnv.testDatabaseUrl === undefined) delete process.env.TEST_DATABASE_URL;
+    else process.env.TEST_DATABASE_URL = previousEnv.testDatabaseUrl;
+  }
+});
+
+test('database-backed service wrappers fail closed when the pool is unavailable', async () => {
+  const databasePath = require.resolve('../database');
+  const connectionServicePath = require.resolve('../platform/connection-service');
+  const servicesPath = require.resolve('../platform/services');
+  const originalDatabaseExports = require(databasePath);
+  const originalConnectionServiceCache = require.cache[connectionServicePath];
+  const originalServicesCache = require.cache[servicesPath];
+  try {
+    require.cache[databasePath].exports = {
+      ...originalDatabaseExports,
+      getConnection: async () => null
+    };
+    delete require.cache[connectionServicePath];
+    delete require.cache[servicesPath];
+    const isolatedConnectionService = require('../platform/connection-service');
+    const isolatedServices = require('../platform/services');
+
+    await assert.rejects(
+      () => isolatedConnectionService.disconnectTikTok('user-id', 'workspace-id'),
+      error => {
+        assert.equal(error.status, 503);
+        assert.equal(error.code, 'database_not_configured');
+        return true;
+      }
+    );
+    await assert.rejects(
+      () => isolatedServices.listWorkspaces('user-id'),
+      error => {
+        assert.equal(error.status, 503);
+        assert.equal(error.code, 'database_not_configured');
+        return true;
+      }
+    );
+  } finally {
+    require.cache[databasePath].exports = originalDatabaseExports;
+    if (originalConnectionServiceCache) {
+      require.cache[connectionServicePath] = originalConnectionServiceCache;
+    } else {
+      delete require.cache[connectionServicePath];
+    }
+    if (originalServicesCache) {
+      require.cache[servicesPath] = originalServicesCache;
+    } else {
+      delete require.cache[servicesPath];
+    }
+  }
+});
+
+test('TikTok connection start rolls back and releases the connection when a write fails', async () => {
+  const databasePath = require.resolve('../database');
+  const connectionServicePath = require.resolve('../platform/connection-service');
+  const originalDatabaseExports = require(databasePath);
+  const originalConnectionServiceCache = require.cache[connectionServicePath];
+  const calls = [];
+  const fakeConnection = {
+    async query(sql) {
+      calls.push(sql);
+      if (sql.includes('SELECT role FROM workspace_memberships')) {
+        return [{ role: 'owner' }];
+      }
+      if (sql.includes('SELECT * FROM data_sources')) {
+        return [];
+      }
+      if (sql.includes('INSERT INTO data_sources')) {
+        return {};
+      }
+      if (sql.includes('INSERT INTO oauth_transactions')) {
+        throw new Error('insert_failed');
+      }
+      return {};
+    },
+    async beginTransaction() {
+      calls.push('begin');
+    },
+    async commit() {
+      calls.push('commit');
+    },
+    async rollback() {
+      calls.push('rollback');
+    },
+    async release() {
+      calls.push('release');
+    }
+  };
+  try {
+    require.cache[databasePath].exports = {
+      ...originalDatabaseExports,
+      getConnection: async () => fakeConnection
+    };
+    delete require.cache[connectionServicePath];
+    const isolatedConnectionService = require('../platform/connection-service');
+    await assert.rejects(
+      () => isolatedConnectionService.startTikTokConnection('user-id', 'workspace-id', '/app'),
+      /insert_failed/
+    );
+    assert.ok(calls.includes('begin'));
+    assert.ok(calls.includes('rollback'));
+    assert.ok(calls.includes('release'));
+    assert.equal(calls.includes('commit'), false);
+  } finally {
+    require.cache[databasePath].exports = originalDatabaseExports;
+    if (originalConnectionServiceCache) {
+      require.cache[connectionServicePath] = originalConnectionServiceCache;
+    } else {
+      delete require.cache[connectionServicePath];
+    }
+  }
+});
+
+test('TikTok disconnect rolls back and releases the connection when local revocation writes fail', async () => {
+  const databasePath = require.resolve('../database');
+  const connectionServicePath = require.resolve('../platform/connection-service');
+  const originalDatabaseExports = require(databasePath);
+  const originalConnectionServiceCache = require.cache[connectionServicePath];
+  const calls = [];
+  const fakeConnection = {
+    async query(sql) {
+      calls.push(sql);
+      if (sql.includes('SELECT role FROM workspace_memberships')) {
+        return [{ role: 'owner' }];
+      }
+      if (sql.includes('SELECT ds.id AS data_source_id')) {
+        return [{
+          data_source_id: 'data-source-id',
+          access_token_ciphertext: null,
+          access_token_iv: null,
+          access_token_tag: null,
+          key_version: null,
+          revoked_at: null
+        }];
+      }
+      if (sql.includes('UPDATE oauth_credentials SET revoked_at')) {
+        throw new Error('local_revoke_failed');
+      }
+      return {};
+    },
+    async beginTransaction() {
+      calls.push('begin');
+    },
+    async commit() {
+      calls.push('commit');
+    },
+    async rollback() {
+      calls.push('rollback');
+    },
+    async release() {
+      calls.push('release');
+    }
+  };
+  try {
+    require.cache[databasePath].exports = {
+      ...originalDatabaseExports,
+      getConnection: async () => fakeConnection
+    };
+    delete require.cache[connectionServicePath];
+    const isolatedConnectionService = require('../platform/connection-service');
+    await assert.rejects(
+      () => isolatedConnectionService.disconnectTikTok('user-id', 'workspace-id'),
+      /local_revoke_failed/
+    );
+    assert.ok(calls.includes('begin'));
+    assert.ok(calls.includes('rollback'));
+    assert.ok(calls.includes('release'));
+    assert.equal(calls.includes('commit'), false);
+  } finally {
+    require.cache[databasePath].exports = originalDatabaseExports;
+    if (originalConnectionServiceCache) {
+      require.cache[connectionServicePath] = originalConnectionServiceCache;
+    } else {
+      delete require.cache[connectionServicePath];
+    }
+  }
+});
+
 test('migrations are applied to the real MariaDB test database', async () => {
   const rows = await db.query('SELECT version FROM schema_migrations ORDER BY version');
   assert.deepEqual(rows.map(row => row.version), ['001_phase1_foundation', '002_session_csrf']);
@@ -223,6 +470,44 @@ test('schema constraints and nullable metrics behave on MariaDB', async () => {
 
 test('magic-link session, CSRF, workspace, cross-workspace, and role checks work through HTTP', async () => {
   await clearDatabase();
+  const unauthenticatedSession = await requestApp('/api/session');
+  assert.equal(unauthenticatedSession.statusCode, 401);
+
+  const invalidEmail = await requestApp('/api/auth/magic-link/request', {
+    method: 'POST',
+    body: { email: 'not-an-email' }
+  });
+  assert.equal(invalidEmail.statusCode, 400);
+  assert.equal(invalidEmail.json().error, 'invalid_email');
+
+  const invalidToken = await requestApp('/api/auth/magic-link/verify', {
+    method: 'POST',
+    body: { token: 'not-a-real-token' }
+  });
+  assert.equal(invalidToken.statusCode, 400);
+  assert.equal(invalidToken.json().error, 'invalid_or_expired_token');
+
+  const missingToken = await requestApp('/api/auth/magic-link/verify', {
+    method: 'POST',
+    body: {}
+  });
+  assert.equal(missingToken.statusCode, 400);
+  assert.equal(missingToken.json().error, 'invalid_token');
+
+  for (let index = 0; index < 5; index += 1) {
+    const limitedRequest = await requestApp('/api/auth/magic-link/request', {
+      method: 'POST',
+      body: { email: 'limited@example.com' }
+    });
+    assert.equal(limitedRequest.statusCode, 200);
+  }
+  const rateLimited = await requestApp('/api/auth/magic-link/request', {
+    method: 'POST',
+    body: { email: 'limited@example.com' }
+  });
+  assert.equal(rateLimited.statusCode, 429);
+  assert.equal(rateLimited.json().error, 'rate_limited');
+
   const owner = await signIn('owner@example.com');
 
   const noCsrf = await requestApp('/api/workspaces', {
@@ -232,6 +517,29 @@ test('magic-link session, CSRF, workspace, cross-workspace, and role checks work
   });
   assert.equal(noCsrf.statusCode, 403);
   assert.equal(noCsrf.json().error, 'csrf_required');
+
+  const tamperedCsrfJar = { ...owner.cookies, sis_csrf: 'forged-csrf-token' };
+  const tamperedCsrf = await requestApp('/api/workspaces', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(tamperedCsrfJar),
+      'x-csrf-token': 'forged-csrf-token'
+    },
+    body: { name: 'Owner Workspace' }
+  });
+  assert.equal(tamperedCsrf.statusCode, 403);
+  assert.equal(tamperedCsrf.json().error, 'csrf_invalid');
+
+  const invalidWorkspace = await requestApp('/api/workspaces', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { name: '   ' }
+  });
+  assert.equal(invalidWorkspace.statusCode, 400);
+  assert.equal(invalidWorkspace.json().error, 'invalid_workspace_name');
 
   const created = await requestApp('/api/workspaces', {
     method: 'POST',
@@ -331,6 +639,15 @@ test('member invitations, role changes, admin limits, and last-owner protection 
   assert.equal(invite.json().invited, true);
   assert.ok(invite.json().dev_token);
 
+  const memberList = await requestApp(`/api/workspaces/${workspace.id}/members`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(memberList.statusCode, 200);
+  assert.equal(memberList.json().members.length, 3);
+  assert.equal(memberList.json().invitations.length, 1);
+  assert.equal(memberList.json().invitations[0].email, 'analyst@example.com');
+  assert.equal(memberList.json().invitations[0].role, 'analyst');
+
   const adminCannotInviteOwner = await requestApp(`/api/workspaces/${workspace.id}/invitations`, {
     method: 'POST',
     headers: {
@@ -359,6 +676,28 @@ test('member invitations, role changes, admin limits, and last-owner protection 
   );
   assert.equal(promoted[0].role, 'analyst');
 
+  const missingMemberRole = await requestApp('/api/workspaces/' + workspace.id + '/members/00000000-0000-4000-8000-000000000404', {
+    method: 'PATCH',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { role: 'viewer' }
+  });
+  assert.equal(missingMemberRole.statusCode, 404);
+  assert.equal(missingMemberRole.json().error, 'member_not_found');
+
+  const adminCannotPromoteOwner = await requestApp(`/api/workspaces/${workspace.id}/members/${viewer.user.id}`, {
+    method: 'PATCH',
+    headers: {
+      cookie: cookieHeader(admin.cookies),
+      'x-csrf-token': admin.csrf
+    },
+    body: { role: 'owner' }
+  });
+  assert.equal(adminCannotPromoteOwner.statusCode, 403);
+  assert.equal(adminCannotPromoteOwner.json().error, 'invalid_role_assignment');
+
   const ownerCannotDemoteSelf = await requestApp(`/api/workspaces/${workspace.id}/members/${owner.user.id}`, {
     method: 'PATCH',
     headers: {
@@ -380,9 +719,35 @@ test('member invitations, role changes, admin limits, and last-owner protection 
   });
   assert.equal(ownerCannotRemoveSelf.statusCode, 400);
   assert.equal(ownerCannotRemoveSelf.json().error, 'last_owner_required');
+
+  const missingMemberRemove = await requestApp('/api/workspaces/' + workspace.id + '/members/00000000-0000-4000-8000-000000000404', {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(missingMemberRemove.statusCode, 404);
+  assert.equal(missingMemberRemove.json().error, 'member_not_found');
+
+  const removeViewer = await requestApp(`/api/workspaces/${workspace.id}/members/${viewer.user.id}`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(removeViewer.statusCode, 200);
+  assert.equal(removeViewer.json().removed, true);
 });
 
 test('Google OIDC route fails closed when credentials are unavailable', async () => {
+  const stateResponse = await requestApp('/api/auth/google/state');
+  assert.equal(stateResponse.statusCode, 503);
+  assert.equal(stateResponse.json().error, 'google_oidc_not_configured');
+
   const response = await requestApp('/api/auth/google', {
     method: 'POST',
     body: { id_token: 'fake', state: 'state', nonce: 'nonce' }
@@ -451,6 +816,44 @@ test('AES-GCM secret envelopes decrypt previous key versions and write the curre
   }
 });
 
+test('secret envelopes reject missing, malformed, and unavailable key versions', () => {
+  const previousEnv = {
+    key: process.env.ENCRYPTION_KEY,
+    version: process.env.ENCRYPTION_KEY_VERSION,
+    previous: process.env.ENCRYPTION_PREVIOUS_KEYS
+  };
+  try {
+    delete process.env.ENCRYPTION_KEY;
+    assert.throws(() => encryptSecret('missing-key'), /Missing ENCRYPTION_KEY/);
+
+    process.env.ENCRYPTION_KEY = 'not-a-valid-key';
+    assert.throws(() => encryptSecret('bad-key'), /32 bytes/);
+
+    process.env.ENCRYPTION_KEY = '5'.repeat(64);
+    process.env.ENCRYPTION_KEY_VERSION = 'current-v1';
+    process.env.ENCRYPTION_PREVIOUS_KEYS = 'malformed-entry';
+    assert.throws(() => parsePreviousKeys(), /version:key/);
+
+    process.env.ENCRYPTION_PREVIOUS_KEYS = '';
+    assert.throws(
+      () => decryptSecret({
+        ciphertext: Buffer.from('ciphertext').toString('base64'),
+        iv: Buffer.alloc(12).toString('base64'),
+        tag: Buffer.alloc(16).toString('base64'),
+        keyVersion: 'unknown-v0'
+      }),
+      /key version is not available/
+    );
+  } finally {
+    if (previousEnv.key === undefined) delete process.env.ENCRYPTION_KEY;
+    else process.env.ENCRYPTION_KEY = previousEnv.key;
+    if (previousEnv.version === undefined) delete process.env.ENCRYPTION_KEY_VERSION;
+    else process.env.ENCRYPTION_KEY_VERSION = previousEnv.version;
+    if (previousEnv.previous === undefined) delete process.env.ENCRYPTION_PREVIOUS_KEYS;
+    else process.env.ENCRYPTION_PREVIOUS_KEYS = previousEnv.previous;
+  }
+});
+
 test('Google OIDC verifies state, nonce, issuer, audience, and creates an opaque session', async () => {
   await clearDatabase();
   process.env.GOOGLE_OIDC_CLIENT_ID = 'google-client-id';
@@ -462,6 +865,13 @@ test('Google OIDC verifies state, nonce, issuer, audience, and creates an opaque
   setGoogleOidcFetchImplementation(async () => jsonResponse(200, { keys: [jwk] }));
 
   try {
+    const invalidRequest = await requestApp('/api/auth/google', {
+      method: 'POST',
+      body: {}
+    });
+    assert.equal(invalidRequest.statusCode, 400);
+    assert.equal(invalidRequest.json().error, 'invalid_oidc_request');
+
     const start = await requestApp('/api/auth/google/state');
     assert.equal(start.statusCode, 200);
     const oidcJar = {};
@@ -511,6 +921,36 @@ test('Google OIDC verifies state, nonce, issuer, audience, and creates an opaque
     });
     assert.equal(session.statusCode, 200);
     assert.equal(session.json().user.email, 'google-user@example.com');
+
+    const secondStart = await requestApp('/api/auth/google/state');
+    assert.equal(secondStart.statusCode, 200);
+    const secondJar = {};
+    mergeCookies(secondJar, secondStart.headers['set-cookie']);
+    const secondState = secondStart.json();
+    const secondIdToken = jwt.sign({
+      iss: 'https://accounts.google.com',
+      aud: 'google-client-id',
+      sub: 'google-subject-1',
+      email: 'google-user@example.com',
+      email_verified: true,
+      nonce: secondState.nonce,
+      name: 'Renamed Google User'
+    }, privateKey, {
+      algorithm: 'RS256',
+      keyid: 'test-google-key',
+      expiresIn: '5m'
+    });
+    const secondVerified = await requestApp('/api/auth/google', {
+      method: 'POST',
+      headers: { cookie: cookieHeader(secondJar) },
+      body: {
+        id_token: secondIdToken,
+        state: secondState.state,
+        nonce: secondState.nonce
+      }
+    });
+    assert.equal(secondVerified.statusCode, 200);
+    assert.equal(secondVerified.json().user.display_name, 'Google User');
   } finally {
     delete process.env.GOOGLE_OIDC_CLIENT_ID;
     setGoogleOidcFetchImplementation(null);
@@ -521,6 +961,7 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
   await clearDatabase();
   const owner = await signIn('owner-tiktok@example.com');
   const viewer = await signIn('viewer-tiktok@example.com');
+  const outsider = await signIn('outsider-tiktok@example.com');
   const workspace = await createWorkspace(owner, 'TikTok Workspace');
   const otherWorkspace = await createWorkspace(owner, 'Other Workspace');
   await db.query(
@@ -539,6 +980,39 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
   });
   assert.equal(openReturn.statusCode, 400);
   assert.equal(openReturn.json().error, 'invalid_return_path');
+
+  const nonAppReturn = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { return_path: '/settings' }
+  });
+  assert.equal(nonAppReturn.statusCode, 400);
+  assert.equal(nonAppReturn.json().error, 'invalid_return_path');
+
+  const outsiderStart = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(outsider.cookies),
+      'x-csrf-token': outsider.csrf
+    },
+    body: { return_path: '/app' }
+  });
+  assert.equal(outsiderStart.statusCode, 404);
+  assert.equal(outsiderStart.json().error, 'workspace_not_found');
+
+  const outsiderDisconnect = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(outsider.cookies),
+      'x-csrf-token': outsider.csrf
+    },
+    body: {}
+  });
+  assert.equal(outsiderDisconnect.statusCode, 404);
+  assert.equal(outsiderDisconnect.json().error, 'workspace_not_found');
 
   const viewerStart = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok/start`, {
     method: 'POST',
@@ -693,6 +1167,183 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
   assert.ok(auditRows.map(row => row.action).includes('connection.tiktok.disconnected'));
 });
 
+test('TikTok disconnect records provider revoke failure but still disables the local connection', async () => {
+  await clearDatabase();
+  const owner = await signIn('revoke-failure-owner@example.com');
+  const workspace = await createWorkspace(owner, 'Revoke Failure Workspace');
+  installTikTokQueue([
+    () => jsonResponse(200, {
+      data: {
+        access_token: 'revoke-failure-access',
+        refresh_token: 'revoke-failure-refresh',
+        open_id: 'revoke-open-id',
+        scope: TIKTOK_SCOPES.join(','),
+        expires_in: 3600,
+        refresh_expires_in: 86400,
+        token_type: 'Bearer'
+      }
+    }),
+    () => jsonResponse(200, { data: { user: { open_id: 'revoke-open-id', username: 'revokeacct' } } }),
+    () => jsonResponse(500, { error: { code: 'provider_down' } })
+  ]);
+
+  const start = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { return_path: '/app' }
+  });
+  assert.equal(start.statusCode, 200);
+  const state = new URL(start.json().authorization_url).searchParams.get('state');
+  const callback = await requestApp(`/api/integrations/tiktok/callback?code=connect&state=${encodeURIComponent(state)}`);
+  assert.equal(callback.statusCode, 200);
+
+  const disconnect = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(disconnect.statusCode, 200);
+  assert.equal(disconnect.json().disconnected, true);
+  assert.equal(disconnect.json().provider_revoke.attempted, true);
+  assert.equal(disconnect.json().provider_revoke.success, false);
+  assert.equal(disconnect.json().provider_revoke.error.category, 'provider');
+
+  const rows = await db.query(
+    `SELECT ds.status, oc.revoked_at, sj.status AS job_status
+     FROM data_sources ds
+     JOIN oauth_credentials oc ON oc.data_source_id = ds.id
+     LEFT JOIN sync_jobs sj ON sj.data_source_id = ds.id
+     WHERE ds.workspace_id = ?`,
+    [workspace.id]
+  );
+  assert.equal(rows[0].status, 'disconnected');
+  assert.ok(rows[0].revoked_at);
+  assert.equal(rows[0].job_status, 'disabled');
+
+  const auditRows = await db.query(
+    `SELECT JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.provider_revoke.category')) AS category
+     FROM audit_logs
+     WHERE workspace_id = ? AND action = 'connection.tiktok.disconnected'
+     ORDER BY created_at DESC LIMIT 1`,
+    [workspace.id]
+  );
+  assert.equal(auditRows[0].category, 'provider');
+});
+
+test('TikTok callback failures and disconnected edge states fail closed without leaking credentials', async () => {
+  await clearDatabase();
+  const owner = await signIn('callback-failure-owner@example.com');
+  const noSourceWorkspace = await createWorkspace(owner, 'No Source Workspace');
+
+  const missingCode = await requestApp('/api/integrations/tiktok/callback?state=missing-code-state');
+  assert.equal(missingCode.statusCode, 400);
+
+  const notConnectedDisconnect = await requestApp(`/api/workspaces/${noSourceWorkspace.id}/connections/tiktok`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(notConnectedDisconnect.statusCode, 200);
+  assert.deepEqual(notConnectedDisconnect.json(), {
+    disconnected: false,
+    provider_revoke: { attempted: false, reason: 'not_connected' }
+  });
+
+  const tokenFailureWorkspace = await createWorkspace(owner, 'Token Failure Workspace');
+  installTikTokQueue([
+    () => jsonResponse(401, { error: { code: 'invalid_code' } })
+  ]);
+  const tokenStart = await requestApp(`/api/workspaces/${tokenFailureWorkspace.id}/connections/tiktok/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { return_path: '/app' }
+  });
+  const tokenState = new URL(tokenStart.json().authorization_url).searchParams.get('state');
+  const tokenCallback = await requestApp(`/api/integrations/tiktok/callback?code=bad-code&state=${encodeURIComponent(tokenState)}`);
+  assert.equal(tokenCallback.statusCode, 400);
+  const tokenRows = await db.query(
+    `SELECT ot.status AS transaction_status, ds.status AS source_status, ds.reconnect_reason
+     FROM oauth_transactions ot
+     JOIN data_sources ds ON ds.workspace_id = ot.workspace_id
+     WHERE ot.workspace_id = ?`,
+    [tokenFailureWorkspace.id]
+  );
+  assert.equal(tokenRows[0].transaction_status, 'failed');
+  assert.equal(tokenRows[0].source_status, 'reconnect_required');
+  assert.equal(tokenRows[0].reconnect_reason, 'token_exchange_failed');
+
+  const profileFailureWorkspace = await createWorkspace(owner, 'Profile Failure Workspace');
+  installTikTokQueue([
+    () => jsonResponse(200, {
+      data: {
+        access_token: 'profile-failure-access',
+        refresh_token: 'profile-failure-refresh',
+        open_id: 'expected-open-id',
+        scope: TIKTOK_SCOPES.join(','),
+        expires_in: 3600,
+        refresh_expires_in: 86400,
+        token_type: 'Bearer'
+      }
+    }),
+    () => jsonResponse(200, { data: { user: { open_id: 'different-open-id', username: 'mismatch' } } })
+  ]);
+  const profileStart = await requestApp(`/api/workspaces/${profileFailureWorkspace.id}/connections/tiktok/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { return_path: '/app' }
+  });
+  const profileState = new URL(profileStart.json().authorization_url).searchParams.get('state');
+  const profileCallback = await requestApp(`/api/integrations/tiktok/callback?code=profile-code&state=${encodeURIComponent(profileState)}`);
+  assert.equal(profileCallback.statusCode, 400);
+  const profileRows = await db.query(
+    `SELECT ot.status AS transaction_status, ds.status AS source_status, ds.reconnect_reason
+     FROM oauth_transactions ot
+     JOIN data_sources ds ON ds.workspace_id = ot.workspace_id
+     WHERE ot.workspace_id = ?`,
+    [profileFailureWorkspace.id]
+  );
+  assert.equal(profileRows[0].transaction_status, 'failed');
+  assert.equal(profileRows[0].source_status, 'reconnect_required');
+  assert.equal(profileRows[0].reconnect_reason, 'profile_fetch_failed');
+
+  const noCredentialWorkspace = await createWorkspace(owner, 'No Credential Workspace');
+  const dataSourceId = '20000000-0000-4000-8000-000000000905';
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status)
+     VALUES (?, ?, 'tiktok', 'active')`,
+    [dataSourceId, noCredentialWorkspace.id]
+  );
+  const noCredentialDisconnect = await requestApp(`/api/workspaces/${noCredentialWorkspace.id}/connections/tiktok`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(noCredentialDisconnect.statusCode, 200);
+  assert.equal(noCredentialDisconnect.json().disconnected, true);
+  assert.deepEqual(noCredentialDisconnect.json().provider_revoke, {
+    attempted: false,
+    reason: 'credential_not_found'
+  });
+});
+
 test('dashboard, manual sync, stale partial state, and CSV export use stored snapshots', async () => {
   await clearDatabase();
   const owner = await signIn('dashboard-owner@example.com');
@@ -807,17 +1458,44 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   const contentBody = content.json();
   assert.equal(contentBody.rows[0].engagement_rate, 13);
 
+  const searchContent = await requestApp(`/api/workspaces/${workspace.id}/content?search=${encodeURIComponent('sum')}&sort=engagement&direction=asc&limit=1&offset=0`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(searchContent.statusCode, 200);
+  assert.equal(searchContent.json().total, 1);
+  assert.equal(searchContent.json().rows[0].provider_content_id, 'video-1');
+
   const contentDetail = await requestApp(`/api/workspaces/${workspace.id}/content/${contentBody.rows[0].id}`, {
     headers: { cookie: cookieHeader(owner.cookies) }
   });
   assert.equal(contentDetail.statusCode, 200);
   assert.equal(contentDetail.json().history[0].engagement_rate, 13);
+  assert.equal(contentDetail.json().current_metrics.engagement_rate, 13);
 
   const missingContent = await requestApp(`/api/workspaces/${workspace.id}/content/00000000-0000-4000-8000-000000000999`, {
     headers: { cookie: cookieHeader(owner.cookies) }
   });
   assert.equal(missingContent.statusCode, 404);
   assert.equal(missingContent.json().error, 'content_not_found');
+
+  const otherContentWorkspace = await createWorkspace(owner, 'Other Content Workspace');
+  const otherSourceId = '20000000-0000-4000-8000-000000000901';
+  const otherContentId = '50000000-0000-4000-8000-000000000901';
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status)
+     VALUES (?, ?, 'tiktok', 'disconnected')`,
+    [otherSourceId, otherContentWorkspace.id]
+  );
+  await db.query(
+    `INSERT INTO content_items (id, workspace_id, data_source_id, provider_content_id, title)
+     VALUES (?, ?, ?, 'foreign-video', 'Foreign content')`,
+    [otherContentId, otherContentWorkspace.id, otherSourceId]
+  );
+  const crossWorkspaceContent = await requestApp(`/api/workspaces/${workspace.id}/content/${otherContentId}`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(crossWorkspaceContent.statusCode, 404);
+  assert.equal(crossWorkspaceContent.json().error, 'content_not_found');
 
   const deniedCsv = await requestApp(`/api/workspaces/${workspace.id}/exports/content.csv`, {
     headers: { cookie: cookieHeader(viewer.cookies) }
@@ -914,4 +1592,10 @@ test('analytics and CSV safety helpers preserve nulls and avoid fabricated basel
   assert.equal(engagementRate({ view_count: 0, like_count: 10, comment_count: 1, share_count: 1 }), null);
   assert.equal(engagementRate({ view_count: 100, like_count: 10, comment_count: 1, share_count: 1 }), 12);
   assert.equal(safeCsvCell('=IMPORTXML("https://example.com")'), `"\'=IMPORTXML(""https://example.com"")"`);
+  assert.equal(safeCsvCell('+SUM(1,1)'), `"'+SUM(1,1)"`);
+  assert.equal(safeCsvCell('-10'), "'-10");
+  assert.equal(safeCsvCell('@cmd'), "'@cmd");
+  assert.equal(safeCsvCell('\t=SUM(1,1)'), `"'\t=SUM(1,1)"`);
+  assert.equal(safeCsvCell('line one\nline two'), '"line one\nline two"');
+  assert.equal(safeCsvCell(null), '');
 });

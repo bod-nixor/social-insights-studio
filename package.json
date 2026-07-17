@@ -15,9 +15,24 @@
     "db:status": "node server/scripts/migrate.js status --database dev",
     "db:seed": "node server/scripts/seed-development.js",
     "test:db": "node --test server/test/database.test.js",
+    "coverage:backend": "node --test --experimental-test-coverage server/test/*.test.js",
     "worker": "node server/worker.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format:check": "prettier --check \"apps/web/src/**/*.{ts,tsx,css}\" \"*.{js,json}\" \"apps/web/package.json\"",
+    "format": "prettier --write \"apps/web/src/**/*.{ts,tsx,css}\" \"*.{js,json}\" \"apps/web/package.json\"",
+    "typecheck": "npm --prefix apps/web run typecheck",
     "web:dev": "npm --prefix apps/web run dev",
     "web:build": "npm --prefix apps/web run build",
     "web:preview": "npm --prefix apps/web run preview"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "globals": "^16.5.0",
+    "prettier": "^3.6.2",
+    "typescript-eslint": "^8.48.0"
   }
 }

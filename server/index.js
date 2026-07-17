@@ -233,13 +233,15 @@ const authLimiter = rateLimit({
   windowMs: (Number(process.env.RATE_LIMIT_WINDOW_MINUTES) || 15) * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_MAX) || 60,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  handler: (req, res) => res.status(429).json({ error: 'rate_limited' })
 });
 const apiLimiter = rateLimit({
   windowMs: (Number(process.env.API_RATE_LIMIT_WINDOW_MINUTES) || 5) * 60 * 1000,
   max: Number(process.env.API_RATE_LIMIT_MAX) || 120,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  handler: (req, res) => res.status(429).json({ error: 'rate_limited' })
 });
 
 app.use(express.static(PUBLIC_DIR));

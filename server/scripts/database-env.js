@@ -40,7 +40,8 @@ function parseArgs(argv) {
 function assertLocalDatabaseUrl(databaseUrl) {
   const parsed = new URL(databaseUrl);
   const localHosts = new Set(['127.0.0.1', 'localhost', '::1']);
-  if (!localHosts.has(parsed.hostname)) {
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (!localHosts.has(hostname)) {
     throw new Error('Refusing to reset a non-local database host.');
   }
   if (parsed.port && parsed.port !== '3307') {

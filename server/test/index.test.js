@@ -36,10 +36,23 @@ const {
   setFetchImplementation,
   stopStores
 } = require('../index');
+const {
+  buildAuthorizationUrl,
+  categorizeProviderFailure,
+  exchangeCode,
+  fetchProfile,
+  fetchVideosPage,
+  missingScopes,
+  refreshAccessToken,
+  revokeAccess,
+  setTikTokFetchImplementation
+} = require('../integrations/tiktok');
 const { closePool } = require('../database');
+const { normalizeEmail, parseCookies, serializeCookie } = require('../platform/security');
 
 after(async () => {
   setFetchImplementation(null);
+  setTikTokFetchImplementation(null);
   stopStores();
   await closePool();
   await fs.rm(tempDir, { recursive: true, force: true });
@@ -313,6 +326,9 @@ test('parseTrustProxyValue uses safe proxy hop counts', () => {
   assert.equal(parseTrustProxyValue('true'), 1);
   assert.equal(parseTrustProxyValue('false'), false);
   assert.equal(parseTrustProxyValue('loopback'), 'loopback');
+  assert.equal(parseTrustProxyValue('0'), false);
+  assert.equal(parseTrustProxyValue('-1'), '-1');
+  assert.equal(parseTrustProxyValue('unknown'), 'unknown');
 });
 
 test('getTrustProxySetting defaults to one hop in Passenger', () => {
@@ -335,6 +351,138 @@ test('getTrustProxySetting defaults to one hop in Passenger', () => {
       process.env.TRUST_PROXY = originalTrustProxy;
     }
   }
+});
+
+test('security helpers normalize email and serialize cookies with expected protections', () => {
+  assert.equal(normalizeEmail('  User@Example.COM  '), 'user@example.com');
+  assert.deepEqual(parseCookies('sis_session=abc%20123; empty=; malformed; theme=light'), {
+    sis_session: 'abc 123',
+    empty: '',
+    theme: 'light'
+  });
+  assert.equal(
+    serializeCookie('sis_session', 'abc 123', {
+      maxAge: 60,
+      path: '/',
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Lax'
+    }),
+    'sis_session=abc%20123; Max-Age=60; Path=/; HttpOnly; Secure; SameSite=Lax'
+  );
+});
+
+test('TikTok provider failures are categorized for retry and reconnect decisions', async () => {
+  assert.deepEqual(categorizeProviderFailure(401, { error: { code: 'access_token_invalid' } }), {
+    category: 'authentication',
+    retryable: false,
+    provider_code: 'access_token_invalid'
+  });
+  assert.deepEqual(categorizeProviderFailure(429, { error: { code: 'rate_limit_exceeded' } }), {
+    category: 'rate_limit',
+    retryable: true,
+    provider_code: 'rate_limit_exceeded'
+  });
+  assert.deepEqual(categorizeProviderFailure(400, { error: { message: 'missing scope' } }), {
+    category: 'scope',
+    retryable: false,
+    provider_code: 'missing scope'
+  });
+  assert.deepEqual(categorizeProviderFailure(400, { error: 'bad_request' }), {
+    category: 'provider',
+    retryable: false,
+    provider_code: 'bad_request'
+  });
+  assert.deepEqual(categorizeProviderFailure(503, { code: 'provider_down' }), {
+    category: 'provider',
+    retryable: true,
+    provider_code: 'provider_down'
+  });
+  assert.deepEqual(categorizeProviderFailure(200, {}), {
+    category: 'malformed_response',
+    retryable: false,
+    provider_code: null
+  });
+  assert.deepEqual(missingScopes('user.info.basic video.list'), ['user.info.profile', 'user.info.stats']);
+
+  const previousRedirectUri = process.env.TIKTOK_REDIRECT_URI;
+  process.env.TIKTOK_REDIRECT_URI = 'https://local.example/tiktok/callback';
+  assert.equal(
+    new URL(buildAuthorizationUrl('state-value')).searchParams.get('redirect_uri'),
+    'https://local.example/tiktok/callback'
+  );
+  if (previousRedirectUri === undefined) {
+    delete process.env.TIKTOK_REDIRECT_URI;
+  } else {
+    process.env.TIKTOK_REDIRECT_URI = previousRedirectUri;
+  }
+
+  setTikTokFetchImplementation(async () => ({
+    ok: true,
+    status: 200,
+    text: async () => 'not json'
+  }));
+  const malformedProfile = await fetchProfile('access-token');
+  assert.equal(malformedProfile.ok, false);
+  assert.equal(malformedProfile.error.category, 'malformed_response');
+  assert.equal(malformedProfile.error.retryable, false);
+
+  setTikTokFetchImplementation(async () => {
+    const error = new Error('aborted');
+    error.name = 'AbortError';
+    throw error;
+  });
+  const timeoutExchange = await exchangeCode('provider-code');
+  assert.equal(timeoutExchange.ok, false);
+  assert.equal(timeoutExchange.error.category, 'timeout');
+  assert.equal(timeoutExchange.error.retryable, true);
+
+  setTikTokFetchImplementation(async () => {
+    throw new Error('socket closed');
+  });
+  const networkRefresh = await refreshAccessToken('refresh-token');
+  assert.equal(networkRefresh.ok, false);
+  assert.equal(networkRefresh.error.category, 'network');
+  assert.equal(networkRefresh.error.retryable, true);
+
+  setTikTokFetchImplementation(async () => ({
+    ok: true,
+    status: 204,
+    text: async () => ''
+  }));
+  const emptyProfile = await fetchProfile('access-token');
+  assert.equal(emptyProfile.ok, true);
+  assert.equal(emptyProfile.user, undefined);
+
+  setTikTokFetchImplementation(async () => jsonResponse(200, {
+    access_token: 'body-access',
+    refresh_token: 'body-refresh',
+    open_id: 'body-open-id',
+    expires_in: 3600,
+    refresh_expires_in: 86400
+  }));
+  const bodyToken = await exchangeCode('provider-code');
+  assert.equal(bodyToken.ok, true);
+  assert.equal(bodyToken.payload.access_token, 'body-access');
+
+  setTikTokFetchImplementation(async () => jsonResponse(200, { data: { has_more: true, cursor: 42 } }));
+  const page = await fetchVideosPage('access-token', 12);
+  assert.equal(page.ok, true);
+  assert.deepEqual(page.videos, []);
+  assert.equal(page.cursor, 42);
+  assert.equal(page.has_more, true);
+
+  setTikTokFetchImplementation(async () => jsonResponse(200, { data: { videos: [{ id: 'video-1' }] } }));
+  const defaultPage = await fetchVideosPage('access-token');
+  assert.deepEqual(defaultPage.videos, [{ id: 'video-1' }]);
+  assert.equal(defaultPage.cursor, 0);
+  assert.equal(defaultPage.has_more, false);
+
+  setTikTokFetchImplementation(async () => jsonResponse(403, { error: { code: 'permission_denied' } }));
+  const revoke = await revokeAccess('access-token');
+  assert.equal(revoke.attempted, true);
+  assert.equal(revoke.success, false);
+  assert.equal(revoke.error.category, 'authentication');
 });
 
 test('readJsonResponse parses JSON and flags malformed upstream responses', async () => {

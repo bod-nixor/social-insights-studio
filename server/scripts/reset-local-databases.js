@@ -18,11 +18,12 @@ async function main() {
   }
 
   const rootUrl = new URL(databaseUrl);
-  rootUrl.username = 'root';
-  rootUrl.password = rootPassword;
-  rootUrl.pathname = '/';
-
-  const connection = await mariadb.createConnection(rootUrl.toString());
+  const connection = await mariadb.createConnection({
+    host: rootUrl.hostname.replace(/^\[|\]$/g, ''),
+    port: rootUrl.port ? Number(rootUrl.port) : 3306,
+    user: 'root',
+    password: rootPassword
+  });
   try {
     await connection.query('DROP DATABASE IF EXISTS social_insights_dev');
     await connection.query('DROP DATABASE IF EXISTS social_insights_test');

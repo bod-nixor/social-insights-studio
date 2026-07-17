@@ -114,7 +114,7 @@ async function getDashboard(userId, workspaceId, query = {}) {
     const topContent = await queryContentRows(connection, workspaceId, {
       from: range.from,
       to: range.to,
-      sort: 'views',
+      sort: query.top_sort || 'views',
       direction: 'desc',
       limit: 5,
       offset: 0
@@ -157,6 +157,7 @@ const SORT_COLUMNS = {
   likes: 'latest.like_count',
   comments: 'latest.comment_count',
   shares: 'latest.share_count',
+  engagement: 'CASE WHEN latest.view_count IS NULL OR latest.view_count <= 0 THEN NULL ELSE ((COALESCE(latest.like_count, 0) + COALESCE(latest.comment_count, 0) + COALESCE(latest.share_count, 0)) / latest.view_count) END',
   observed_at: 'latest.observed_at'
 };
 
@@ -175,6 +176,12 @@ async function queryContentRows(connection, workspaceId, options = {}) {
     where.push('(ci.published_at IS NULL OR ci.published_at <= ?)');
     params.push(options.to);
   }
+  const search = String(options.search || '').trim().toLowerCase();
+  if (search) {
+    where.push('(LOWER(COALESCE(ci.title, \'\')) LIKE ? OR LOWER(COALESCE(ci.description, \'\')) LIKE ? OR LOWER(ci.provider_content_id) LIKE ?)');
+    const pattern = `%${search.replace(/[\\%_]/g, value => `\\${value}`)}%`;
+    params.push(pattern, pattern, pattern);
+  }
   const rows = await connection.query(
     `SELECT ci.id, ci.provider_content_id, ci.published_at, ci.title, ci.description,
             ci.share_url, ci.duration_seconds, ci.height, ci.width,
@@ -192,7 +199,7 @@ async function queryContentRows(connection, workspaceId, options = {}) {
                AND newest.observed_at = cms.observed_at
      ) latest ON latest.content_item_id = ci.id
      WHERE ${where.join(' AND ')}
-     ORDER BY ${sortColumn} ${direction}, ci.id ASC
+     ORDER BY ${sortColumn} IS NULL ASC, ${sortColumn} ${direction}, ci.id ASC
      LIMIT ? OFFSET ?`,
     [...params, limit, offset]
   );
@@ -235,10 +242,21 @@ async function getContent(userId, workspaceId, query = {}) {
       to: range.to,
       sort: query.sort,
       direction: query.direction,
+      search: query.search,
       limit: query.limit,
       offset: query.offset
     });
   });
+}
+
+function parseJsonField(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return null;
+  }
 }
 
 async function getContentDetail(userId, workspaceId, contentItemId) {
@@ -254,12 +272,13 @@ async function getContentDetail(userId, workspaceId, contentItemId) {
     const item = rows[0] || null;
     if (!item) throw createHttpError(404, 'content_not_found');
     const history = await connection.query(
-      `SELECT observed_at, view_count, like_count, comment_count, share_count
+      `SELECT observed_at, view_count, like_count, comment_count, share_count, provider_metrics
        FROM content_metric_snapshots
        WHERE workspace_id = ? AND content_item_id = ?
        ORDER BY observed_at ASC`,
       [workspaceId, contentItemId]
     );
+    const latest = history[history.length - 1] || null;
     return {
       item: {
         id: item.id,
@@ -267,15 +286,28 @@ async function getContentDetail(userId, workspaceId, contentItemId) {
         published_at: serializeDate(item.published_at),
         title: item.title,
         description: item.description,
-        share_url: item.share_url
+        share_url: item.share_url,
+        duration_seconds: item.duration_seconds,
+        height: item.height,
+        width: item.width,
+        provider_metadata: parseJsonField(item.provider_metadata)
       },
+      current_metrics: latest ? {
+        observed_at: serializeDate(latest.observed_at),
+        view_count: latest.view_count === null ? null : Number(latest.view_count),
+        like_count: latest.like_count === null ? null : Number(latest.like_count),
+        comment_count: latest.comment_count === null ? null : Number(latest.comment_count),
+        share_count: latest.share_count === null ? null : Number(latest.share_count),
+        engagement_rate: engagementRate(latest)
+      } : null,
       history: history.map(row => ({
         observed_at: serializeDate(row.observed_at),
         view_count: row.view_count === null ? null : Number(row.view_count),
         like_count: row.like_count === null ? null : Number(row.like_count),
         comment_count: row.comment_count === null ? null : Number(row.comment_count),
         share_count: row.share_count === null ? null : Number(row.share_count),
-        engagement_rate: engagementRate(row)
+        engagement_rate: engagementRate(row),
+        provider_metrics: parseJsonField(row.provider_metrics)
       }))
     };
   });
@@ -285,17 +317,27 @@ async function getSyncHistory(userId, workspaceId, options = {}) {
   return withConnection(async connection => {
     await requireWorkspaceCapability(connection, workspaceId, userId, 'viewDashboard');
     const limit = Math.min(Math.max(Number(options.limit || 25), 1), 100);
+    const offset = Math.max(Number(options.offset || 0), 0);
     const rows = await connection.query(
       `SELECT sr.id, sr.trigger_type, sr.status, sr.started_at, sr.finished_at, sr.duration_ms,
-              sr.profile_count, sr.content_seen_count, sr.content_snapshot_count,
+              sr.attempt, sr.profile_count, sr.content_seen_count, sr.content_snapshot_count,
               se.category AS error_category, se.provider_code, se.retryable
        FROM sync_runs sr
        LEFT JOIN sync_errors se ON se.sync_run_id = sr.id
        WHERE sr.workspace_id = ?
-       ORDER BY sr.started_at DESC LIMIT ?`,
-      [workspaceId, limit]
+       ORDER BY sr.started_at DESC LIMIT ? OFFSET ?`,
+      [workspaceId, limit, offset]
+    );
+    const countRows = await connection.query(
+      `SELECT COUNT(*) AS count
+       FROM sync_runs
+       WHERE workspace_id = ?`,
+      [workspaceId]
     );
     return {
+      total: Number(countRows[0].count || 0),
+      limit,
+      offset,
       sync_runs: rows.map(row => ({
         ...row,
         started_at: serializeDate(row.started_at),

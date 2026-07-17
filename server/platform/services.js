@@ -242,7 +242,11 @@ async function requireMembership(connection, workspaceId, userId, capability) {
 async function listWorkspaceMembers(userId, workspaceId) {
   return withConnection(async connection => {
     await requireMembership(connection, workspaceId, userId, 'manageMembers');
-    return repositories.listMembers(connection, workspaceId);
+    const [members, invitations] = await Promise.all([
+      repositories.listMembers(connection, workspaceId),
+      repositories.listInvitations(connection, workspaceId)
+    ]);
+    return { members, invitations };
   });
 }
 

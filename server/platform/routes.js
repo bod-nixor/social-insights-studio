@@ -237,9 +237,7 @@ function createPlatformRouter() {
 
   router.get('/workspaces/:workspaceId/members', requireSession, async (req, res) => {
     try {
-      return res.json({
-        members: await listWorkspaceMembers(req.session.user.id, req.params.workspaceId)
-      });
+      return res.json(await listWorkspaceMembers(req.session.user.id, req.params.workspaceId));
     } catch (error) {
       return sendError(res, error);
     }

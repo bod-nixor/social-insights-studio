@@ -165,6 +165,18 @@ async function listMembers(connection, workspaceId) {
   );
 }
 
+async function listInvitations(connection, workspaceId) {
+  return connection.query(
+    `SELECT i.id, i.email, i.role, i.created_at, i.expires_at, i.accepted_at, i.revoked_at,
+            inviter.email AS invited_by_email
+     FROM workspace_invitations i
+     JOIN users inviter ON inviter.id = i.invited_by
+     WHERE i.workspace_id = ?
+     ORDER BY i.created_at DESC, i.email`,
+    [workspaceId]
+  );
+}
+
 async function countOwners(connection, workspaceId) {
   const rows = await connection.query(
     `SELECT COUNT(*) AS count FROM workspace_memberships
@@ -217,6 +229,7 @@ module.exports = {
   findOrCreateUserByEmail,
   findSessionByTokenHash,
   getMembership,
+  listInvitations,
   listMembers,
   listWorkspacesForUser,
   removeMember,

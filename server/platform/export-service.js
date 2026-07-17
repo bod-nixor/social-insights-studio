@@ -84,6 +84,7 @@ async function createContentCsvExport(userId, workspaceId, query = {}) {
         to: range.to,
         sort: query.sort,
         direction: query.direction,
+        search: query.search,
         limit: Math.min(Number(query.limit || 1000), 1000),
         offset: 0
       });

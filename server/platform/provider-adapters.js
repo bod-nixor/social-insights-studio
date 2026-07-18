@@ -33,18 +33,23 @@ const PROVIDER_ADAPTERS = {
   instagram: {
     provider: 'instagram',
     authorizationProvider: 'meta',
-    implemented: false,
+    implemented: true,
     featureFlag: 'FEATURE_INSTAGRAM_CONNECTOR',
     productAuthOnly: true,
     reuseSignInTokens: false,
     resources: ['instagram_account'],
-    requiredScopes: ['instagram_business_basic', 'instagram_business_manage_insights'],
+    requiredScopes: [
+      'instagram_basic',
+      'instagram_manage_insights',
+      'pages_show_list',
+      'pages_read_engagement'
+    ],
     capabilities: ['resource_discovery', 'profile_insights', 'media_listing', 'media_insights', 'disconnect']
   },
   facebook_pages: {
     provider: 'facebook_pages',
     authorizationProvider: 'meta',
-    implemented: false,
+    implemented: true,
     featureFlag: 'FEATURE_FACEBOOK_PAGES_CONNECTOR',
     productAuthOnly: true,
     reuseSignInTokens: false,

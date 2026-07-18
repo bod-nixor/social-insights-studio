@@ -1,6 +1,6 @@
 # ADR 0002: Provider Scope And API Baseline
 
-Status: Accepted; YouTube source implementation complete
+Status: Accepted; YouTube and Meta read-only source implementations complete
 
 Date: 2026-07-18
 
@@ -15,8 +15,8 @@ Use incremental provider authorization and request only read-only scopes that ma
 | Provider | API route | Starting scopes or permissions | Product state |
 | --- | --- | --- | --- |
 | TikTok | Login Kit for Web plus Display API | `user.info.basic`, `user.info.profile`, `user.info.stats`, `video.list` | Keep current dashboard and Looker connector behavior intact. |
-| Instagram | Current Instagram Platform for professional accounts | Candidate read-only analytics set: `instagram_business_basic`, `instagram_business_manage_insights` | Feature flagged until Meta docs, app review, and reviewer evidence are complete. |
-| Facebook Pages | Meta Graph API Pages and Page Insights | `pages_show_list`, `pages_read_engagement`, `read_insights` | Feature flagged until Page discovery and Page insights screens exist. |
+| Instagram | Instagram API with Facebook Login for linked professional accounts | `instagram_basic`, `instagram_manage_insights`, `pages_show_list`, `pages_read_engagement` | Source-complete and disabled by default; enable only when the Meta dashboard and runtime assertion expose this exact set and external review gates are complete. |
+| Facebook Pages | Facebook Login for Business plus Meta Graph API Pages and Page Insights | `pages_show_list`, `pages_read_engagement`, `read_insights` | Source-complete and disabled by default; production enablement remains gated on exact Meta configuration, access-level/review evidence, and live verification. |
 | YouTube | Google OAuth incremental auth, YouTube Data API, YouTube Analytics API | `https://www.googleapis.com/auth/youtube.readonly`, `https://www.googleapis.com/auth/yt-analytics.readonly` | Source-complete and disabled by default; production enablement remains gated on Google configuration, review evidence, and live verification. |
 | Website Analytics | Google OAuth incremental auth, GA4 Admin/Data APIs | `https://www.googleapis.com/auth/analytics.readonly` | Feature flagged until GA4 property discovery, compatibility checks, and dashboard/report views exist. |
 
@@ -47,3 +47,4 @@ Use incremental provider authorization and request only read-only scopes that ma
 - Google OAuth verification requires the homepage to be on a verified owned domain, not only a login page, and requires narrowest scopes with demo evidence for the requested user-facing functionality.
 - GA4 `runReport` accepts `analytics.readonly` for read-only reporting; use `getMetadata` and `checkCompatibility` before assuming metrics and dimensions can be combined.
 - Meta permission names and Graph API versions change. Re-verify exact permission names and app review classifications in the Meta dashboard immediately before requesting permissions or submitting review.
+- The Meta source rejects every permission outside the approved Facebook/Instagram read-only union (apart from Meta's automatic `public_profile` grant). Publishing, comment-management, messaging, ads, demographics, app events, webhooks, and `business_management` remain outside the product boundary.

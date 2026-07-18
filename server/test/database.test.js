@@ -20,6 +20,17 @@ process.env.YOUTUBE_ENABLED = 'true';
 process.env.YOUTUBE_CLIENT_ID = 'youtube-test-client-id';
 process.env.YOUTUBE_CLIENT_SECRET = 'youtube-test-client-secret';
 process.env.YOUTUBE_REDIRECT_URI = 'http://localhost:3001/api/integrations/youtube/callback';
+process.env.FEATURE_FACEBOOK_PAGES_CONNECTOR = 'true';
+process.env.FEATURE_INSTAGRAM_CONNECTOR = 'true';
+process.env.META_APP_ID = 'meta-test-app-id';
+process.env.META_APP_SECRET = 'meta-test-app-secret';
+process.env.META_FACEBOOK_LOGIN_CONFIG_ID = 'meta-test-facebook-login-config-id';
+process.env.META_INSTAGRAM_LOGIN_CONFIG_ID = 'meta-test-instagram-login-config-id';
+process.env.META_GRAPH_API_VERSION = 'v25.0';
+process.env.FACEBOOK_REDIRECT_URI = 'http://localhost:3001/api/integrations/facebook/callback';
+process.env.INSTAGRAM_REDIRECT_URI = 'http://localhost:3001/api/integrations/instagram/callback';
+process.env.META_FACEBOOK_APPROVED_SCOPES = 'pages_show_list,pages_read_engagement,read_insights';
+process.env.META_INSTAGRAM_APPROVED_SCOPES = 'instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement';
 process.env.BACKEND_JWT_SECRET = 'b'.repeat(64);
 process.env.ENCRYPTION_KEY = '2'.repeat(64);
 process.env.LOOKER_CLIENT_ID = 'looker-studio-connector';
@@ -33,9 +44,11 @@ const { closePool } = require('../database');
 const { setGoogleOidcFetchImplementation } = require('../platform/google-oidc');
 const { setTikTokFetchImplementation, TIKTOK_SCOPES } = require('../integrations/tiktok');
 const { setYouTubeTestHooks, YOUTUBE_SCOPES } = require('../integrations/youtube');
+const { setMetaTestHooks } = require('../integrations/meta');
 const { setMailTransportFactory } = require('../platform/mail');
 const { compareMetric, engagementRate } = require('../platform/analytics');
 const { assertCapability, hasCapability, canAssignRole } = require('../platform/rbac');
+const { hashSecret } = require('../platform/security');
 const { runDueSyncs } = require('../platform/sync-service');
 const { safeCsvCell } = require('../platform/export-service');
 const { decryptSecret, encryptSecret, parsePreviousKeys } = require('../platform/secret-envelope');
@@ -57,6 +70,7 @@ after(async () => {
   setGoogleOidcFetchImplementation(null);
   setTikTokFetchImplementation(null);
   setYouTubeTestHooks();
+  setMetaTestHooks();
   setMailTransportFactory(null);
   stopStores();
   await closePool();
@@ -211,6 +225,30 @@ function installYouTubeQueue(handlers) {
     random: () => 0
   });
   return handlers;
+}
+
+function installMetaMock(handler) {
+  const calls = [];
+  setMetaTestHooks({
+    fetch: async (url, options = {}) => {
+      const call = { url: new URL(String(url)), options };
+      calls.push(call);
+      return handler(call, calls);
+    },
+    sleep: async () => {},
+    random: () => 0
+  });
+  return calls;
+}
+
+function metaSignedRequest(userId, issuedAt = Math.floor(Date.now() / 1000)) {
+  const payload = Buffer.from(JSON.stringify({
+    algorithm: 'HMAC-SHA256',
+    issued_at: issuedAt,
+    user_id: userId
+  })).toString('base64url');
+  const signature = crypto.createHmac('sha256', process.env.META_APP_SECRET).update(payload).digest('base64url');
+  return `${signature}.${payload}`;
 }
 
 test('RBAC role matrix matches Phase 1 policy', () => {
@@ -472,7 +510,10 @@ test('migrations are applied to the real MariaDB test database', async () => {
     '001_phase1_foundation',
     '002_session_csrf',
     '003_provider_authorization_resources',
-    '004_youtube_readonly_vertical'
+    '004_youtube_readonly_vertical',
+    '005_meta_readonly_vertical',
+    '006_meta_period_snapshots',
+    '007_meta_oauth_config_binding'
   ]);
 
   const tableRows = await db.query(
@@ -3112,6 +3153,855 @@ test('YouTube invalid_grant is terminal and immediately purges the authorization
   assert.equal(Number(authorizationRows[0].revocation_count), 1);
   const sourceRows = await db.query('SELECT COUNT(*) AS count FROM data_sources WHERE id = ?', [dataSourceId]);
   assert.equal(Number(sourceRows[0].count), 0);
+});
+
+test('Facebook Pages uses explicit selection, encrypted Page tokens, worker-only insights, dashboards, and purge', async () => {
+  await clearDatabase();
+  const owner = await signIn('meta-facebook-owner@example.com');
+  const workspace = await createWorkspace(owner, 'Meta Facebook Workspace');
+  const metricValues = {
+    page_follows: 101,
+    page_daily_follows_unique: 3,
+    page_daily_unfollows_unique: 1,
+    page_post_engagements: 22,
+    page_media_view: 70,
+    page_total_media_view_unique: 55
+  };
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  let discoveryCount = 0;
+  const calls = installMetaMock(call => {
+    const pathName = call.url.pathname;
+    if (pathName === '/v25.0/oauth/access_token') {
+      if (call.url.searchParams.get('grant_type') === 'fb_exchange_token') {
+        assert.equal(call.url.searchParams.get('fb_exchange_token'), 'meta-short-token');
+        return jsonResponse(200, { access_token: 'meta-long-token', token_type: 'bearer', expires_in: 60 * 24 * 60 * 60 });
+      }
+      assert.equal(call.url.searchParams.get('code'), 'meta-provider-code');
+      assert.equal(call.url.searchParams.get('redirect_uri'), process.env.FACEBOOK_REDIRECT_URI);
+      return jsonResponse(200, { access_token: 'meta-short-token', token_type: 'bearer' });
+    }
+    if (pathName === '/v25.0/debug_token') {
+      assert.equal(call.url.searchParams.get('input_token'), 'meta-long-token');
+      return jsonResponse(200, {
+        data: {
+          app_id: process.env.META_APP_ID,
+          user_id: 'meta-user-1',
+          is_valid: true,
+          expires_at: Math.floor(Date.now() / 1000) + 60 * 24 * 60 * 60
+        }
+      });
+    }
+    if (pathName === '/v25.0/me/permissions') {
+      if (call.options.method === 'DELETE') return jsonResponse(200, { success: true });
+      assert.equal(call.options.headers.Authorization, 'Bearer meta-long-token');
+      return jsonResponse(200, {
+        data: [
+          { permission: 'pages_show_list', status: 'granted' },
+          { permission: 'pages_read_engagement', status: 'granted' },
+          { permission: 'read_insights', status: 'granted' },
+          { permission: 'public_profile', status: 'granted' }
+        ]
+      });
+    }
+    if (pathName === '/v25.0/me' && call.url.searchParams.get('fields') === 'id,name') {
+      return jsonResponse(200, { id: 'meta-user-1', name: 'Meta Test User' });
+    }
+    if (pathName === '/v25.0/me/accounts') {
+      assert.equal(call.options.headers.Authorization, 'Bearer meta-long-token');
+      discoveryCount += 1;
+      if (discoveryCount > 1) {
+        return jsonResponse(200, {
+          data: [{
+            id: 'page-2',
+            name: 'Different Read Only Page',
+            tasks: ['ANALYZE'],
+            access_token: 'meta-page-token-2'
+          }]
+        });
+      }
+      return jsonResponse(200, {
+        data: [{
+          id: 'page-1',
+          name: 'Read Only Page',
+          tasks: ['ANALYZE'],
+          access_token: 'meta-page-token',
+          picture: { data: { url: 'https://img.example/page-1.jpg' } }
+        }]
+      });
+    }
+    assert.equal(call.options.headers.Authorization, 'Bearer meta-page-token');
+    assert.ok(call.url.searchParams.get('appsecret_proof'));
+    if (pathName === '/v25.0/page-1' && call.url.searchParams.get('fields')) {
+      return jsonResponse(200, {
+        id: 'page-1', name: 'Read Only Page', picture: { data: { url: 'https://img.example/page-1.jpg' } }
+      });
+    }
+    if (pathName === '/v25.0/page-1/insights') {
+      const metric = call.url.searchParams.get('metric');
+      assert.ok(Object.hasOwn(metricValues, metric));
+      return jsonResponse(200, {
+        data: [{ name: metric, period: 'day', values: [{ value: metricValues[metric], end_time: tomorrow }] }]
+      });
+    }
+    if (pathName === '/v25.0/page-1/posts') {
+      return jsonResponse(200, {
+        data: [{
+          id: 'page-1_post-1',
+          message: 'A read-only Page post',
+          created_time: `${yesterday}T10:00:00+0000`,
+          permalink_url: 'https://facebook.example/page-1/posts/1',
+          reactions: { summary: { total_count: 9 } },
+          comments: { summary: { total_count: 4 } },
+          shares: { count: 2 }
+        }]
+      });
+    }
+    if (pathName === '/v25.0/page-1_post-1/insights') {
+      return jsonResponse(200, {
+        data: [
+          { name: 'post_media_view', values: [{ value: 88 }] },
+          { name: 'post_total_media_view_unique', values: [{ value: 66 }] }
+        ]
+      });
+    }
+    throw new Error(`unexpected Meta mock call: ${pathName}`);
+  });
+
+  const start = await requestApp(`/api/workspaces/${workspace.id}/connections/facebook/start`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { return_path: `/?workspace=${workspace.id}&view=connections&provider=facebook_pages` }
+  });
+  assert.equal(start.statusCode, 200);
+  const authorizationUrl = new URL(start.json().authorization_url);
+  assert.equal(authorizationUrl.pathname, '/v25.0/dialog/oauth');
+  assert.equal(
+    authorizationUrl.searchParams.get('config_id'),
+    process.env.META_FACEBOOK_LOGIN_CONFIG_ID
+  );
+  assert.equal(authorizationUrl.searchParams.has('scope'), false);
+  const state = authorizationUrl.searchParams.get('state');
+  const transactionRows = await db.query(
+    `SELECT provider_config_id FROM oauth_transactions
+     WHERE state_hash = ? AND provider = 'facebook_pages'`,
+    [hashSecret(state)]
+  );
+  assert.equal(transactionRows[0].provider_config_id, process.env.META_FACEBOOK_LOGIN_CONFIG_ID);
+
+  const originalFacebookConfigId = process.env.META_FACEBOOK_LOGIN_CONFIG_ID;
+  let mismatchedCallback;
+  try {
+    process.env.META_FACEBOOK_LOGIN_CONFIG_ID = 'changed-facebook-login-config-id';
+    mismatchedCallback = await requestApp(
+      `/api/integrations/facebook/callback?code=meta-provider-code&state=${encodeURIComponent(state)}`,
+      { headers: { cookie: cookieHeader(owner.cookies) } }
+    );
+  } finally {
+    process.env.META_FACEBOOK_LOGIN_CONFIG_ID = originalFacebookConfigId;
+  }
+  assert.equal(mismatchedCallback.statusCode, 303);
+  assert.equal(
+    new URL(mismatchedCallback.headers.location, 'http://localhost').searchParams.get('facebook'),
+    'configuration_error'
+  );
+  assert.equal(calls.length, 0, 'config-bound state must fail before any Meta token exchange');
+
+  const callback = await requestApp(
+    `/api/integrations/facebook/callback?code=meta-provider-code&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(callback.statusCode, 303);
+  assert.equal(new URL(callback.headers.location, 'http://localhost').searchParams.get('facebook'), 'selection_required');
+  assert.equal(calls.length, 6);
+
+  const beforeSelection = await db.query(
+    `SELECT
+       (SELECT COUNT(*) FROM data_sources WHERE workspace_id = ? AND provider = 'facebook_pages') AS sources,
+       (SELECT COUNT(*) FROM provider_resources WHERE workspace_id = ? AND provider = 'facebook_pages') AS resources`,
+    [workspace.id, workspace.id]
+  );
+  assert.equal(Number(beforeSelection[0].sources), 0);
+  assert.equal(Number(beforeSelection[0].resources), 1);
+
+  const catalog = await requestApp(`/api/workspaces/${workspace.id}/provider-catalog`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(catalog.statusCode, 200);
+  const facebook = catalog.json().providers.find(provider => provider.id === 'facebook_pages');
+  assert.equal(facebook.status, 'selection_required');
+  assert.equal(facebook.resources[0].selected, false);
+  assert.equal(facebook.resources[0].available, true);
+
+  const selection = await requestApp(`/api/workspaces/${workspace.id}/connections/facebook/select`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { resource_id: facebook.resources[0].id }
+  });
+  assert.equal(selection.statusCode, 201);
+  const selectedConnection = selection.json().connection;
+  const duplicateSelection = await requestApp(`/api/workspaces/${workspace.id}/connections/facebook/select`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { resource_id: facebook.resources[0].id }
+  });
+  assert.equal(duplicateSelection.statusCode, 409);
+
+  const credentialRows = await db.query(
+    `SELECT pac.access_token_ciphertext AS user_ciphertext,
+            prc.access_token_ciphertext AS resource_ciphertext,
+            prc.access_token_iv, prc.access_token_tag, prc.key_version
+     FROM provider_authorizations pauth
+     JOIN provider_authorization_credentials pac ON pac.provider_authorization_id = pauth.id
+     JOIN provider_resources pr ON pr.provider_authorization_id = pauth.id
+     JOIN provider_resource_credentials prc ON prc.provider_resource_id = pr.id
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'facebook_pages'`,
+    [workspace.id]
+  );
+  assert.notEqual(credentialRows[0].user_ciphertext, 'meta-long-token');
+  assert.notEqual(credentialRows[0].resource_ciphertext, 'meta-page-token');
+  assert.equal(decryptSecret({
+    ciphertext: credentialRows[0].resource_ciphertext,
+    iv: credentialRows[0].access_token_iv,
+    tag: credentialRows[0].access_token_tag,
+    keyVersion: credentialRows[0].key_version
+  }), 'meta-page-token');
+
+  const queued = await requestApp(`/api/workspaces/${workspace.id}/providers/facebook_pages/sync-runs`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { connection_id: selectedConnection.id }
+  });
+  assert.equal(queued.statusCode, 202);
+  assert.equal(queued.json().status, 'queued');
+  assert.equal(calls.length, 6, 'manual API request must not call the Graph data API');
+
+  const workerResult = await runDueSyncs({ timeBudgetSeconds: 5, leaseOwner: 'meta-facebook-worker' });
+  assert.equal(workerResult.processed, 1);
+  assert.equal(workerResult.results[0].status, 'success');
+  assert.equal(workerResult.results[0].counts.content_seen_count, 1);
+  assert.equal(calls.length, 15);
+
+  const dashboard = await requestApp(
+    `/api/workspaces/${workspace.id}/providers/facebook_pages/dashboard?range=7d`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(dashboard.statusCode, 200);
+  const dashboardBody = dashboard.json();
+  assert.equal(dashboardBody.connection.status, 'active');
+  assert.equal(dashboardBody.account.display_name, 'Read Only Page');
+  assert.equal(dashboardBody.metrics.find(metric => metric.key === 'page_follows').value, 101);
+  assert.equal(dashboardBody.content[0].view_count, 88);
+  assert.equal(dashboardBody.content[0].like_count, 9);
+  assert.equal(calls.length, 15, 'dashboard API must read stored snapshots only');
+
+  const snapshotRows = await db.query(
+    `SELECT
+       (SELECT COUNT(*) FROM meta_account_insight_snapshots WHERE workspace_id = ?) AS account_snapshots,
+       (SELECT COUNT(*) FROM content_items WHERE workspace_id = ?) AS content_items,
+       (SELECT COUNT(*) FROM content_metric_snapshots WHERE workspace_id = ?) AS content_snapshots`,
+    [workspace.id, workspace.id, workspace.id]
+  );
+  assert.equal(Number(snapshotRows[0].account_snapshots), 2);
+  assert.equal(Number(snapshotRows[0].content_items), 1);
+  assert.equal(Number(snapshotRows[0].content_snapshots), 1);
+
+  const reauthorize = await requestApp(`/api/workspaces/${workspace.id}/connections/facebook/start`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: {
+      return_path: `/?workspace=${workspace.id}&view=connections&provider=facebook_pages`,
+      connection_id: selectedConnection.id
+    }
+  });
+  assert.equal(reauthorize.statusCode, 200);
+  const reauthorizeUrl = new URL(reauthorize.json().authorization_url);
+  const reauthorizeCallback = await requestApp(
+    `/api/integrations/facebook/callback?code=meta-provider-code&state=${encodeURIComponent(reauthorizeUrl.searchParams.get('state'))}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(reauthorizeCallback.statusCode, 303);
+  assert.equal(
+    new URL(reauthorizeCallback.headers.location, 'http://localhost').searchParams.get('facebook'),
+    'selected_resource_unavailable'
+  );
+  assert.equal(calls.length, 21);
+  const afterReauthorizationCatalog = await requestApp(`/api/workspaces/${workspace.id}/provider-catalog`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(afterReauthorizationCatalog.statusCode, 200);
+  const reauthorizedFacebook = afterReauthorizationCatalog.json().providers.find(
+    provider => provider.id === 'facebook_pages'
+  );
+  assert.equal(reauthorizedFacebook.connection.id, selectedConnection.id);
+  assert.equal(reauthorizedFacebook.connection.status, 'reconnect_required');
+  assert.equal(reauthorizedFacebook.connection.account.id, 'page-1');
+  assert.equal(
+    reauthorizedFacebook.resources.find(resource => resource.provider_resource_id === 'page-1').available,
+    false
+  );
+  assert.equal(
+    reauthorizedFacebook.resources.find(resource => resource.provider_resource_id === 'page-2').selected,
+    false
+  );
+  const sourceCountAfterReauthorization = await db.query(
+    `SELECT COUNT(*) AS count FROM data_sources
+     WHERE workspace_id = ? AND provider = 'facebook_pages'`,
+    [workspace.id]
+  );
+  assert.equal(Number(sourceCountAfterReauthorization[0].count), 1);
+  assert.equal(calls.length, 21, 'catalog reads must not call Meta or select a replacement');
+
+  const disconnect = await requestApp(`/api/workspaces/${workspace.id}/connections/facebook`, {
+    method: 'DELETE',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { connection_id: selectedConnection.id }
+  });
+  assert.equal(disconnect.statusCode, 200);
+  assert.equal(disconnect.json().provider_revoke.success, true);
+  assert.equal(calls.length, 22);
+  const afterDisconnect = await db.query(
+    `SELECT pauth.status, pauth.provider_subject,
+            (SELECT COUNT(*) FROM provider_resources pr WHERE pr.provider_authorization_id = pauth.id) AS resources,
+            (SELECT COUNT(*) FROM provider_authorization_credentials pac WHERE pac.provider_authorization_id = pauth.id) AS credentials,
+            (SELECT COUNT(*) FROM data_sources ds WHERE ds.workspace_id = pauth.workspace_id AND ds.provider = 'facebook_pages') AS sources
+     FROM provider_authorizations pauth
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'facebook_pages'`,
+    [workspace.id]
+  );
+  assert.equal(afterDisconnect[0].status, 'revoked');
+  assert.equal(afterDisconnect[0].provider_subject, null);
+  assert.equal(Number(afterDisconnect[0].resources), 0);
+  assert.equal(Number(afterDisconnect[0].credentials), 0);
+  assert.equal(Number(afterDisconnect[0].sources), 0);
+});
+
+test('Instagram Facebook Login accepts only the exact read-only set and excludes Stories from worker history', async () => {
+  await clearDatabase();
+  const owner = await signIn('meta-instagram-owner@example.com');
+  const workspace = await createWorkspace(owner, 'Meta Instagram Workspace');
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const accountMetricValues = {
+    views: 120,
+    reach: 80,
+    accounts_engaged: 30,
+    total_interactions: 45,
+    likes: 20,
+    comments: 5,
+    saves: 6,
+    shares: 3
+  };
+  const calls = installMetaMock(call => {
+    const pathName = call.url.pathname;
+    if (pathName === '/v25.0/oauth/access_token') {
+      return call.url.searchParams.get('grant_type') === 'fb_exchange_token'
+        ? jsonResponse(200, { access_token: 'ig-long-token', expires_in: 60 * 24 * 60 * 60 })
+        : jsonResponse(200, { access_token: 'ig-short-token' });
+    }
+    if (pathName === '/v25.0/debug_token') {
+      return jsonResponse(200, {
+        data: {
+          app_id: process.env.META_APP_ID,
+          user_id: 'ig-meta-user',
+          is_valid: true,
+          expires_at: Math.floor(Date.now() / 1000) + 60 * 24 * 60 * 60
+        }
+      });
+    }
+    if (pathName === '/v25.0/me/permissions') {
+      return jsonResponse(200, {
+        data: [
+          { permission: 'instagram_basic', status: 'granted' },
+          { permission: 'instagram_manage_insights', status: 'granted' },
+          { permission: 'pages_show_list', status: 'granted' },
+          { permission: 'pages_read_engagement', status: 'granted' },
+          { permission: 'public_profile', status: 'granted' }
+        ]
+      });
+    }
+    if (pathName === '/v25.0/me' && call.url.searchParams.get('fields') === 'id,name') {
+      return jsonResponse(200, { id: 'ig-meta-user', name: 'Instagram Meta User' });
+    }
+    if (pathName === '/v25.0/me/accounts') {
+      return jsonResponse(200, {
+        data: [{
+          id: 'ig-source-page',
+          name: 'Instagram Source Page',
+          tasks: ['ANALYZE'],
+          access_token: 'ig-page-token',
+          instagram_business_account: {
+            id: 'ig-account-1',
+            username: 'read_only_studio',
+            name: 'Read Only Studio',
+            profile_picture_url: 'https://img.example/ig.jpg',
+            followers_count: 250,
+            media_count: 12
+          }
+        }]
+      });
+    }
+    assert.equal(call.options.headers.Authorization, 'Bearer ig-page-token');
+    if (pathName === '/v25.0/ig-account-1' && call.url.searchParams.get('fields')) {
+      return jsonResponse(200, {
+        id: 'ig-account-1',
+        username: 'read_only_studio',
+        name: 'Read Only Studio',
+        profile_picture_url: 'https://img.example/ig.jpg',
+        followers_count: 250,
+        media_count: 12
+      });
+    }
+    if (pathName === '/v25.0/ig-account-1/insights') {
+      const metric = call.url.searchParams.get('metric');
+      assert.ok(Object.hasOwn(accountMetricValues, metric));
+      assert.equal(call.url.searchParams.get('metric_type'), 'total_value');
+      return jsonResponse(200, {
+        data: [{ name: metric, period: 'day', total_value: { value: accountMetricValues[metric] } }]
+      });
+    }
+    if (pathName === '/v25.0/ig-account-1/media') {
+      return jsonResponse(200, {
+        data: [{
+          id: 'ig-story-1', media_type: 'IMAGE', media_product_type: 'STORY', timestamp: yesterday
+        }, {
+          id: 'ig-feed-1', caption: 'Read-only feed media', media_type: 'IMAGE',
+          media_product_type: 'FEED', permalink: 'https://instagram.example/p/feed-1',
+          timestamp: yesterday, like_count: 11, comments_count: 2
+        }]
+      });
+    }
+    if (pathName === '/v25.0/ig-feed-1/insights') {
+      const requested = call.url.searchParams.get('metric').split(',').sort();
+      assert.deepEqual(requested, ['reach', 'saved', 'shares', 'views']);
+      return jsonResponse(200, {
+        data: [
+          { name: 'views', values: [{ value: 140 }] },
+          { name: 'reach', values: [{ value: 95 }] },
+          { name: 'shares', values: [{ value: 7 }] },
+          { name: 'saved', values: [{ value: 8 }] }
+        ]
+      });
+    }
+    throw new Error(`unexpected Instagram mock call: ${pathName}`);
+  });
+
+  const start = await requestApp(`/api/workspaces/${workspace.id}/connections/instagram/start`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { return_path: `/?workspace=${workspace.id}&view=connections&provider=instagram` }
+  });
+  assert.equal(start.statusCode, 200);
+  const authorizationUrl = new URL(start.json().authorization_url);
+  assert.equal(
+    authorizationUrl.searchParams.get('config_id'),
+    process.env.META_INSTAGRAM_LOGIN_CONFIG_ID
+  );
+  assert.equal(authorizationUrl.searchParams.has('scope'), false);
+  const callback = await requestApp(
+    `/api/integrations/instagram/callback?code=ig-provider-code&state=${encodeURIComponent(authorizationUrl.searchParams.get('state'))}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(callback.statusCode, 303);
+  assert.equal(new URL(callback.headers.location, 'http://localhost').searchParams.get('instagram'), 'selection_required');
+  assert.equal(calls.length, 6);
+
+  const catalog = await requestApp(`/api/workspaces/${workspace.id}/provider-catalog`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  const instagram = catalog.json().providers.find(provider => provider.id === 'instagram');
+  assert.equal(instagram.resources[0].display_name, 'Read Only Studio');
+  assert.equal(instagram.resources[0].source_page_name, 'Instagram Source Page');
+  const selection = await requestApp(`/api/workspaces/${workspace.id}/connections/instagram/select`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { resource_id: instagram.resources[0].id }
+  });
+  assert.equal(selection.statusCode, 201);
+  const workerResult = await runDueSyncs({ timeBudgetSeconds: 5, leaseOwner: 'meta-instagram-worker' });
+  assert.equal(workerResult.processed, 1);
+  assert.equal(workerResult.results[0].status, 'success');
+  assert.equal(workerResult.results[0].excluded_instagram_stories, 1);
+  assert.equal(workerResult.results[0].counts.content_seen_count, 1);
+  assert.equal(calls.length, 33);
+
+  const dashboard = await requestApp(
+    `/api/workspaces/${workspace.id}/providers/instagram/dashboard?range=7d`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(dashboard.statusCode, 200);
+  const dashboardBody = dashboard.json();
+  assert.equal(dashboardBody.account.username, 'read_only_studio');
+  assert.equal(dashboardBody.range.provider_period_days, 7);
+  assert.equal(dashboardBody.metrics.find(metric => metric.key === 'followers').value, 250);
+  assert.equal(dashboardBody.metrics.find(metric => metric.key === 'views').value, 120);
+  assert.equal(
+    dashboardBody.metrics.find(metric => metric.key === 'views').semantics,
+    'provider_total_over_7_days'
+  );
+  assert.equal(dashboardBody.content.length, 1);
+  assert.equal(dashboardBody.content[0].provider_content_id, 'ig-feed-1');
+  assert.equal(dashboardBody.content[0].view_count, 140);
+  assert.match(dashboardBody.availability.note, /Stories are excluded/);
+  const customFrom = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const customTo = new Date().toISOString().slice(0, 10);
+  const customDashboard = await requestApp(
+    `/api/workspaces/${workspace.id}/providers/instagram/dashboard?range=custom&from=${customFrom}&to=${customTo}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(customDashboard.statusCode, 200);
+  assert.equal(customDashboard.json().range.provider_period_days, null);
+  assert.equal(customDashboard.json().metrics.find(metric => metric.key === 'views').value, null);
+  assert.equal(
+    customDashboard.json().metrics.find(metric => metric.key === 'views').semantics,
+    'unsupported_custom_period'
+  );
+  assert.match(customDashboard.json().availability.note, /unavailable for custom ranges/);
+  assert.equal(calls.length, 33, 'custom dashboards must read stored data without synthesizing totals');
+  const storyRows = await db.query(
+    `SELECT COUNT(*) AS count FROM content_items
+     WHERE workspace_id = ? AND provider_content_id = 'ig-story-1'`,
+    [workspace.id]
+  );
+  assert.equal(Number(storyRows[0].count), 0);
+  const periodRows = await db.query(
+    `SELECT range_days, range_start_date, range_end_date
+     FROM meta_account_insight_snapshots
+     WHERE workspace_id = ? AND provider = 'instagram' AND snapshot_kind = 'period'
+     ORDER BY range_days`,
+    [workspace.id]
+  );
+  assert.deepEqual(periodRows.map(row => Number(row.range_days)), [7, 30, 90]);
+  assert.equal(periodRows.every(row => row.range_start_date && row.range_end_date), true);
+});
+
+test('Meta disconnect preserves a selected sibling grant and purges unselected sibling credentials after final revoke', async () => {
+  await clearDatabase();
+  const owner = await signIn('meta-shared-grant-owner@example.com');
+  const workspace = await createWorkspace(owner, 'Meta Shared Grant Workspace');
+  const identifiers = {};
+
+  for (const provider of ['facebook_pages', 'instagram']) {
+    const authorizationId = crypto.randomUUID();
+    const resourceId = crypto.randomUUID();
+    const dataSourceId = crypto.randomUUID();
+    const connectionId = crypto.randomUUID();
+    const encrypted = encryptSecret(`${provider}-shared-user-token`);
+    identifiers[provider] = { authorizationId, resourceId, dataSourceId, connectionId };
+    await db.query(
+      `INSERT INTO provider_authorizations
+        (id, workspace_id, provider, actor_user_id, provider_subject, display_name, status, granted_at)
+       VALUES (?, ?, ?, ?, 'shared-meta-subject', 'Shared Meta User', 'active', UTC_TIMESTAMP(3))`,
+      [authorizationId, workspace.id, provider, owner.user.id]
+    );
+    await db.query(
+      `INSERT INTO provider_authorization_credentials
+        (id, provider_authorization_id, access_token_ciphertext, access_token_iv,
+         access_token_tag, key_version, token_type, access_expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'Bearer', DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 30 DAY))`,
+      [
+        crypto.randomUUID(), authorizationId, encrypted.ciphertext, encrypted.iv,
+        encrypted.tag, encrypted.keyVersion
+      ]
+    );
+    await db.query(
+      `INSERT INTO provider_resources
+        (id, provider_authorization_id, workspace_id, provider, resource_type,
+         provider_resource_id, display_name, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, JSON_OBJECT('selectable', TRUE, 'discoveryStatus', 'available'))`,
+      [
+        resourceId, authorizationId, workspace.id, provider,
+        provider === 'facebook_pages' ? 'facebook_page' : 'instagram_account',
+        `${provider}-shared-resource`, `Shared ${provider} resource`
+      ]
+    );
+    await db.query(
+      `INSERT INTO data_sources (id, workspace_id, provider, status, next_sync_at)
+       VALUES (?, ?, ?, 'active', UTC_TIMESTAMP(3))`,
+      [dataSourceId, workspace.id, provider]
+    );
+    await db.query(
+      `INSERT INTO workspace_provider_connections
+        (id, workspace_id, provider_resource_id, data_source_id, provider, status, next_sync_at)
+       VALUES (?, ?, ?, ?, ?, 'active', UTC_TIMESTAMP(3))`,
+      [connectionId, workspace.id, resourceId, dataSourceId, provider]
+    );
+  }
+
+  const calls = installMetaMock(call => {
+    assert.equal(call.url.pathname, '/v25.0/me/permissions');
+    assert.equal(call.options.method, 'DELETE');
+    assert.equal(call.options.headers.Authorization, 'Bearer instagram-shared-user-token');
+    return jsonResponse(200, { success: true });
+  });
+
+  const facebookDisconnect = await requestApp(`/api/workspaces/${workspace.id}/connections/facebook`, {
+    method: 'DELETE',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { connection_id: identifiers.facebook_pages.connectionId }
+  });
+  assert.equal(facebookDisconnect.statusCode, 200);
+  assert.equal(facebookDisconnect.json().provider_grant_preserved, true);
+  assert.equal(facebookDisconnect.json().provider_revoke.attempted, false);
+  assert.equal(facebookDisconnect.json().provider_revoke.outcome_category, 'sibling_meta_grant_preserved');
+  assert.equal(calls.length, 0);
+  const afterFacebook = await db.query(
+    `SELECT
+       (SELECT status FROM provider_authorizations WHERE id = ?) AS facebook_status,
+       (SELECT status FROM provider_authorizations WHERE id = ?) AS instagram_status,
+       (SELECT COUNT(*) FROM workspace_provider_connections WHERE id = ?) AS instagram_connections`,
+    [
+      identifiers.facebook_pages.authorizationId,
+      identifiers.instagram.authorizationId,
+      identifiers.instagram.connectionId
+    ]
+  );
+  assert.equal(afterFacebook[0].facebook_status, 'revoked');
+  assert.equal(afterFacebook[0].instagram_status, 'active');
+  assert.equal(Number(afterFacebook[0].instagram_connections), 1);
+
+  const unselectedAuthorizationId = crypto.randomUUID();
+  const unselectedResourceId = crypto.randomUUID();
+  const unselectedUserToken = encryptSecret('unselected-shared-user-token');
+  const unselectedPageToken = encryptSecret('unselected-shared-page-token');
+  await db.query(
+    `INSERT INTO provider_authorizations
+      (id, workspace_id, provider, actor_user_id, provider_subject, display_name, status, granted_at)
+     VALUES (?, ?, 'facebook_pages', ?, 'shared-meta-subject', 'Unselected Shared User',
+             'active', UTC_TIMESTAMP(3))`,
+    [unselectedAuthorizationId, workspace.id, owner.user.id]
+  );
+  await db.query(
+    `INSERT INTO provider_authorization_credentials
+      (id, provider_authorization_id, access_token_ciphertext, access_token_iv,
+       access_token_tag, key_version, token_type, access_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'Bearer', DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 30 DAY))`,
+    [
+      crypto.randomUUID(), unselectedAuthorizationId, unselectedUserToken.ciphertext,
+      unselectedUserToken.iv, unselectedUserToken.tag, unselectedUserToken.keyVersion
+    ]
+  );
+  await db.query(
+    `INSERT INTO provider_resources
+      (id, provider_authorization_id, workspace_id, provider, resource_type,
+       provider_resource_id, display_name, metadata)
+     VALUES (?, ?, ?, 'facebook_pages', 'facebook_page', 'unselected-shared-page',
+             'Unselected shared Page', JSON_OBJECT('selectable', TRUE))`,
+    [unselectedResourceId, unselectedAuthorizationId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO provider_resource_credentials
+      (id, provider_resource_id, access_token_ciphertext, access_token_iv,
+       access_token_tag, key_version, token_type, access_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'Bearer', DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 30 DAY))`,
+    [
+      crypto.randomUUID(), unselectedResourceId, unselectedPageToken.ciphertext,
+      unselectedPageToken.iv, unselectedPageToken.tag, unselectedPageToken.keyVersion
+    ]
+  );
+
+  const instagramDisconnect = await requestApp(`/api/workspaces/${workspace.id}/connections/instagram`, {
+    method: 'DELETE',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { connection_id: identifiers.instagram.connectionId }
+  });
+  assert.equal(instagramDisconnect.statusCode, 200);
+  assert.equal(instagramDisconnect.json().provider_grant_preserved, false);
+  assert.equal(instagramDisconnect.json().provider_revoke.success, true);
+  assert.equal(calls.length, 1);
+  const afterFinalDisconnect = await db.query(
+    `SELECT status, provider_subject,
+            (SELECT COUNT(*) FROM provider_authorization_credentials
+             WHERE provider_authorization_id = ?) AS credentials,
+            (SELECT COUNT(*) FROM provider_resources
+             WHERE provider_authorization_id = ?) AS resources
+     FROM provider_authorizations WHERE id = ?`,
+    [unselectedAuthorizationId, unselectedAuthorizationId, unselectedAuthorizationId]
+  );
+  assert.equal(afterFinalDisconnect[0].status, 'revoked');
+  assert.equal(afterFinalDisconnect[0].provider_subject, null);
+  assert.equal(Number(afterFinalDisconnect[0].credentials), 0);
+  assert.equal(Number(afterFinalDisconnect[0].resources), 0);
+});
+
+test('Meta worker purges expired unselected authorizations after the retention deadline', async () => {
+  await clearDatabase();
+  const owner = await signIn('meta-expiry-owner@example.com');
+  const workspace = await createWorkspace(owner, 'Meta Expiry Workspace');
+  const authorizationId = crypto.randomUUID();
+  const resourceId = crypto.randomUUID();
+  const userToken = encryptSecret('expired-meta-user-token');
+  const pageToken = encryptSecret('expired-meta-page-token');
+  await db.query(
+    `INSERT INTO provider_authorizations
+      (id, workspace_id, provider, actor_user_id, provider_subject, display_name,
+       status, granted_at, deletion_due_at)
+     VALUES (?, ?, 'facebook_pages', ?, 'expired-meta-subject', 'Expired Meta User',
+             'reconnect_required', DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 91 DAY),
+             DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 SECOND))`,
+    [authorizationId, workspace.id, owner.user.id]
+  );
+  await db.query(
+    `INSERT INTO provider_authorization_credentials
+      (id, provider_authorization_id, access_token_ciphertext, access_token_iv,
+       access_token_tag, key_version, access_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 31 DAY))`,
+    [crypto.randomUUID(), authorizationId, userToken.ciphertext, userToken.iv, userToken.tag, userToken.keyVersion]
+  );
+  await db.query(
+    `INSERT INTO provider_resources
+      (id, provider_authorization_id, workspace_id, provider, resource_type,
+       provider_resource_id, display_name, metadata)
+     VALUES (?, ?, ?, 'facebook_pages', 'facebook_page', 'expired-unselected-page',
+             'Expired unselected Page', JSON_OBJECT('selectable', FALSE))`,
+    [resourceId, authorizationId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO provider_resource_credentials
+      (id, provider_resource_id, access_token_ciphertext, access_token_iv,
+       access_token_tag, key_version, access_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 31 DAY))`,
+    [crypto.randomUUID(), resourceId, pageToken.ciphertext, pageToken.iv, pageToken.tag, pageToken.keyVersion]
+  );
+
+  const worker = await runDueSyncs({ timeBudgetSeconds: 1, leaseOwner: 'meta-expiry-worker' });
+  assert.equal(worker.reconciled_meta_authorizations, 1);
+  assert.equal(worker.processed, 0);
+  const rows = await db.query(
+    `SELECT status, provider_subject, deletion_due_at,
+            (SELECT COUNT(*) FROM provider_authorization_credentials
+             WHERE provider_authorization_id = ?) AS credentials,
+            (SELECT COUNT(*) FROM provider_resources
+             WHERE provider_authorization_id = ?) AS resources
+     FROM provider_authorizations WHERE id = ?`,
+    [authorizationId, authorizationId, authorizationId]
+  );
+  assert.equal(rows[0].status, 'revoked');
+  assert.equal(rows[0].provider_subject, null);
+  assert.equal(rows[0].deletion_due_at, null);
+  assert.equal(Number(rows[0].credentials), 0);
+  assert.equal(Number(rows[0].resources), 0);
+});
+
+test('Meta signed data-deletion callback is authenticated, replay-safe, and purges both credentials and snapshots', async () => {
+  await clearDatabase();
+  const owner = await signIn('meta-deletion-owner@example.com');
+  const workspace = await createWorkspace(owner, 'Meta Deletion Workspace');
+  const authorizationId = crypto.randomUUID();
+  const resourceId = crypto.randomUUID();
+  const dataSourceId = crypto.randomUUID();
+  const connectionId = crypto.randomUUID();
+  const runId = crypto.randomUUID();
+  const userToken = encryptSecret('meta-deletion-user-token');
+  const pageToken = encryptSecret('meta-deletion-page-token');
+  await db.query(
+    `INSERT INTO provider_authorizations
+      (id, workspace_id, provider, actor_user_id, provider_subject, display_name,
+       status, auth_product, api_version, granted_at)
+     VALUES (?, ?, 'facebook_pages', ?, 'meta-delete-user', 'Delete User',
+             'active', 'analytics', 'v25.0', UTC_TIMESTAMP(3))`,
+    [authorizationId, workspace.id, owner.user.id]
+  );
+  await db.query(
+    `INSERT INTO provider_authorization_credentials
+      (id, provider_authorization_id, access_token_ciphertext, access_token_iv,
+       access_token_tag, key_version, access_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 30 DAY))`,
+    [crypto.randomUUID(), authorizationId, userToken.ciphertext, userToken.iv, userToken.tag, userToken.keyVersion]
+  );
+  await db.query(
+    `INSERT INTO provider_resources
+      (id, provider_authorization_id, workspace_id, provider, resource_type,
+       provider_resource_id, display_name, metadata)
+     VALUES (?, ?, ?, 'facebook_pages', 'facebook_page', 'delete-page', 'Delete Page', JSON_OBJECT())`,
+    [resourceId, authorizationId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO provider_resource_credentials
+      (id, provider_resource_id, access_token_ciphertext, access_token_iv,
+       access_token_tag, key_version, access_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 30 DAY))`,
+    [crypto.randomUUID(), resourceId, pageToken.ciphertext, pageToken.iv, pageToken.tag, pageToken.keyVersion]
+  );
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status)
+     VALUES (?, ?, 'facebook_pages', 'active')`,
+    [dataSourceId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO workspace_provider_connections
+      (id, workspace_id, provider_resource_id, data_source_id, provider, status)
+     VALUES (?, ?, ?, ?, 'facebook_pages', 'active')`,
+    [connectionId, workspace.id, resourceId, dataSourceId]
+  );
+  await db.query(
+    `INSERT INTO sync_runs
+      (id, workspace_id, data_source_id, trigger_type, status, finished_at)
+     VALUES (?, ?, ?, 'scheduled', 'success', UTC_TIMESTAMP(3))`,
+    [runId, workspace.id, dataSourceId]
+  );
+  await db.query(
+    `INSERT INTO meta_account_insight_snapshots
+      (id, workspace_id, data_source_id, workspace_provider_connection_id,
+       sync_run_id, provider, snapshot_kind, report_date, observed_at,
+       metric_values, availability)
+     VALUES (?, ?, ?, ?, ?, 'facebook_pages', 'profile', UTC_DATE(), UTC_TIMESTAMP(3),
+             JSON_OBJECT('followers', 10), JSON_OBJECT('followers', 'available'))`,
+    [crypto.randomUUID(), workspace.id, dataSourceId, connectionId, runId]
+  );
+
+  const signedRequest = metaSignedRequest('meta-delete-user');
+  const body = new URLSearchParams({ signed_request: signedRequest }).toString();
+  const deletion = await requestApp('/api/integrations/meta/data-deletion', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body
+  });
+  assert.equal(deletion.statusCode, 200);
+  const deletionBody = deletion.json();
+  assert.ok(deletionBody.confirmation_code);
+  assert.equal(
+    deletionBody.url,
+    `${process.env.BASE_URL}/api/integrations/meta/deletion-status/${encodeURIComponent(deletionBody.confirmation_code)}`
+  );
+
+  const replay = await requestApp('/api/integrations/meta/data-deletion', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body
+  });
+  assert.equal(replay.statusCode, 200);
+  assert.equal(replay.json().confirmation_code, deletionBody.confirmation_code);
+  const status = await requestApp(
+    `/api/integrations/meta/deletion-status/${encodeURIComponent(deletionBody.confirmation_code)}`
+  );
+  assert.equal(status.statusCode, 200);
+  assert.equal(status.json().status, 'completed');
+  assert.equal(status.json().authorization_count, 1);
+
+  const purged = await db.query(
+    `SELECT pauth.status, pauth.provider_subject,
+            (SELECT COUNT(*) FROM provider_authorization_credentials pac WHERE pac.provider_authorization_id = pauth.id) AS auth_credentials,
+            (SELECT COUNT(*) FROM provider_resources pr WHERE pr.provider_authorization_id = pauth.id) AS resources,
+            (SELECT COUNT(*) FROM data_sources ds WHERE ds.workspace_id = pauth.workspace_id AND ds.provider = 'facebook_pages') AS sources,
+            (SELECT COUNT(*) FROM meta_account_insight_snapshots mais WHERE mais.workspace_id = pauth.workspace_id) AS snapshots,
+            (SELECT COUNT(*) FROM meta_callback_events mce WHERE mce.provider_subject_hash = SHA2('meta-delete-user', 256)) AS callback_events
+     FROM provider_authorizations pauth WHERE pauth.id = ?`,
+    [authorizationId]
+  );
+  assert.equal(purged[0].status, 'revoked');
+  assert.equal(purged[0].provider_subject, null);
+  assert.equal(Number(purged[0].auth_credentials), 0);
+  assert.equal(Number(purged[0].resources), 0);
+  assert.equal(Number(purged[0].sources), 0);
+  assert.equal(Number(purged[0].snapshots), 0);
+  assert.equal(Number(purged[0].callback_events), 1);
+
+  const tampered = await requestApp('/api/integrations/meta/data-deletion', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ signed_request: `${signedRequest}tampered` }).toString()
+  });
+  assert.equal(tampered.statusCode, 400);
 });
 
 test('seeded fixture snapshots are exposed as clearly labeled demo data', async () => {

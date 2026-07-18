@@ -1,6 +1,7 @@
 const { getConnection } = require('../database');
 const { assertCapability } = require('./rbac');
 const { getYouTubeConfiguration } = require('./youtube-config');
+const { getMetaConfiguration } = require('./meta-config');
 
 const PROVIDERS = [
   {
@@ -62,34 +63,44 @@ const PROVIDERS = [
     name: 'Instagram',
     resourceName: 'Instagram professional account',
     featureFlag: 'FEATURE_INSTAGRAM_CONNECTOR',
-    statusWhenDisabled: 'coming_soon',
-    authModel: 'Meta OAuth through the current Instagram Platform route',
+    statusWhenDisabled: 'disabled',
+    authModel: 'Facebook Login for Business with the Instagram API and an exact read-only scope set',
     selectedResourceModel: 'one workspace connection per selected professional account',
     requestedScopes: [
       {
-        name: 'instagram_business_basic',
+        name: 'instagram_basic',
         access: 'read',
         purpose: 'Discover and display authorized professional account identity and media basics.'
       },
       {
-        name: 'instagram_business_manage_insights',
+        name: 'instagram_manage_insights',
         access: 'read',
         purpose: 'Read implemented account and media insight metrics.'
+      },
+      {
+        name: 'pages_show_list',
+        access: 'read',
+        purpose: 'Discover Pages available to the authorizing user so linked professional accounts can be selected.'
+      },
+      {
+        name: 'pages_read_engagement',
+        access: 'read',
+        purpose: 'Read the linked Page relationship and the Page token required by Instagram API with Facebook Login.'
       }
     ],
     capabilities: ['resource_discovery', 'profile_insights', 'media_listing', 'media_insights', 'disconnect'],
     metrics: [
       'instagram.reach',
       'instagram.views',
-      'instagram.profile_activity',
       'instagram.likes',
       'instagram.comments',
       'instagram.shares',
       'instagram.saves'
     ],
     docs: [
+      'https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/',
       'https://developers.facebook.com/documentation/instagram-platform/overview',
-      'https://developers.facebook.com/documentation/instagram-platform/insights',
+      'https://developers.facebook.com/documentation/instagram-platform/api-reference/instagram-user/insights',
       'https://developers.facebook.com/docs/permissions/'
     ]
   },
@@ -98,8 +109,8 @@ const PROVIDERS = [
     name: 'Facebook Pages',
     resourceName: 'Facebook Page',
     featureFlag: 'FEATURE_FACEBOOK_PAGES_CONNECTOR',
-    statusWhenDisabled: 'coming_soon',
-    authModel: 'Meta OAuth for Pages access',
+    statusWhenDisabled: 'disabled',
+    authModel: 'Facebook Login for Business with exact read-only Pages permissions',
     selectedResourceModel: 'one workspace connection per selected Page',
     requestedScopes: [
       {
@@ -121,15 +132,18 @@ const PROVIDERS = [
     capabilities: ['resource_discovery', 'page_insights', 'post_listing', 'post_insights', 'disconnect'],
     metrics: [
       'facebook.followers',
-      'facebook.page_impressions',
-      'facebook.page_engagement',
+      'facebook.page_follows',
+      'facebook.page_post_engagements',
+      'facebook.page_media_views',
       'facebook.post_reactions',
       'facebook.post_comments',
       'facebook.post_shares'
     ],
     docs: [
+      'https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/',
       'https://developers.facebook.com/docs/permissions/',
-      'https://developers.facebook.com/docs/graph-api/reference/page/insights/'
+      'https://developers.facebook.com/documentation/pages-api/manage-pages',
+      'https://developers.facebook.com/documentation/pages-api/platforminsights/page'
     ]
   },
   {
@@ -241,13 +255,13 @@ const METRIC_DEFINITIONS = {
     dateSemantics: 'provider_insight_period',
     unavailableWhen: 'Permission missing, media/account type unsupported, or privacy thresholding'
   },
-  'facebook.page_impressions': {
-    label: 'Page impressions',
+  'facebook.page_follows': {
+    label: 'Page follows',
     provider: 'facebook_pages',
     unit: 'count',
-    aggregation: 'provider_reported_period',
-    dateSemantics: 'provider_insight_period',
-    unavailableWhen: 'Permission missing, metric deprecated, or Page ineligible'
+    aggregation: 'latest_snapshot',
+    dateSemantics: 'provider_insight_snapshot',
+    unavailableWhen: 'Permission missing, metric unavailable, or Page ineligible'
   },
   'youtube.watch_time_minutes': {
     label: 'Watch time',
@@ -334,11 +348,14 @@ function getProviderStatus(env, provider) {
   if (provider.id === 'youtube') {
     return getYouTubeConfiguration(env).status;
   }
+  if (provider.id === 'facebook_pages' || provider.id === 'instagram') {
+    return getMetaConfiguration(provider.id, env).status;
+  }
   return 'feature_flagged';
 }
 
 function providerIsImplemented(provider) {
-  return provider.id === 'tiktok' || provider.id === 'youtube';
+  return ['tiktok', 'youtube', 'facebook_pages', 'instagram'].includes(provider.id);
 }
 
 function toPublicProvider(provider, env) {
@@ -350,7 +367,9 @@ function toPublicProvider(provider, env) {
     resourceName: provider.resourceName,
     enabled,
     implemented,
-    connectable: false,
+    connectable: provider.id === 'facebook_pages' || provider.id === 'instagram'
+      ? getMetaConfiguration(provider.id, env).connectable
+      : false,
     status: getProviderStatus(env, provider),
     featureFlag: provider.featureFlag,
     authModel: provider.authModel,
@@ -599,6 +618,213 @@ async function getYouTubeWorkspaceProvider(connection, workspaceId, userId, env)
   };
 }
 
+async function getMetaWorkspaceProvider(connection, workspaceId, providerId, env) {
+  const provider = PROVIDERS.find(item => item.id === providerId);
+  const publicProvider = toPublicProvider(provider, env);
+  const tableRows = await connection.query(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME IN (
+         'provider_authorizations',
+         'provider_authorization_credentials',
+         'provider_resources',
+         'provider_resource_credentials',
+         'workspace_provider_connections',
+         'meta_account_insight_snapshots',
+         'meta_callback_events',
+         'provider_request_events'
+       )`
+  );
+  const columnRows = Number(tableRows[0] && tableRows[0].count) === 8
+    ? await connection.query(
+        `SELECT COUNT(*) AS count
+         FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND (
+             (TABLE_NAME = 'meta_account_insight_snapshots'
+              AND COLUMN_NAME IN ('range_days', 'range_start_date', 'range_end_date'))
+             OR (TABLE_NAME = 'oauth_transactions' AND COLUMN_NAME = 'provider_config_id')
+           )`
+      )
+    : [];
+  const foundationReady = Number(tableRows[0] && tableRows[0].count) === 8 &&
+    Number(columnRows[0] && columnRows[0].count) === 4;
+  const configuration = getMetaConfiguration(providerId, env, {
+    databaseReady: true,
+    foundationReady,
+    workerReady: true
+  });
+  if (!foundationReady) {
+    return {
+      ...publicProvider,
+      enabled: configuration.enabled,
+      implemented: true,
+      connectable: false,
+      status: configuration.status,
+      configuration: { status: configuration.status, warnings: configuration.warnings },
+      authorization: null,
+      resources: [],
+      connections: [],
+      connection: null
+    };
+  }
+
+  const authorizationRows = await connection.query(
+    `SELECT pauth.id, pauth.status, pauth.granted_at, pauth.last_validated_at, pauth.revoked_at,
+            (
+              SELECT JSON_UNQUOTE(JSON_EXTRACT(al.metadata, '$.outcome_category'))
+              FROM audit_logs al
+              WHERE al.target_id = pauth.id
+                AND al.action = CONCAT('connection.', ?, '.authorization_failed')
+              ORDER BY al.created_at DESC LIMIT 1
+            ) AS failure_category
+     FROM provider_authorizations pauth
+     WHERE pauth.workspace_id = ? AND pauth.provider = ?
+     ORDER BY FIELD(pauth.status, 'active', 'authorizing', 'reconnect_required', 'disabled', 'revoked'),
+              pauth.updated_at DESC LIMIT 1`,
+    [providerId, workspaceId, providerId]
+  );
+  const authorization = authorizationRows[0] || null;
+  const scopeRows = authorization
+    ? await connection.query(
+        `SELECT scope, status FROM provider_authorization_scopes
+         WHERE provider_authorization_id = ? ORDER BY scope`,
+        [authorization.id]
+      )
+    : [];
+  const resourceRows = await connection.query(
+    `SELECT pr.id AS resource_id, pr.provider_resource_id, pr.display_name, pr.metadata,
+            prc.access_expires_at, prc.revoked_at AS resource_token_revoked_at,
+            wpc.id AS connection_id, wpc.data_source_id, wpc.status AS connection_status,
+            wpc.last_sync_at, wpc.last_successful_sync_at, wpc.next_sync_at, wpc.data_through_at,
+            ds.reconnect_reason, pa.username
+     FROM provider_resources pr
+     JOIN provider_authorizations pauth ON pauth.id = pr.provider_authorization_id
+     LEFT JOIN provider_resource_credentials prc ON prc.provider_resource_id = pr.id
+     LEFT JOIN workspace_provider_connections wpc
+       ON wpc.provider_resource_id = pr.id AND wpc.workspace_id = pr.workspace_id
+     LEFT JOIN data_sources ds ON ds.id = wpc.data_source_id
+     LEFT JOIN provider_accounts pa ON pa.data_source_id = wpc.data_source_id
+     WHERE pr.workspace_id = ? AND pr.provider = ?
+     ORDER BY pr.display_name, pr.created_at`,
+    [workspaceId, providerId]
+  );
+  const capabilityRows = await connection.query(
+    `SELECT pc.workspace_provider_connection_id, pc.capability_key, pc.status, pc.reason
+     FROM provider_capabilities pc
+     JOIN workspace_provider_connections wpc ON wpc.id = pc.workspace_provider_connection_id
+     WHERE wpc.workspace_id = ? AND wpc.provider = ? ORDER BY pc.capability_key`,
+    [workspaceId, providerId]
+  );
+  const capabilitiesByConnection = new Map();
+  for (const capability of capabilityRows) {
+    const values = capabilitiesByConnection.get(capability.workspace_provider_connection_id) || [];
+    values.push({ key: capability.capability_key, status: capability.status, reason: capability.reason });
+    capabilitiesByConnection.set(capability.workspace_provider_connection_id, values);
+  }
+  const resources = resourceRows.map(row => {
+    const metadata = parseJson(row.metadata);
+    const expiryTime = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Number.NaN;
+    const tokenAvailable = Boolean(
+      !row.resource_token_revoked_at &&
+      Number.isFinite(expiryTime) &&
+      expiryTime > Date.now()
+    );
+    const unavailableReason = metadata.selectable === false
+      ? metadata.discoveryStatus || 'not_returned'
+      : row.resource_token_revoked_at
+        ? 'authorization_revoked'
+        : !Number.isFinite(expiryTime)
+          ? 'token_expiry_unknown'
+          : expiryTime <= Date.now()
+            ? 'token_expired'
+            : null;
+    return {
+      id: row.resource_id,
+      provider_resource_id: row.provider_resource_id,
+      display_name: row.display_name,
+      username: metadata.username || null,
+      thumbnail_url: metadata.thumbnailUrl || null,
+      source_page_name: metadata.sourcePageName || null,
+      available: metadata.selectable !== false && tokenAvailable,
+      unavailable_reason: unavailableReason,
+      selected: Boolean(row.connection_id)
+    };
+  });
+  const connections = resourceRows.filter(row => row.connection_id).map(row => {
+    const metadata = parseJson(row.metadata);
+    const expiryTime = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Number.NaN;
+    const credentialUnavailable = Boolean(
+      row.resource_token_revoked_at ||
+      !Number.isFinite(expiryTime) ||
+      expiryTime <= Date.now()
+    );
+    const status = authorization && authorization.status === 'authorizing'
+      ? 'connecting'
+      : authorization && ['reconnect_required', 'disabled'].includes(authorization.status)
+        ? 'reconnect_required'
+        : credentialUnavailable
+          ? 'reconnect_required'
+          : row.connection_status;
+    return {
+      id: row.connection_id,
+      data_source_id: row.data_source_id,
+      status,
+      reconnect_reason: row.reconnect_reason || (credentialUnavailable ? 'resource_token_unavailable' : null),
+      last_sync_at: row.last_sync_at,
+      last_successful_sync_at: row.last_successful_sync_at,
+      next_sync_at: row.next_sync_at,
+      data_through_at: row.data_through_at,
+      account: {
+        id: row.provider_resource_id,
+        username: row.username || metadata.username || null,
+        display_name: row.display_name,
+        thumbnail_url: metadata.thumbnailUrl || null,
+        source_page_name: metadata.sourcePageName || null
+      },
+      capabilities: capabilitiesByConnection.get(row.connection_id) || []
+    };
+  });
+  const primaryConnection = connections[0] || null;
+  let status = configuration.status;
+  if (!configuration.connectable) status = configuration.status;
+  else if (authorization && authorization.status === 'authorizing') status = 'authorizing';
+  else if (authorization && authorization.status !== 'active' && authorization.failure_category === 'user_denied') {
+    status = 'authorization_denied';
+  } else if (
+    authorization && authorization.status !== 'active' &&
+    ['missing_or_unapproved_scopes', 'permission_validation_failed'].includes(authorization.failure_category)
+  ) status = 'missing_scopes';
+  else if (authorization && authorization.status === 'reconnect_required') status = 'reconnect_required';
+  else if (authorization && authorization.status === 'disabled') status = 'provider_error';
+  else if (primaryConnection) status = primaryConnection.status;
+  else if (authorization && authorization.status === 'active') status = resources.length > 0 ? 'selection_required' : 'no_resources';
+  else if (configuration.connectable) status = 'available';
+  const grantedScopeNames = new Set(scopeRows.filter(scope => scope.status === 'granted').map(scope => scope.scope));
+  const missingScopes = provider.requestedScopes.map(scope => scope.name).filter(scope => !grantedScopeNames.has(scope));
+  return {
+    ...publicProvider,
+    enabled: configuration.enabled,
+    implemented: true,
+    connectable: configuration.connectable,
+    status,
+    configuration: { status: configuration.status, warnings: configuration.warnings },
+    authorization: authorization ? {
+      id: authorization.id,
+      status: authorization.status,
+      granted_at: authorization.granted_at,
+      last_validated_at: authorization.last_validated_at,
+      failure_category: authorization.failure_category,
+      missing_scopes: missingScopes,
+      scopes: scopeRows
+    } : null,
+    resources,
+    connections,
+    connection: primaryConnection
+  };
+}
+
 async function listWorkspaceProviderCatalog(userId, workspaceId, env = process.env) {
   const connection = await getConnection();
   if (!connection) {
@@ -639,9 +865,14 @@ async function listWorkspaceProviderCatalog(userId, workspaceId, env = process.e
     );
     const sourceByProvider = new Map(sourceRows.map(row => [row.provider, row]));
     const youtubeProvider = await getYouTubeWorkspaceProvider(connection, workspaceId, userId, env);
-    return PROVIDERS.map(provider => provider.id === 'youtube'
-      ? youtubeProvider
-      : toWorkspaceProvider(provider, sourceByProvider.get(provider.id), env));
+    const facebookProvider = await getMetaWorkspaceProvider(connection, workspaceId, 'facebook_pages', env);
+    const instagramProvider = await getMetaWorkspaceProvider(connection, workspaceId, 'instagram', env);
+    return PROVIDERS.map(provider => {
+      if (provider.id === 'youtube') return youtubeProvider;
+      if (provider.id === 'facebook_pages') return facebookProvider;
+      if (provider.id === 'instagram') return instagramProvider;
+      return toWorkspaceProvider(provider, sourceByProvider.get(provider.id), env);
+    });
   } finally {
     await connection.release();
   }

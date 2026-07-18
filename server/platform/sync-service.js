@@ -7,6 +7,9 @@ const { createId } = require('./security');
 const { purgeOverdueYouTubeAuthorizations } = require('./youtube-connection-service');
 const { performYouTubeSyncForJob } = require('./youtube-sync-service');
 const { getYouTubeConfiguration } = require('./youtube-config');
+const { performMetaSyncForJob } = require('./meta-sync-service');
+const { getMetaConfiguration } = require('./meta-config');
+const { purgeOverdueMetaAuthorizations } = require('./meta-connection-service');
 
 const SYNC_INTERVAL_SECONDS = Number(process.env.SYNC_INTERVAL_SECONDS || 6 * 60 * 60);
 const MANUAL_COOLDOWN_SECONDS = Number(process.env.MANUAL_SYNC_COOLDOWN_SECONDS || 15 * 60);
@@ -526,15 +529,15 @@ async function providerForJob(dataSourceId) {
   });
 }
 
-async function youtubeAuthorizationIsActive(connection, dataSourceId) {
+async function providerAuthorizationIsActive(connection, dataSourceId, provider) {
   const rows = await connection.query(
     `SELECT pauth.status
      FROM workspace_provider_connections wpc
      JOIN provider_resources pr ON pr.id = wpc.provider_resource_id
      JOIN provider_authorizations pauth ON pauth.id = pr.provider_authorization_id
-     WHERE wpc.data_source_id = ? AND wpc.provider = 'youtube'
+     WHERE wpc.data_source_id = ? AND wpc.provider = ?
      LIMIT 1`,
-    [dataSourceId]
+    [dataSourceId, provider]
   );
   return Boolean(rows[0] && rows[0].status === 'active');
 }
@@ -542,6 +545,7 @@ async function youtubeAuthorizationIsActive(connection, dataSourceId) {
 async function performSyncForJob(job, options = {}) {
   const provider = await providerForJob(job.data_source_id);
   if (provider === 'youtube') return performYouTubeSyncForJob(job, options);
+  if (provider === 'facebook_pages' || provider === 'instagram') return performMetaSyncForJob(job, options);
   return performTikTokSyncForJob(job, options);
 }
 
@@ -550,15 +554,18 @@ async function requestManualSync(userId, workspaceId, options = {}) {
   if (provider === 'youtube' && !getYouTubeConfiguration().connectable) {
     throw createHttpError(503, 'youtube_not_available');
   }
-  if (provider === 'youtube') {
+  if ((provider === 'facebook_pages' || provider === 'instagram') && !getMetaConfiguration(provider).connectable) {
+    throw createHttpError(503, `${provider}_not_available`);
+  }
+  if (provider === 'youtube' || provider === 'facebook_pages' || provider === 'instagram') {
     return withConnection(async connection => {
       await connection.beginTransaction();
       try {
         await requireWorkspaceCapability(connection, workspaceId, userId, 'triggerManualSync');
         const source = await getActiveSource(connection, workspaceId, provider, options.connectionId || null);
-        if (!source || source.status !== 'active') throw createHttpError(400, 'youtube_not_connected');
-        if (!(await youtubeAuthorizationIsActive(connection, source.id))) {
-          throw createHttpError(400, 'youtube_not_connected');
+        if (!source || source.status !== 'active') throw createHttpError(400, `${provider}_not_connected`);
+        if (!(await providerAuthorizationIsActive(connection, source.id, provider))) {
+          throw createHttpError(400, `${provider}_not_connected`);
         }
         const recent = await connection.query(
           `SELECT id FROM sync_runs
@@ -620,6 +627,7 @@ async function runDueSyncs(options = {}) {
   const deadline = Date.now() + budgetMs;
   const results = [];
   const reconciliation = await purgeOverdueYouTubeAuthorizations(50);
+  const metaReconciliation = await purgeOverdueMetaAuthorizations(50);
   while (Date.now() < deadline) {
     const job = await claimNextDueJob(owner);
     if (!job) break;
@@ -633,6 +641,7 @@ async function runDueSyncs(options = {}) {
     lease_owner: owner,
     processed: results.length,
     reconciled_youtube_authorizations: reconciliation.purged,
+    reconciled_meta_authorizations: metaReconciliation.purged,
     results
   };
 }

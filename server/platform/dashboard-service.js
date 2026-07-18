@@ -167,7 +167,8 @@ async function queryContentRows(connection, workspaceId, options = {}) {
   const offset = Math.max(Number(options.offset || 0), 0);
   const sortColumn = SORT_COLUMNS[options.sort] || SORT_COLUMNS.views;
   const direction = String(options.direction || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-  const provider = options.provider === 'youtube' ? 'youtube' : 'tiktok';
+  const allowedProviders = new Set(['tiktok', 'youtube', 'facebook_pages', 'instagram']);
+  const provider = allowedProviders.has(options.provider) ? options.provider : 'tiktok';
   const where = ['ci.workspace_id = ?', 'ds.provider = ?', 'ci.deleted_at IS NULL'];
   const params = [workspaceId, provider];
   if (options.from) {
@@ -248,7 +249,8 @@ async function getContent(userId, workspaceId, query = {}) {
       direction: query.direction,
       search: query.search,
       limit: query.limit,
-      offset: query.offset
+      offset: query.offset,
+      provider: query.provider
     });
   });
 }
@@ -271,7 +273,7 @@ async function getContentDetail(userId, workspaceId, contentItemId) {
        FROM content_items ci
        JOIN data_sources ds ON ds.id = ci.data_source_id
        WHERE ci.id = ? AND ci.workspace_id = ? AND ci.deleted_at IS NULL
-         AND ds.provider = 'tiktok'
+         AND ds.provider IN ('tiktok', 'youtube', 'facebook_pages', 'instagram')
        LIMIT 1`,
       [contentItemId, workspaceId]
     );

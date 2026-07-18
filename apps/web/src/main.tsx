@@ -10,6 +10,8 @@ import {
   ChevronDown,
   Download,
   ExternalLink,
+  Facebook,
+  Instagram,
   Link2,
   Loader2,
   Lock,
@@ -51,7 +53,7 @@ type RangeKey = '7d' | '30d' | '90d' | 'custom';
 type Role = 'owner' | 'admin' | 'analyst' | 'viewer';
 type SortDirection = 'asc' | 'desc';
 type ContentSort = 'published_at' | 'views' | 'likes' | 'comments' | 'shares' | 'engagement';
-type OverviewProvider = 'tiktok' | 'youtube';
+type OverviewProvider = 'tiktok' | 'youtube' | 'facebook_pages' | 'instagram';
 
 type User = {
   id: string;
@@ -205,8 +207,12 @@ type ProviderCatalogItem = {
     provider_resource_id: string;
     display_name: string;
     thumbnail_url?: string | null;
+    username?: string | null;
+    source_page_name?: string | null;
     subscriber_count_hidden?: boolean;
     attached_elsewhere_count?: number;
+    available?: boolean;
+    unavailable_reason?: string | null;
     selected: boolean;
   }>;
   connections?: ProviderConnection[];
@@ -281,8 +287,26 @@ type YouTubeDashboardData = {
   };
 };
 
+type MetaDashboardData = {
+  provider: 'facebook_pages' | 'instagram';
+  range: { from: string; to: string; previous_from?: string; previous_to?: string };
+  connection: ProviderConnection;
+  account: {
+    id: string;
+    display_name: string;
+    username?: string | null;
+    thumbnail_url?: string | null;
+    source_page_name?: string | null;
+  } | null;
+  metrics: Array<DashboardMetric & { available: boolean; semantics: string }>;
+  trend: Array<Record<string, unknown> & { date: string }>;
+  content: ContentRow[];
+  latest_sync: SyncRun | null;
+  availability: { state: string; note?: string | null };
+};
+
 type DisconnectTarget = {
-  provider: 'tiktok' | 'youtube';
+  provider: 'tiktok' | 'youtube' | 'facebook' | 'instagram';
   connectionId?: string;
   label: string;
 };
@@ -446,8 +470,12 @@ function initialUrlState() {
     from: params.get('from') || todayInputValue(-30),
     to: params.get('to') || todayInputValue(0),
     metric: params.get('metric') || 'both',
-    provider: (params.get('provider') === 'youtube' ? 'youtube' : 'tiktok') as OverviewProvider,
+    provider: (['youtube', 'facebook_pages', 'instagram'].includes(params.get('provider') || '')
+      ? params.get('provider')
+      : 'tiktok') as OverviewProvider,
     youtubeOutcome: params.get('youtube') || '',
+    facebookOutcome: params.get('facebook') || '',
+    instagramOutcome: params.get('instagram') || '',
     compare: params.get('compare') !== 'false',
     topSort: (params.get('topSort') as ContentSort) || 'views',
     contentSort: (params.get('sort') as ContentSort) || 'views',
@@ -496,6 +524,14 @@ function resolveYouTubeLoadState(dashboard: YouTubeDashboardData | null): LoadSt
   return dashboard.connection.status === 'active' ? 'empty' : 'partial';
 }
 
+function resolveMetaLoadState(dashboard: MetaDashboardData | null): LoadState {
+  if (!dashboard || dashboard.connection.status === 'disconnected') return 'empty';
+  if (dashboard.connection.status === 'reconnect_required') return 'reconnect';
+  if (dashboard.latest_sync?.status === 'failed') return 'error';
+  if (dashboard.latest_sync?.status === 'partial') return 'partial';
+  return dashboard.metrics.some((metric) => metric.available) || dashboard.content.length > 0 ? 'ready' : 'empty';
+}
+
 function roleCanManage(role?: Role) {
   return role === 'owner' || role === 'admin';
 }
@@ -532,6 +568,8 @@ function App() {
   const [syncPage, setSyncPage] = useState(1);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [youtubeDashboard, setYouTubeDashboard] = useState<YouTubeDashboardData | null>(null);
+  const [facebookDashboard, setFacebookDashboard] = useState<MetaDashboardData | null>(null);
+  const [instagramDashboard, setInstagramDashboard] = useState<MetaDashboardData | null>(null);
   const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogItem[]>([]);
   const [deploymentVersion, setDeploymentVersion] = useState<DeploymentVersion | null>(null);
   const [content, setContent] = useState<ContentData | null>(null);
@@ -699,10 +737,24 @@ function App() {
       syncParams.set('limit', '25');
       syncParams.set('offset', String((syncPage - 1) * 25));
       try {
-        const [dashboardResult, youtubeDashboardResult, contentResult, syncResult, catalogResult] = await Promise.all([
+        const [
+          dashboardResult,
+          youtubeDashboardResult,
+          facebookDashboardResult,
+          instagramDashboardResult,
+          contentResult,
+          syncResult,
+          catalogResult
+        ] = await Promise.all([
           api<DashboardData>(`/api/workspaces/${workspace.id}/dashboard?${dashboardParams.toString()}`),
           api<YouTubeDashboardData>(
             `/api/workspaces/${workspace.id}/providers/youtube/dashboard?${dashboardParams.toString()}`
+          ),
+          api<MetaDashboardData>(
+            `/api/workspaces/${workspace.id}/providers/facebook_pages/dashboard?${dashboardParams.toString()}`
+          ),
+          api<MetaDashboardData>(
+            `/api/workspaces/${workspace.id}/providers/instagram/dashboard?${dashboardParams.toString()}`
           ),
           api<ContentData>(`/api/workspaces/${workspace.id}/content?${contentParams.toString()}`),
           api<SyncData>(`/api/workspaces/${workspace.id}/sync-runs?${syncParams.toString()}`),
@@ -710,6 +762,8 @@ function App() {
         ]);
         setDashboard(dashboardResult);
         setYouTubeDashboard(youtubeDashboardResult);
+        setFacebookDashboard(facebookDashboardResult);
+        setInstagramDashboard(instagramDashboardResult);
         setContent(contentResult);
         setSyncData(syncResult);
         setProviderCatalog(catalogResult.providers);
@@ -753,6 +807,29 @@ function App() {
     setToast(outcomes[initial.youtubeOutcome] || 'YouTube authorization returned.');
     setView('connections');
   }, [initial.youtubeOutcome]);
+
+  useEffect(() => {
+    const providerOutcome = initial.facebookOutcome
+      ? { name: 'Facebook Pages', value: initial.facebookOutcome }
+      : initial.instagramOutcome
+        ? { name: 'Instagram', value: initial.instagramOutcome }
+        : null;
+    if (!providerOutcome) return;
+    const outcomes: Record<string, string> = {
+      selection_required: `${providerOutcome.name} authorized. Select a resource to finish connecting.`,
+      no_resources: `${providerOutcome.name} authorized, but no eligible resources with ANALYZE access were returned.`,
+      reconnected: `${providerOutcome.name} authorization restored.`,
+      selected_resource_unavailable: `${providerOutcome.name} authorization completed, but the selected resource was not returned and was not replaced. Choose an available resource explicitly or authorize again.`,
+      account_mismatch: `${providerOutcome.name} was authorized with a different Meta user. The existing connection was not replaced; disconnect it before switching Meta users.`,
+      denied: `${providerOutcome.name} authorization was cancelled. No connection was created.`,
+      missing_scopes: `${providerOutcome.name} did not grant the exact approved read-only permissions.`,
+      configuration_error: `${providerOutcome.name} authorization could not continue because server configuration changed.`,
+      provider_error: `Meta could not complete ${providerOutcome.name} authorization. Try again later.`,
+      failed: `${providerOutcome.name} authorization did not complete.`
+    };
+    setToast(outcomes[providerOutcome.value] || `${providerOutcome.name} authorization returned.`);
+    setView('connections');
+  }, [initial.facebookOutcome, initial.instagramOutcome]);
 
   const detailWorkspaceId = activeWorkspace?.id || '';
 
@@ -1001,6 +1078,74 @@ function App() {
     }
   }
 
+  async function startMetaConnection(provider: 'facebook' | 'instagram', connectionId?: string) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    const providerId = provider === 'facebook' ? 'facebook_pages' : 'instagram';
+    try {
+      const result = await api<{ authorization_url: string }>(
+        `/api/workspaces/${activeWorkspace.id}/connections/${provider}/start`,
+        {
+          method: 'POST',
+          headers: { 'x-csrf-token': csrf },
+          body: JSON.stringify({
+            return_path: `/?workspace=${activeWorkspace.id}&view=connections&provider=${providerId}`,
+            connection_id: connectionId || null
+          })
+        }
+      );
+      window.location.href = result.authorization_url;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `${providerId}_connection_failed`);
+      setBusy(false);
+    }
+  }
+
+  async function selectMetaResource(provider: 'facebook' | 'instagram', resourceId: string) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      await api(`/api/workspaces/${activeWorkspace.id}/connections/${provider}/select`, {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({ resource_id: resourceId })
+      });
+      setToast(
+        `${provider === 'facebook' ? 'Facebook Page' : 'Instagram account'} connected. Its first sync is queued.`
+      );
+      await loadWorkspaceData(activeWorkspace);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `${provider}_resource_selection_failed`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function manualMetaSync(provider: 'facebook_pages' | 'instagram', connectionId?: string) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ status?: string }>(
+        `/api/workspaces/${activeWorkspace.id}/providers/${provider}/sync-runs`,
+        {
+          method: 'POST',
+          headers: { 'x-csrf-token': csrf },
+          body: JSON.stringify({ connection_id: connectionId || null })
+        }
+      );
+      setToast(result.status === 'queued' ? 'Read-only Meta sync queued for the worker.' : 'Meta sync updated.');
+      await loadWorkspaceData(activeWorkspace);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : `${provider}_sync_failed`;
+      setMessage(code === 'manual_sync_cooldown' ? 'Manual sync is cooling down. Try again later.' : code);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function disconnectConnection() {
     if (!activeWorkspace || !disconnectTarget) return;
     setBusy(true);
@@ -1008,6 +1153,7 @@ function App() {
     try {
       const result = await api<{
         provider_revoke?: { attempted?: boolean; success?: boolean; outcome_category?: string };
+        provider_grant_preserved?: boolean;
       }>(`/api/workspaces/${activeWorkspace.id}/connections/${disconnectTarget.provider}`, {
         method: 'DELETE',
         headers: { 'x-csrf-token': csrf },
@@ -1018,6 +1164,14 @@ function App() {
           result.provider_revoke?.success
             ? 'Google access revoked and locally stored YouTube data deleted.'
             : 'Locally stored YouTube data deleted. Google revocation did not complete; review Google Account connections.'
+        );
+      } else if (disconnectTarget.provider === 'facebook' || disconnectTarget.provider === 'instagram') {
+        setToast(
+          result.provider_grant_preserved
+            ? 'Locally stored provider data deleted. Meta access remains active for another selected Meta resource.'
+            : result.provider_revoke?.success
+              ? 'Meta access revoked and locally stored provider data deleted.'
+              : 'Locally stored provider data deleted. Meta revocation did not complete; review Facebook app connections.'
         );
       } else {
         setToast('TikTok connection disabled locally. Provider revocation was attempted first.');
@@ -1128,9 +1282,9 @@ function App() {
             <section className="public-section" aria-labelledby="platforms-title">
               <h2 id="platforms-title">Supported analytics sources</h2>
               <p>
-                TikTok workspace analytics, the TikTok Looker Studio connector, and gated read-only YouTube channel
-                analytics are implemented today. Instagram professional accounts, Facebook Pages, and Google Analytics 4
-                properties remain unavailable until their integrations and provider reviews are complete.
+                TikTok workspace analytics, the TikTok Looker Studio connector, gated read-only YouTube channel
+                analytics, Facebook Page insights, and feature-flagged Instagram professional insights are implemented.
+                Google Analytics 4 remains unavailable until its integration and provider review are complete.
               </p>
               <div className="platform-status" aria-label="Provider availability">
                 <span>
@@ -1140,7 +1294,7 @@ function App() {
                   <CheckCircle2 size={16} aria-hidden /> YouTube gated
                 </span>
                 <span>
-                  <Activity size={16} aria-hidden /> Additional sources planned
+                  <CheckCircle2 size={16} aria-hidden /> Meta read-only gated
                 </span>
               </div>
             </section>
@@ -1290,7 +1444,17 @@ function App() {
                 state={
                   view === 'overview' && overviewProvider === 'youtube' && state !== 'loading' && state !== 'error'
                     ? resolveYouTubeLoadState(youtubeDashboard)
-                    : state
+                    : view === 'overview' &&
+                        overviewProvider === 'facebook_pages' &&
+                        state !== 'loading' &&
+                        state !== 'error'
+                      ? resolveMetaLoadState(facebookDashboard)
+                      : view === 'overview' &&
+                          overviewProvider === 'instagram' &&
+                          state !== 'loading' &&
+                          state !== 'error'
+                        ? resolveMetaLoadState(instagramDashboard)
+                        : state
                 }
               />
             )}
@@ -1298,6 +1462,8 @@ function App() {
               <Overview
                 dashboard={dashboard}
                 youtubeDashboard={youtubeDashboard}
+                facebookDashboard={facebookDashboard}
+                instagramDashboard={instagramDashboard}
                 provider={overviewProvider}
                 range={range}
                 customFrom={customFrom}
@@ -1316,6 +1482,12 @@ function App() {
                 onTrendMetricChange={setTrendMetric}
                 onTopSortChange={setTopSort}
                 onYouTubeSync={() => manualYouTubeSync(youtubeDashboard?.connection.id)}
+                onMetaSync={(provider) =>
+                  manualMetaSync(
+                    provider,
+                    provider === 'facebook_pages' ? facebookDashboard?.connection.id : instagramDashboard?.connection.id
+                  )
+                }
               />
             )}
             {view === 'content' && contentDetailId ? (
@@ -1358,6 +1530,9 @@ function App() {
                 onYouTubeConnect={startYouTubeConnection}
                 onYouTubeSelect={selectYouTubeResource}
                 onYouTubeSync={manualYouTubeSync}
+                onMetaConnect={startMetaConnection}
+                onMetaSelect={selectMetaResource}
+                onMetaSync={manualMetaSync}
                 onDisconnectRequest={setDisconnectTarget}
                 onDisconnectCancel={() => setDisconnectTarget(null)}
                 onDisconnectConfirm={disconnectConnection}
@@ -1561,6 +1736,8 @@ function StateBanner({ state }: { state: LoadState }) {
 function Overview({
   dashboard,
   youtubeDashboard,
+  facebookDashboard,
+  instagramDashboard,
   provider,
   range,
   customFrom,
@@ -1578,10 +1755,13 @@ function Overview({
   onCompareChange,
   onTrendMetricChange,
   onTopSortChange,
-  onYouTubeSync
+  onYouTubeSync,
+  onMetaSync
 }: {
   dashboard: DashboardData | null;
   youtubeDashboard: YouTubeDashboardData | null;
+  facebookDashboard: MetaDashboardData | null;
+  instagramDashboard: MetaDashboardData | null;
   provider: OverviewProvider;
   range: RangeKey;
   customFrom: string;
@@ -1600,6 +1780,7 @@ function Overview({
   onTrendMetricChange: (value: string) => void;
   onTopSortChange: (value: ContentSort) => void;
   onYouTubeSync: () => void;
+  onMetaSync: (provider: 'facebook_pages' | 'instagram') => void;
 }) {
   const metrics =
     dashboard?.metrics ||
@@ -1638,6 +1819,22 @@ function Overview({
             onClick={() => onProviderChange('youtube')}
           >
             <Youtube size={17} aria-hidden /> YouTube
+          </button>
+          <button
+            type="button"
+            className={provider === 'facebook_pages' ? 'active' : ''}
+            aria-pressed={provider === 'facebook_pages'}
+            onClick={() => onProviderChange('facebook_pages')}
+          >
+            <Facebook size={17} aria-hidden /> Facebook
+          </button>
+          <button
+            type="button"
+            className={provider === 'instagram' ? 'active' : ''}
+            aria-pressed={provider === 'instagram'}
+            onClick={() => onProviderChange('instagram')}
+          >
+            <Instagram size={17} aria-hidden /> Instagram
           </button>
         </div>
       </section>
@@ -1696,6 +1893,14 @@ function Overview({
           busy={busy}
           canSync={canSync}
           onSync={onYouTubeSync}
+        />
+      ) : provider === 'facebook_pages' || provider === 'instagram' ? (
+        <MetaOverview
+          dashboard={provider === 'facebook_pages' ? facebookDashboard : instagramDashboard}
+          compare={compare}
+          busy={busy}
+          canSync={canSync}
+          onSync={() => onMetaSync(provider)}
         />
       ) : (
         <>
@@ -1825,6 +2030,171 @@ function Overview({
           </section>
         </>
       )}
+    </>
+  );
+}
+
+function MetaOverview({
+  dashboard,
+  compare,
+  busy,
+  canSync,
+  onSync
+}: {
+  dashboard: MetaDashboardData | null;
+  compare: boolean;
+  busy: boolean;
+  canSync: boolean;
+  onSync: () => void;
+}) {
+  const provider = dashboard?.provider || 'facebook_pages';
+  const connected = dashboard?.connection.status === 'active';
+  const isInstagram = provider === 'instagram';
+  const PrimaryIcon = isInstagram ? Instagram : Facebook;
+  const trend = (dashboard?.trend || []).map((point) => ({
+    ...point,
+    label: formatDate(point.date, { month: 'short', day: 'numeric' })
+  }));
+  const primaryKey = isInstagram ? 'views' : 'page_media_view';
+  const secondaryKey = isInstagram ? 'reach' : 'page_post_engagements';
+
+  return (
+    <>
+      <section className="panel youtube-channel" aria-labelledby="meta-account-title">
+        <div className="channel-identity">
+          {dashboard?.account?.thumbnail_url ? (
+            <img src={dashboard.account.thumbnail_url} alt="" referrerPolicy="no-referrer" />
+          ) : (
+            <span className="channel-placeholder" aria-hidden>
+              <PrimaryIcon size={24} />
+            </span>
+          )}
+          <div>
+            <p className="eyebrow">{isInstagram ? 'Instagram professional account' : 'Facebook Page'}</p>
+            <h2 id="meta-account-title">{dashboard?.account?.display_name || 'No resource connected'}</h2>
+            <p className="muted">
+              {connected
+                ? `Last synced ${formatDate(dashboard?.connection.last_successful_sync_at)}`
+                : 'Authorize Meta and explicitly select a resource in Connections.'}
+            </p>
+            {dashboard?.account?.source_page_name && (
+              <p className="muted">Linked Facebook Page: {dashboard.account.source_page_name}</p>
+            )}
+          </div>
+        </div>
+        <div className="button-row">
+          <StatusBadge status={dashboard?.connection.status || 'disconnected'} />
+          <button type="button" onClick={onSync} disabled={!connected || !canSync || busy}>
+            <RefreshCw className={busy ? 'spin' : ''} size={18} aria-hidden /> Sync now
+          </button>
+        </div>
+      </section>
+
+      {dashboard?.availability.note && <p className="notice">{dashboard.availability.note}</p>}
+
+      <section className="metric-grid youtube-metrics" aria-label="Meta summary metrics">
+        {(dashboard?.metrics || []).map((metric) => (
+          <MetricCard key={metric.key} metric={metric} compare={compare} />
+        ))}
+        {!dashboard?.metrics.length && (
+          <article className="metric-card unavailable">
+            <span>Read-only insights</span>
+            <strong>N/A</strong>
+            <small>No stored snapshot</small>
+          </article>
+        )}
+      </section>
+
+      <section className="panel chart-panel" aria-labelledby="meta-performance-title">
+        <div className="panel-title">
+          <div>
+            <h2 id="meta-performance-title">Daily read-only insights</h2>
+            <p>Provider-reported daily values; unavailable metrics remain visibly N/A.</p>
+          </div>
+        </div>
+        {trend.length > 0 ? (
+          <div className="chart-box" role="img" aria-label="Line chart of daily Meta insights">
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={trend} margin={{ top: 12, right: 24, bottom: 12, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="label" minTickGap={24} />
+                <YAxis tickFormatter={formatCompact} />
+                <Tooltip formatter={formatTooltipNumber} />
+                <Legend />
+                <Line
+                  type="monotone"
+                  dataKey={primaryKey}
+                  name={isInstagram ? 'Views' : 'Media views'}
+                  stroke="var(--chart-a)"
+                  strokeWidth={2.5}
+                  dot={false}
+                  connectNulls
+                />
+                <Line
+                  type="monotone"
+                  dataKey={secondaryKey}
+                  name={isInstagram ? 'Reach' : 'Post engagements'}
+                  stroke="var(--chart-b)"
+                  strokeWidth={2.5}
+                  dot={false}
+                  connectNulls
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="chart-empty">No daily Meta insight rows are stored for this range.</div>
+        )}
+      </section>
+
+      <section className="panel" aria-labelledby="meta-content-title">
+        <div className="panel-title">
+          <div>
+            <h2 id="meta-content-title">Content snapshots</h2>
+            <p>
+              {isInstagram ? 'Feed, carousel, and Reels media only.' : 'Published Page posts and available engagement.'}
+            </p>
+          </div>
+        </div>
+        {dashboard?.content.length ? (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Content</th>
+                  <th scope="col">Published</th>
+                  <th scope="col">Views</th>
+                  <th scope="col">Likes</th>
+                  <th scope="col">Comments</th>
+                  <th scope="col">Shares</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dashboard.content.map((row) => (
+                  <tr key={row.id}>
+                    <td data-label="Content">
+                      {row.share_url ? (
+                        <a href={row.share_url} target="_blank" rel="noreferrer">
+                          {row.title || row.provider_content_id} <ExternalLink size={14} aria-hidden />
+                        </a>
+                      ) : (
+                        row.title || row.provider_content_id
+                      )}
+                    </td>
+                    <td data-label="Published">{formatDate(row.published_at, { dateStyle: 'medium' })}</td>
+                    <td data-label="Views">{formatNumber(row.view_count)}</td>
+                    <td data-label="Likes">{formatNumber(row.like_count)}</td>
+                    <td data-label="Comments">{formatNumber(row.comment_count)}</td>
+                    <td data-label="Shares">{formatNumber(row.share_count)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="table-empty">No content snapshots are stored for this period.</div>
+        )}
+      </section>
     </>
   );
 }
@@ -2410,6 +2780,9 @@ function Connections({
   onYouTubeConnect,
   onYouTubeSelect,
   onYouTubeSync,
+  onMetaConnect,
+  onMetaSelect,
+  onMetaSync,
   onDisconnectRequest,
   onDisconnectCancel,
   onDisconnectConfirm
@@ -2423,6 +2796,9 @@ function Connections({
   onYouTubeConnect: (connectionId?: string) => void;
   onYouTubeSelect: (resourceId: string) => void;
   onYouTubeSync: (connectionId?: string) => void;
+  onMetaConnect: (provider: 'facebook' | 'instagram', connectionId?: string) => void;
+  onMetaSelect: (provider: 'facebook' | 'instagram', resourceId: string) => void;
+  onMetaSync: (provider: 'facebook_pages' | 'instagram', connectionId?: string) => void;
   onDisconnectRequest: (target: DisconnectTarget) => void;
   onDisconnectCancel: () => void;
   onDisconnectConfirm: () => void;
@@ -2430,6 +2806,11 @@ function Connections({
   const allowed = roleCanManage(role);
   const latestError = dashboard?.latest_sync?.error_category;
   const catalog = providers.length > 0 ? providers : [];
+  const orderedCatalog = [...catalog].sort((left, right) => {
+    if (left.id === 'facebook_pages' && right.id === 'instagram') return -1;
+    if (left.id === 'instagram' && right.id === 'facebook_pages') return 1;
+    return 0;
+  });
   return (
     <section className="panel" aria-labelledby="connection-title">
       <div className="panel-title">
@@ -2439,19 +2820,25 @@ function Connections({
         </div>
       </div>
       <div className="provider-list">
-        {catalog.map((provider) => {
+        {orderedCatalog.map((provider) => {
           const providerStatus = provider.connection?.status || provider.status;
           const isTikTok = provider.id === 'tiktok';
           const isYouTube = provider.id === 'youtube';
+          const isFacebook = provider.id === 'facebook_pages';
+          const isInstagram = provider.id === 'instagram';
+          const isMeta = isFacebook || isInstagram;
+          const metaPath = isFacebook ? 'facebook' : 'instagram';
           const canConnect = allowed && provider.connectable;
-          const canDisconnect = allowed && isTikTok && provider.connection?.status !== 'disconnected';
+          const canDisconnect = allowed && (isTikTok || isMeta) && provider.connection?.status !== 'disconnected';
           const youtubeConnections = provider.connections || [];
+          const metaConnections = isMeta ? provider.connections || [] : [];
           const unselectedResources = (provider.resources || []).filter((resource) => !resource.selected);
           const grantedScopes = (provider.authorization?.scopes || [])
             .filter((scope) => scope.status === 'granted')
             .map((scope) => scope.scope);
           const canStartYouTube =
             isYouTube && canConnect && (!provider.authorization || (provider.resources || []).length === 0);
+          const canStartMeta = isMeta && canConnect && provider.status !== 'authorizing';
           return (
             <article key={provider.id} className="provider-row">
               <div className="provider-main">
@@ -2474,7 +2861,7 @@ function Connections({
                 {!provider.implemented && (
                   <p className="muted">Feature-flagged until the complete provider slice and review evidence exist.</p>
                 )}
-                {isYouTube &&
+                {(isYouTube || isMeta) &&
                   provider.configuration?.warnings.map((warning) => (
                     <p key={warning} className="notice error">
                       Configuration: {warning.replaceAll('_', ' ')}
@@ -2497,19 +2884,40 @@ function Connections({
                 {isYouTube && provider.status === 'provider_error' && (
                   <p className="notice error">The latest authorization attempt failed at Google or YouTube.</p>
                 )}
+                {isMeta && provider.status === 'no_resources' && (
+                  <p className="notice">Meta returned no eligible resource with Page ANALYZE access.</p>
+                )}
+                {isMeta && provider.status === 'authorization_denied' && (
+                  <p className="notice">Authorization was cancelled. No Meta data was accessed.</p>
+                )}
+                {isMeta && provider.status === 'missing_scopes' && (
+                  <p className="notice error">
+                    Meta did not return the exact approved read-only scope set.
+                    {(provider.authorization?.missing_scopes || []).length > 0 && (
+                      <> Missing: {(provider.authorization?.missing_scopes || []).join(', ')}</>
+                    )}
+                  </p>
+                )}
+                {isMeta && provider.status === 'provider_error' && (
+                  <p className="notice error">
+                    The latest Meta authorization attempt failed without creating a connection.
+                  </p>
+                )}
                 {isTikTok && latestError === 'scope' && (
                   <p className="notice error">The latest sync reported a missing provider scope.</p>
                 )}
                 <div className="scope-list" aria-label={`${provider.name} requested scopes`}>
-                  {(isYouTube && provider.authorization
+                  {((isYouTube || isMeta) && provider.authorization
                     ? grantedScopes
                     : provider.requestedScopes.map((scope) => scope.name)
                   ).map((scope) => (
-                    <span key={scope}>{isYouTube && provider.authorization ? `Granted: ${scope}` : scope}</span>
+                    <span key={scope}>
+                      {(isYouTube || isMeta) && provider.authorization ? `Granted: ${scope}` : scope}
+                    </span>
                   ))}
                 </div>
-                {isYouTube && provider.authorization && grantedScopes.length === 0 && (
-                  <p className="muted">No YouTube product scope is currently granted.</p>
+                {(isYouTube || isMeta) && provider.authorization && grantedScopes.length === 0 && (
+                  <p className="muted">No approved product scope is currently granted.</p>
                 )}
 
                 {isYouTube && unselectedResources.length > 0 && (
@@ -2611,6 +3019,126 @@ function Connections({
                     ))}
                   </div>
                 )}
+
+                {isMeta && unselectedResources.length > 0 && (
+                  <div className="resource-list" aria-label={`${provider.name} resources available to connect`}>
+                    <h3>Available {isFacebook ? 'Pages' : 'professional accounts'}</h3>
+                    {unselectedResources.map((resource) => {
+                      const ResourceIcon = isFacebook ? Facebook : Instagram;
+                      return (
+                        <div key={resource.id} className="resource-row">
+                          <div className="channel-identity compact">
+                            {resource.thumbnail_url ? (
+                              <img src={resource.thumbnail_url} alt="" referrerPolicy="no-referrer" />
+                            ) : (
+                              <span className="channel-placeholder" aria-hidden>
+                                <ResourceIcon size={18} />
+                              </span>
+                            )}
+                            <div>
+                              <strong>{resource.display_name}</strong>
+                              <small>
+                                {resource.username ? `@${resource.username}` : resource.provider_resource_id}
+                              </small>
+                              {resource.source_page_name && <small>Linked Page: {resource.source_page_name}</small>}
+                              {resource.available === false && (
+                                <small className="notice error">
+                                  Unavailable:{' '}
+                                  {(resource.unavailable_reason || 'authorization_required').replaceAll('_', ' ')}
+                                </small>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => onMetaSelect(metaPath, resource.id)}
+                            disabled={!allowed || busy || resource.available === false}
+                          >
+                            <Link2 size={17} aria-hidden /> Select
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {isMeta && metaConnections.length > 0 && (
+                  <div className="resource-list" aria-label={`Connected ${provider.name} resources`}>
+                    <h3>Connected resources</h3>
+                    {metaConnections.map((connection) => {
+                      const ResourceIcon = isFacebook ? Facebook : Instagram;
+                      return (
+                        <div key={connection.id || connection.account?.id} className="resource-row connection-resource">
+                          <div className="channel-identity compact">
+                            {connection.account?.thumbnail_url ? (
+                              <img src={connection.account.thumbnail_url} alt="" referrerPolicy="no-referrer" />
+                            ) : (
+                              <span className="channel-placeholder" aria-hidden>
+                                <ResourceIcon size={18} />
+                              </span>
+                            )}
+                            <div>
+                              <strong>
+                                {connection.account?.display_name || connection.account?.id || provider.name}
+                              </strong>
+                              <small>
+                                Last sync {formatDate(connection.last_successful_sync_at)}; data through{' '}
+                                {formatDate(connection.data_through_at, { dateStyle: 'medium' })}
+                              </small>
+                              {connection.reconnect_reason && (
+                                <small className="notice error">
+                                  {connection.reconnect_reason.replaceAll('_', ' ')}
+                                </small>
+                              )}
+                              <div className="capability-list" aria-label="Resource capabilities">
+                                {(connection.capabilities || []).map((capability) => (
+                                  <span
+                                    key={capability.key}
+                                    className={capability.status === 'available' ? '' : 'delayed'}
+                                  >
+                                    {capability.key.replaceAll('_', ' ')}: {capability.status}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="button-row">
+                            <StatusBadge status={connection.status} />
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              disabled={!roleCanSync(role) || connection.status !== 'active' || busy}
+                              onClick={() => onMetaSync(provider.id as 'facebook_pages' | 'instagram', connection.id)}
+                            >
+                              <RefreshCw size={17} aria-hidden /> Sync
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!canConnect || busy}
+                              onClick={() => onMetaConnect(metaPath, connection.id)}
+                            >
+                              <ExternalLink size={17} aria-hidden /> Reauthorize
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              disabled={!allowed || busy}
+                              onClick={() =>
+                                onDisconnectRequest({
+                                  provider: metaPath,
+                                  connectionId: connection.id,
+                                  label: connection.account?.display_name || provider.name
+                                })
+                              }
+                            >
+                              <Unplug size={17} aria-hidden /> Disconnect
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
               <div className="button-row">
                 {isTikTok ? (
@@ -2649,6 +3177,29 @@ function Connections({
                       <Unplug size={18} aria-hidden /> Disconnect
                     </button>
                   </>
+                ) : isMeta ? (
+                  <>
+                    <button type="button" disabled={!canStartMeta || busy} onClick={() => onMetaConnect(metaPath)}>
+                      <ExternalLink size={18} aria-hidden />{' '}
+                      {provider.status === 'missing_scopes' ||
+                      provider.status === 'authorization_denied' ||
+                      provider.status === 'provider_error' ||
+                      provider.status === 'reconnect_required'
+                        ? 'Authorize again'
+                        : provider.authorization
+                          ? 'Refresh discovery'
+                          : `Connect ${isFacebook ? 'Facebook' : 'Instagram'}`}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        !allowed || !provider.authorization || provider.authorization.status === 'revoked' || busy
+                      }
+                      onClick={() => onDisconnectRequest({ provider: metaPath, label: provider.name })}
+                    >
+                      <Unplug size={18} aria-hidden /> Disconnect all
+                    </button>
+                  </>
                 ) : (
                   <button type="button" disabled>
                     <Lock size={18} aria-hidden /> Not enabled
@@ -2669,6 +3220,12 @@ function Connections({
               <p>
                 This attempts Google revocation first, then immediately deletes stored credentials, discovered channels,
                 and all YouTube snapshots tied to the authorization from this workspace even if revocation fails.
+              </p>
+            ) : disconnectTarget.provider === 'facebook' || disconnectTarget.provider === 'instagram' ? (
+              <p>
+                Disconnecting one of several selected Meta resources preserves the shared read-only grant. Disconnecting
+                the final Meta resource across Facebook and Instagram attempts permission revocation first, then
+                immediately deletes encrypted credentials and stored Meta snapshots even if provider revocation fails.
               </p>
             ) : (
               <p>

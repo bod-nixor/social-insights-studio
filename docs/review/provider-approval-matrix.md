@@ -18,10 +18,48 @@ Readiness labels:
 | Provider | Scope or permission | Visible feature | API methods | Stored data | Disconnect/deletion | Readiness |
 | --- | --- | --- | --- | --- | --- | --- |
 | TikTok | `user.info.basic`, `user.info.profile`, `user.info.stats`, `video.list` | Existing account, dashboard, content, export, and Looker Studio features | `/v2/user/info/`, `/v2/video/list/` | Encrypted token and normalized snapshots; no raw response by default | Provider revoke attempt plus existing local lifecycle | Locally implemented; external live status unchanged by this work |
-| Instagram | `instagram_business_basic`, `instagram_business_manage_insights` | Planned professional-account discovery and insights | Not implemented | None | Not implemented | Blocked |
-| Facebook Pages | `pages_show_list`, `pages_read_engagement`, `read_insights` | Planned Page discovery and insights | Not implemented | None | Not implemented | Blocked |
+| Instagram | `instagram_basic`, `instagram_manage_insights`, `pages_show_list`, `pages_read_engagement` | Explicit linked professional-account selection, stored account/content insights, sync, and disconnect/delete | Facebook Login for Business, `/me/accounts`, linked `instagram_business_account`, Instagram user/media/insights Graph edges | Encrypted app-user and Page tokens; normalized account/content snapshots; no raw response retention | Resource cleanup plus final-grant revocation; signed deauthorization/data-deletion purge | Locally implemented and configuration-ready; exact dashboard permissions/test-user/review/live gates blocked |
+| Facebook Pages | `pages_show_list`, `pages_read_engagement`, `read_insights` | Explicit Page selection, stored Page/content insights, sync, and disconnect/delete | Facebook Login for Business, `/me/accounts`, Page/posts/insights Graph edges | Encrypted app-user and Page tokens; normalized account/content snapshots; no raw response retention | Resource cleanup plus final-grant revocation; signed deauthorization/data-deletion purge | Locally implemented and configuration-ready; test-user/review/live gates blocked |
 | YouTube | Exact two-scope set documented below | Channel connection, stored analytics dashboard, and disconnect/delete | `channels.list`, `playlistItems.list`, `videos.list`, Analytics `reports.query`, OAuth token/revoke endpoints | Encrypted tokens plus normalized immutable channel, content, and Analytics snapshots; no raw response retention | Google revoke attempt followed by immediate local authorization-wide purge | Locally implemented and configuration-ready; test-user/verification/live blocked |
 | Website Analytics | `https://www.googleapis.com/auth/analytics.readonly` | Planned GA4 property discovery and reports | Not implemented | None | Not implemented | Blocked |
+
+## Meta Exact Authorization Contract
+
+Facebook Pages requests exactly `pages_show_list`, `pages_read_engagement`, and `read_insights`. Instagram via Facebook Login requests exactly `instagram_basic`, `instagram_manage_insights`, `pages_show_list`, and `pages_read_engagement`. Each provider uses a separate Facebook Login for Business user-access-token configuration containing only its exact set; the IDs must differ when both providers are enabled, and Meta's `config_id` replaces the normal URL `scope` parameter. Meta may add the automatic `public_profile` grant; the callback rejects missing required permissions and every other permission outside the approved read-only union.
+
+The exact callbacks are:
+
+- `https://<verified-production-domain>/api/integrations/facebook/callback`
+- `https://<verified-production-domain>/api/integrations/instagram/callback`
+
+Authorization discovers eligible Pages and linked professional accounts but creates no data source. The reviewer must explicitly select a resource. A reauthorization that no longer returns the selected resource marks it unavailable instead of choosing another resource. Account/content Graph reads occur only in the bounded worker; dashboard requests read stored snapshots.
+
+The source does not request or consume publishing, comment-management, messaging, ads, app events, demographic, webhook, or `business_management` permissions. Instagram Stories are excluded because retaining their short-lived insight window reliably would require webhooks, which are outside this slice. Meta documents that some Business Manager Page-role access paths require `ads_management` and `ads_read`; those resources are ineligible and the Instagram gate must stay closed rather than adding either permission.
+
+Most Instagram account metrics are `total_value` metrics. The worker stores explicit provider-reported 7/30/90-day rolling windows, not fabricated daily rows. Custom-range account totals remain unavailable.
+
+### Meta Reviewer Steps
+
+1. Show the public Privacy, Terms, Support, Status, and Data Deletion pages on the verified domain.
+2. Open Connections and show the relevant provider's exact requested permission list and disabled/configuration state where applicable.
+3. Complete Facebook Login for Business with the dedicated Meta test user and an eligible non-production Page.
+4. Return through the exact provider callback and show that no Page or Instagram account was silently selected.
+5. Select the intended Page or linked professional account explicitly, run the bounded worker, and open its stored-only dashboard/content view.
+6. Show missing metrics as unavailable rather than zero, then reauthorize without replacing the selected resource.
+7. Disconnect a Facebook/Instagram sibling without revoking another usable app-user selection; disconnect the final selected Meta resource and show local purge after the revocation attempt.
+8. Exercise a valid signed data-deletion request and its opaque status URL without exposing tokens, codes, secrets, or personal resources.
+
+### Current Meta Readiness
+
+| Level | Facebook Pages | Instagram | Evidence/blocker |
+| --- | --- | --- | --- |
+| Locally implemented | Yes | Yes | Migration, exact-scope validation, mocked Graph lifecycle tests, MariaDB worker/dashboard tests (including Instagram period semantics), explicit selection UI, encrypted resource credentials, sibling-aware revocation, and signed deletion handling are present. |
+| Configuration-ready | Yes | Yes, fail-closed | Both providers require separate Login for Business configuration IDs, exact redirects, and runtime-scope assertions. Instagram remains disabled unless its dedicated configuration exposes the exact four-scope set. |
+| Test-user ready | No — blocked | No — blocked | Requires Meta app/configuration, access-level confirmation, test user, eligible Page, and for Instagram a linked professional account whose access path does not require ads permissions. |
+| Verification-submission ready | No — blocked | No — blocked | Requires verified public settings, legal review, final reviewer credentials/justifications, and a recorded live walkthrough. |
+| Verified/live | No — blocked | No — blocked | No Meta approval, production enablement, deployment, or live-provider test was performed in this repository pass. |
+
+Detailed operational and data-boundary evidence is in [`docs/meta-readonly-integration.md`](../meta-readonly-integration.md).
 
 ## YouTube Exact Authorization Contract
 

@@ -26,6 +26,7 @@
       <ol>
         <li>Open the connected data source or workspace where the provider is authorized.</li>
         <li>Use the disconnect or revoke action for the provider if it is available in the product surface.</li>
+        <li>For Facebook Pages or Instagram, open Connections and disconnect the selected resource. A shared Meta grant remains active while another selected Facebook or Instagram resource still uses it. Removing the final selected Meta resource attempts revocation and then deletes local Meta credentials, discovered resources, sync jobs, content, and insight snapshots even if provider revocation fails.</li>
         <li>For YouTube, open the workspace Connections view and choose Disconnect. The service attempts Google revocation first and then immediately purges all locally stored credentials, discovered channels, and YouTube snapshots tied to that authorization.</li>
         <li>For the current TikTok Looker Studio connector, revoke the connector in Looker Studio and, if needed, revoke the app from your TikTok account settings.</li>
       </ol>
@@ -41,7 +42,7 @@
       </ul>
 
       <h2>Provider-side revocation</h2>
-      <p>You may also revoke Social Insights Studio in <a href="https://myaccount.google.com/connections" rel="noopener" target="_blank">Google Account third-party connections</a> or the relevant provider settings. Google revocation stops future access. When the next bounded sync detects a terminal Google revocation such as <code>invalid_grant</code>, the service immediately purges the local authorization and associated YouTube data; you may use the verified request path above instead of waiting for that detection.</p>
+      <p>You may also revoke Social Insights Studio in the relevant Facebook settings or in <a href="https://myaccount.google.com/connections" rel="noopener" target="_blank">Google Account third-party connections</a>. A valid Meta deauthorization or data-deletion callback purges the matching Facebook and Instagram authorization and returns an opaque confirmation status. Google revocation stops future access; when a bounded sync detects terminal Google revocation such as <code>invalid_grant</code>, the service immediately purges the local authorization and associated YouTube data. You may use the verified request path above instead of waiting for provider detection.</p>
       <p><a href="/">Return to Social Insights Studio</a></p>
     </article>
   </main>

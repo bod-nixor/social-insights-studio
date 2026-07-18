@@ -14,6 +14,7 @@ const { createPlatformRouter } = require('./platform/routes');
 const { validateMailConfiguration } = require('./platform/mail');
 const { getDeploymentReadinessCheck, getDeploymentVersion } = require('./platform/version');
 const { getYouTubeConfiguration } = require('./platform/youtube-config');
+const { getMetaConfiguration } = require('./platform/meta-config');
 
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -320,6 +321,7 @@ app.get('/health/version', (req, res) => {
 app.get('/health/ready', async (req, res) => {
   let database = 'not_configured';
   let youtubeFoundationReady = false;
+  let metaFoundationReady = false;
   if (process.env.DATABASE_URL) {
     let connection;
     try {
@@ -341,6 +343,32 @@ app.get('/health/ready', async (req, res) => {
            )`
       );
       youtubeFoundationReady = Number(foundationRows[0] && foundationRows[0].count) === 8;
+      const metaFoundationRows = await connection.query(
+        `SELECT COUNT(*) AS count FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (
+             'provider_authorizations',
+             'provider_authorization_credentials',
+             'provider_resources',
+             'provider_resource_credentials',
+             'workspace_provider_connections',
+             'meta_account_insight_snapshots',
+             'meta_callback_events',
+             'provider_request_events'
+           )`
+      );
+      if (Number(metaFoundationRows[0] && metaFoundationRows[0].count) === 8) {
+        const metaFoundationColumnRows = await connection.query(
+          `SELECT COUNT(*) AS count FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND (
+               (TABLE_NAME = 'meta_account_insight_snapshots'
+                AND COLUMN_NAME IN ('range_days', 'range_start_date', 'range_end_date'))
+               OR (TABLE_NAME = 'oauth_transactions' AND COLUMN_NAME = 'provider_config_id')
+             )`
+        );
+        metaFoundationReady = Number(metaFoundationColumnRows[0] && metaFoundationColumnRows[0].count) === 4;
+      }
     } catch (error) {
       database = 'unavailable';
     } finally {
@@ -353,16 +381,33 @@ app.get('/health/ready', async (req, res) => {
     foundationReady: youtubeFoundationReady,
     workerReady: true
   });
+  const facebookPages = getMetaConfiguration('facebook_pages', process.env, {
+    databaseReady: database === 'ready',
+    foundationReady: metaFoundationReady,
+    workerReady: true
+  });
+  const instagram = getMetaConfiguration('instagram', process.env, {
+    databaseReady: database === 'ready',
+    foundationReady: metaFoundationReady,
+    workerReady: true
+  });
   const body = {
     status: database === 'unavailable' ? 'not_ready' : 'ready',
     checks: {
       database,
       legacy_file_store: 'configured',
       deployment_metadata: deployment.status,
-      youtube: youtube.status
+      youtube: youtube.status,
+      facebook_pages: facebookPages.status,
+      instagram: instagram.status
     }
   };
-  const warnings = [...deployment.warnings, ...youtube.warnings];
+  const warnings = [
+    ...deployment.warnings,
+    ...youtube.warnings,
+    ...facebookPages.warnings,
+    ...instagram.warnings
+  ];
   if (warnings.length > 0) {
     body.warnings = [...new Set(warnings)];
   }

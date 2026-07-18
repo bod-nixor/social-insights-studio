@@ -28,7 +28,7 @@ These facts must be supplied or verified before provider review submissions or p
 ## Release Recommendation
 
 - TikTok connector and dashboard: source-ready after repository validation passes; live status still depends on production environment verification.
-- Instagram: blocked until implementation, Meta configuration, professional test account, and review evidence exist.
-- Facebook Pages: blocked until implementation, Meta configuration, Page test resource, and review evidence exist.
+- Instagram: source-ready behind an independent disabled-by-default gate; release remains blocked until the Meta dashboard exposes the exact `instagram_basic`, `instagram_manage_insights`, `pages_show_list`, and `pages_read_engagement` Facebook Login set, and until a linked professional test account, review evidence, legal approval, and live smoke test exist. Meta documents that some Business Manager Page-role paths additionally require ads permissions; any such resource is ineligible and must remain stopped.
+- Facebook Pages: source-ready behind a disabled-by-default gate; release remains blocked on exact Facebook Login for Business configuration, permission/access-level confirmation, an eligible Page test resource, review evidence, legal approval, and a live smoke test.
 - YouTube: source-ready behind a disabled-by-default gate; release remains blocked on Google OAuth configuration, verified-domain consent-screen setup, an eligible channel test resource, legal approval, and verification evidence.
 - Website Analytics: blocked until implementation, Google OAuth configuration, GA4 test property, and verification evidence exist.

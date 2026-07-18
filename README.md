@@ -1,6 +1,6 @@
 # Social Insights Studio
 
-Social Insights Studio is a workspace-based, multiplatform analytics application with read-only TikTok and gated YouTube verticals and the legacy TikTok Looker Studio connector preserved beside them. The standalone dashboard uses Express, React/Vite, MariaDB, server-side sessions, encrypted provider credentials, bounded one-shot worker syncs, stored snapshots, and CSV exports.
+Social Insights Studio is a workspace-based, multiplatform analytics application with read-only TikTok plus gated YouTube, Facebook Pages, and Instagram verticals. The legacy TikTok Looker Studio connector remains preserved beside them. The standalone dashboard uses Express, React/Vite, MariaDB, server-side sessions, encrypted provider credentials, bounded one-shot worker syncs, stored snapshots, and CSV exports.
 
 The production domain assumption remains `https://lstc.nixorcorporate.com`. Production deployment is cPanel/Passenger-compatible: the web process serves the API and compiled Vite app, migrations run as an explicit release command, and cron runs the bounded worker.
 
@@ -11,10 +11,10 @@ Production alignment is currently an evidence-backed assumption: local `phase-3-
 - `server/index.js` keeps the legacy connector routes and mounts the new application API under `/api`.
 - `server/platform/` contains auth, sessions, RBAC, provider connection lifecycles, sync, dashboard, and export services.
 - `server/migrations/` contains explicit MariaDB migrations. Migrations never run from normal web requests.
-- `server/worker.js` runs bounded cron-safe jobs for due TikTok and enabled YouTube connections.
+- `server/worker.js` runs bounded cron-safe jobs for due TikTok and enabled YouTube, Facebook Pages, and Instagram connections.
 - `apps/web/` contains the React/Vite application shell served by Express at `/` after `npm run web:build`.
 - `Code.gs` remains the legacy Apps Script connector. Do not delete the encrypted file store until a production migration/retirement plan is approved.
-- `server/platform/provider-registry.js` records the current provider catalog. TikTok and YouTube are implemented; YouTube is disabled by default until its Google OAuth configuration and verification evidence are ready. Instagram, Facebook Pages, and Website Analytics remain non-connectable.
+- `server/platform/provider-registry.js` records the current provider catalog. TikTok, YouTube, Facebook Pages, and Instagram are implemented. The three newer verticals are disabled by default until their exact OAuth configuration, provider-review evidence, and live test resources are ready. Website Analytics remains non-connectable.
 - Express serves hashed frontend files only from `/assets/`, serves the logo and standalone compliance pages from an explicit allowlist, and returns JSON for unknown `/api/*` routes.
 - `/privacy`, `/terms`, `/support`, `/data-deletion`, and `/status` remain public without a session. Their `.html` aliases remain available for provider-console compatibility.
 - Legacy `/app`, `/app/`, and `/app/*` URLs redirect permanently to the equivalent canonical-root path while preserving query parameters. `BASE_URL` remains the site origin with no path suffix.
@@ -57,7 +57,10 @@ Do not point destructive tests or reset commands at production or shared remote 
 - TikTok disconnect attempts provider revoke before local credential disabling and stops future sync jobs.
 - Workspace/session/user/scope/redirect-bound YouTube OAuth uses hashed state, S256 PKCE, offline incremental authorization, exact read-only scopes, encrypted access/refresh tokens, and explicit discovered-channel selection.
 - YouTube disconnect attempts Google revocation and immediately purges local credentials, resources, connections, and snapshots. Terminal external revocation (`invalid_grant`) causes the same local purge on detection.
-- Bounded worker syncs use MariaDB leases, refresh credentials when needed, write immutable profile/content/YouTube Analytics snapshots, record request/quota/retry metadata and partial/failed states, preserve last valid data, and stagger six-hour schedules.
+- Facebook Login for Business authorizations bind state to the workspace, session, user, provider, exact scopes, and exact callback. Page and linked Instagram professional resources require explicit selection; reauthorization never silently replaces the selected resource.
+- Meta app-user and Page tokens use the existing AES-256-GCM envelope. Page/content/Instagram insight requests run only in the worker, add `appsecret_proof`, and are bounded by time, page, item, retry, and provider-usage limits.
+- Meta disconnect, deauthorization, and data-deletion callbacks revoke where possible and purge local credentials, resources, jobs, content, and snapshots. Signed callbacks are HMAC-verified, time-bounded, and replay-protected.
+- Bounded worker syncs use MariaDB leases, refresh credentials when needed, write immutable profile/content/provider Analytics snapshots, record request/quota/retry metadata and partial/failed states, preserve last valid data, and stagger six-hour schedules.
 - Dashboard APIs read stored snapshots only; page requests do not fetch provider APIs directly.
 - CSV content exports are workspace-scoped, analyst-or-higher, formula-injection safe, and recorded in export tables.
 
@@ -79,6 +82,17 @@ Important variables:
 - `YOUTUBE_CLIENT_ID`
 - `YOUTUBE_CLIENT_SECRET`
 - `YOUTUBE_REDIRECT_URI`
+- `FEATURE_FACEBOOK_PAGES_CONNECTOR` (defaults to disabled)
+- `FEATURE_INSTAGRAM_CONNECTOR` (defaults to disabled)
+- `META_APP_ID`
+- `META_APP_SECRET`
+- `META_FACEBOOK_LOGIN_CONFIG_ID`
+- `META_INSTAGRAM_LOGIN_CONFIG_ID`
+- `META_GRAPH_API_VERSION`
+- `FACEBOOK_REDIRECT_URI`
+- `INSTAGRAM_REDIRECT_URI`
+- `META_FACEBOOK_APPROVED_SCOPES`
+- `META_INSTAGRAM_APPROVED_SCOPES`
 - `GOOGLE_OIDC_CLIENT_ID` and mail settings when production auth providers are enabled
 - `LOOKER_CLIENT_ID`
 - `LOOKER_REDIRECT_URIS`
@@ -88,7 +102,7 @@ Important variables:
 - `TRUST_PROXY`
 - `APP_COMMIT_SHA`
 - `APP_BUILD_TIME` or `APP_RELEASE`
-- provider feature gates such as `FEATURE_TIKTOK_CONNECTOR`, `YOUTUBE_ENABLED`, and `FEATURE_GA4_CONNECTOR`
+- provider feature gates such as `FEATURE_TIKTOK_CONNECTOR`, `YOUTUBE_ENABLED`, `FEATURE_FACEBOOK_PAGES_CONNECTOR`, `FEATURE_INSTAGRAM_CONNECTOR`, and `FEATURE_GA4_CONNECTOR`
 
 Google OIDC currently fails closed unless configured and completed; magic links are available with a development-only mail adapter boundary.
 
@@ -124,7 +138,7 @@ For a controlled cPanel staging deployment and TikTok Sandbox verification, use
 10. Set `LOOKER_REDIRECT_URIS` to the exact Apps Script callback URI for the retained connector.
 11. Use a precise `TRUST_PROXY` hop count for Passenger/Cloudflare.
 
-Backups, restore testing, legal retention approvals, Google OAuth/YouTube verification, mail delivery, and production provider reviews are external release gates. The YouTube source and reviewer checklist are documented in [`docs/youtube-readonly-integration.md`](docs/youtube-readonly-integration.md).
+Backups, restore testing, legal retention approvals, Google OAuth/YouTube verification, Meta dashboard configuration/review, mail delivery, and production provider reviews are external release gates. Reviewer and operations notes are documented in [`docs/youtube-readonly-integration.md`](docs/youtube-readonly-integration.md) and [`docs/meta-readonly-integration.md`](docs/meta-readonly-integration.md).
 
 ## Legacy Looker Connector
 
@@ -158,3 +172,20 @@ YouTube is gated by `YOUTUBE_ENABLED=false` by default and requests exactly:
 - `https://www.googleapis.com/auth/yt-analytics.readonly`
 
 The worker reads owned/managed channel identity, uploads/video metadata, lifetime channel/video counters, and non-monetary YouTube Analytics metrics. A default run uses at most five upload-playlist pages and five 50-video batches, for an estimated maximum of 11 YouTube Data API quota units plus bounded Analytics requests. The dashboard exposes provider data-through dates and leaves unavailable metrics as `N/A`; it does not infer engagement or revenue.
+
+## Meta Read-Only Integrations
+
+Facebook Pages is gated by `FEATURE_FACEBOOK_PAGES_CONNECTOR=false` by default and requests exactly:
+
+- `pages_show_list`
+- `pages_read_engagement`
+- `read_insights`
+
+Instagram uses Facebook Login only and is independently gated by `FEATURE_INSTAGRAM_CONNECTOR=false`. It requests exactly:
+
+- `instagram_basic`
+- `instagram_manage_insights`
+- `pages_show_list`
+- `pages_read_engagement`
+
+Runtime scope assertions must match those sets exactly or the provider remains non-connectable. The callbacks are `/api/integrations/facebook/callback` and `/api/integrations/instagram/callback`. Neither flow requests publishing, comment-management, messaging, ads, app events, demographics, webhooks, or `business_management`. Instagram must remain disabled until those exact permissions are confirmed for the configured Facebook Login for Business path. Resources whose Business Manager access path requires Meta's additional ads permissions are deliberately unsupported. Instagram account totals are stored as explicit provider-reported 7/30/90-day windows, not synthetic daily values.

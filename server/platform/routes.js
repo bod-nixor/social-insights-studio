@@ -38,6 +38,15 @@ const {
 } = require('./youtube-connection-service');
 const { getYouTubeDashboard } = require('./youtube-dashboard-service');
 const {
+  completeMetaConnection,
+  disconnectMeta,
+  getMetaDeletionStatus,
+  processMetaSignedCallback,
+  selectMetaResource,
+  startMetaConnection
+} = require('./meta-connection-service');
+const { getMetaDashboard } = require('./meta-dashboard-service');
+const {
   getPublicProviderCatalog,
   listWorkspaceProviderCatalog
 } = require('./provider-registry');
@@ -123,6 +132,27 @@ function youtubeCallbackOutcome(error) {
   ) {
     return 'provider_error';
   }
+  return 'failed';
+}
+
+function metaCallbackOutcome(provider, error) {
+  const code = error && (error.code || error.message);
+  if (code === `${provider}_authorization_denied`) return 'denied';
+  if (code === `${provider}_provider_subject_mismatch`) return 'account_mismatch';
+  if (code === `${provider}_required_scopes_missing`) return 'missing_scopes';
+  if (
+    code === `${provider}_oauth_redirect_mismatch` ||
+    code === `${provider}_oauth_config_mismatch` ||
+    code === `${provider}_not_configured`
+  ) {
+    return 'configuration_error';
+  }
+  if (
+    code === `${provider}_authorization_failed` ||
+    code === `${provider}_token_exchange_failed` ||
+    code === `${provider}_long_lived_token_failed` ||
+    code === `${provider}_resource_discovery_failed`
+  ) return 'provider_error';
   return 'failed';
 }
 
@@ -372,6 +402,52 @@ function createPlatformRouter() {
     }
   });
 
+  for (const route of [
+    { path: 'facebook', provider: 'facebook_pages' },
+    { path: 'instagram', provider: 'instagram' }
+  ]) {
+    router.post(`/workspaces/:workspaceId/connections/${route.path}/start`, requireSession, requireCsrf, async (req, res) => {
+      try {
+        return res.json(await startMetaConnection({
+          provider: route.provider,
+          userId: req.session.user.id,
+          sessionId: req.session.id,
+          workspaceId: req.params.workspaceId,
+          returnPath: (req.body && req.body.return_path) || '/',
+          targetConnectionId: (req.body && req.body.connection_id) || null
+        }));
+      } catch (error) {
+        return sendError(res, error);
+      }
+    });
+
+    router.post(`/workspaces/:workspaceId/connections/${route.path}/select`, requireSession, requireCsrf, async (req, res) => {
+      try {
+        return res.status(201).json(await selectMetaResource(
+          req.session.user.id,
+          req.params.workspaceId,
+          route.provider,
+          req.body && req.body.resource_id
+        ));
+      } catch (error) {
+        return sendError(res, error);
+      }
+    });
+
+    router.delete(`/workspaces/:workspaceId/connections/${route.path}`, requireSession, requireCsrf, async (req, res) => {
+      try {
+        return res.json(await disconnectMeta(
+          req.session.user.id,
+          req.params.workspaceId,
+          route.provider,
+          req.body && req.body.connection_id ? req.body.connection_id : null
+        ));
+      } catch (error) {
+        return sendError(res, error);
+      }
+    });
+  }
+
   router.get('/workspaces/:workspaceId/dashboard', requireSession, async (req, res) => {
     try {
       return res.json(await getDashboard(req.session.user.id, req.params.workspaceId, req.query));
@@ -383,6 +459,32 @@ function createPlatformRouter() {
   router.get('/workspaces/:workspaceId/providers/youtube/dashboard', requireSession, async (req, res) => {
     try {
       return res.json(await getYouTubeDashboard(req.session.user.id, req.params.workspaceId, req.query));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/workspaces/:workspaceId/providers/facebook_pages/dashboard', requireSession, async (req, res) => {
+    try {
+      return res.json(await getMetaDashboard(
+        req.session.user.id,
+        req.params.workspaceId,
+        'facebook_pages',
+        req.query
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/workspaces/:workspaceId/providers/instagram/dashboard', requireSession, async (req, res) => {
+    try {
+      return res.json(await getMetaDashboard(
+        req.session.user.id,
+        req.params.workspaceId,
+        'instagram',
+        req.query
+      ));
     } catch (error) {
       return sendError(res, error);
     }
@@ -445,6 +547,19 @@ function createPlatformRouter() {
     }
   });
 
+  for (const provider of ['facebook_pages', 'instagram']) {
+    router.post(`/workspaces/:workspaceId/providers/${provider}/sync-runs`, requireSession, requireCsrf, async (req, res) => {
+      try {
+        return res.status(202).json(await requestManualSync(req.session.user.id, req.params.workspaceId, {
+          provider,
+          connectionId: (req.body && req.body.connection_id) || null
+        }));
+      } catch (error) {
+        return sendError(res, error);
+      }
+    });
+  }
+
   router.get('/workspaces/:workspaceId/exports/content.csv', requireSession, async (req, res) => {
     try {
       const result = await createContentCsvExport(req.session.user.id, req.params.workspaceId, req.query);
@@ -485,6 +600,65 @@ function createPlatformRouter() {
       return res.redirect(303, `${destination.pathname}${destination.search}${destination.hash}`);
     } catch (error) {
       return res.redirect(303, `/?view=connections&youtube=${youtubeCallbackOutcome(error)}`);
+    }
+  });
+
+  for (const callback of [
+    { path: 'facebook', provider: 'facebook_pages', queryKey: 'facebook' },
+    { path: 'instagram', provider: 'instagram', queryKey: 'instagram' }
+  ]) {
+    router.get(`/integrations/${callback.path}/callback`, async (req, res) => {
+      try {
+        const cookies = parseCookies(req.get('cookie'));
+        const session = await authenticate(cookies[SESSION_COOKIE]);
+        if (!session) return res.redirect(303, `/?view=connections&${callback.queryKey}=failed`);
+        const result = await completeMetaConnection({
+          provider: callback.provider,
+          code: req.query.code,
+          state: req.query.state,
+          providerError: req.query.error,
+          sessionId: session.id,
+          userId: session.user.id
+        });
+        const destination = new URL(result.return_path || '/', 'https://social-insights.local');
+        destination.searchParams.set(callback.queryKey, result.outcome);
+        return res.redirect(303, `${destination.pathname}${destination.search}${destination.hash}`);
+      } catch (error) {
+        return res.redirect(
+          303,
+          `/?view=connections&${callback.queryKey}=${metaCallbackOutcome(callback.provider, error)}`
+        );
+      }
+    });
+  }
+
+  router.post('/integrations/meta/data-deletion', async (req, res) => {
+    try {
+      const result = await processMetaSignedCallback('data_deletion', req.body && req.body.signed_request);
+      const base = String(process.env.BASE_URL || '').replace(/\/+$/, '');
+      return res.json({
+        url: `${base}/api/integrations/meta/deletion-status/${encodeURIComponent(result.confirmation_code)}`,
+        confirmation_code: result.confirmation_code
+      });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/integrations/meta/deauthorize', async (req, res) => {
+    try {
+      const result = await processMetaSignedCallback('deauthorization', req.body && req.body.signed_request);
+      return res.json({ success: result.status === 'completed' });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/integrations/meta/deletion-status/:confirmationCode', async (req, res) => {
+    try {
+      return res.json(await getMetaDeletionStatus(req.params.confirmationCode));
+    } catch (error) {
+      return sendError(res, error);
     }
   });
 

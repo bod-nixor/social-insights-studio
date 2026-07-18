@@ -41,7 +41,8 @@
       <h2>Provider-specific notes</h2>
       <ul>
         <li>TikTok data is accessed through the approved TikTok scopes configured for the current connector.</li>
-        <li>Instagram and Facebook Pages data, when enabled, is limited to professional accounts and Pages the authorizing user can access.</li>
+        <li>Facebook Pages requests only <code>pages_show_list</code>, <code>pages_read_engagement</code>, and <code>read_insights</code>. Instagram via Facebook Login requests only <code>instagram_basic</code>, <code>instagram_manage_insights</code>, and the two Page discovery permissions <code>pages_show_list</code> and <code>pages_read_engagement</code>.</li>
+        <li>Meta data is limited to Pages and linked professional Instagram accounts the authorizing user explicitly selects. Social Insights Studio does not request publishing, comment-management, messaging, advertising, app-events, demographic, webhook, or broad business-management access.</li>
         <li>YouTube uses only <code>youtube.readonly</code> to discover authorized channels and read channel/video metadata, and <code>yt-analytics.readonly</code> to read channel and video Analytics reports. Social Insights Studio does not request YouTube write, upload, advertising, messaging, or monetary-data access.</li>
         <li>YouTube users are also subject to the <a href="https://www.youtube.com/t/terms" rel="noopener" target="_blank">YouTube Terms of Service</a>.</li>
       </ul>
@@ -52,6 +53,7 @@
       <h2>Storage and retention</h2>
       <ul>
         <li>Provider credentials are stored server-side and outside the public web root.</li>
+        <li>Meta app-user and Page tokens are encrypted and retained while their authorization or selected resource is active, with a bounded 30-day deletion grace period after token expiry to allow reauthorization. Meta disconnect, deauthorization, data-deletion, and expired-authorization cleanup flows delete the associated credentials, resources, sync jobs, content, and stored insight snapshots. Raw Meta API responses are not retained by default.</li>
         <li>Encrypted YouTube token records are retained only while the authorization is active. Disconnecting YouTube attempts Google revocation and immediately deletes credentials, discovered channels, and associated local snapshots, even if provider revocation fails.</li>
         <li>Normalized channel, video, and Analytics snapshots are retained only for the active user-facing connection purpose. Social Insights Studio validates the authorization and refreshes stored YouTube data within each 30-day policy window; if an authorization cannot be validated by its deadline, the associated YouTube data is deleted. Raw Google or YouTube API responses are not stored by default.</li>
         <li>Generated reports should have a short retention window and be deleted after expiry.</li>
@@ -63,6 +65,7 @@
       <h2>Your choices</h2>
       <ul>
         <li>You can disconnect supported provider connections from the product surface where available.</li>
+        <li>You can revoke Meta access from the relevant Facebook settings. A valid Meta deauthorization or data-deletion request triggers local deletion for the matching Meta authorization.</li>
         <li>You can review or revoke Google access directly in <a href="https://myaccount.google.com/connections" rel="noopener" target="_blank">Google Account third-party connections</a>.</li>
         <li>You can request deletion using the <a href="/data-deletion">data deletion instructions</a>.</li>
       </ul>

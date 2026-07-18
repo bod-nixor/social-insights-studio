@@ -40,8 +40,10 @@ test('implemented providers remain gated until their runtime configuration is co
   const byId = Object.fromEntries(providers.map(provider => [provider.id, provider]));
 
   assert.equal(byId.tiktok.implemented, true);
-  assert.equal(byId.instagram.implemented, false);
-  assert.equal(byId.facebook_pages.implemented, false);
+  assert.equal(byId.instagram.implemented, true);
+  assert.equal(byId.instagram.status, 'configuration_required');
+  assert.equal(byId.facebook_pages.implemented, true);
+  assert.equal(byId.facebook_pages.status, 'configuration_required');
   assert.equal(byId.youtube.implemented, true);
   assert.equal(byId.youtube.status, 'configuration_required');
   assert.equal(byId.google_analytics_4.implemented, false);
@@ -58,6 +60,25 @@ test('YouTube uses only the approved read-only scope pair and is disabled by def
     'https://www.googleapis.com/auth/youtube.readonly',
     'https://www.googleapis.com/auth/yt-analytics.readonly'
   ]);
+});
+
+test('Meta catalog uses only the dashboard-evidenced Facebook Login read-only scopes', () => {
+  const catalog = getProviderCatalog({});
+  const facebook = catalog.find(provider => provider.id === 'facebook_pages');
+  const instagram = catalog.find(provider => provider.id === 'instagram');
+
+  assert.deepEqual(facebook.requestedScopes.map(scope => scope.name), [
+    'pages_show_list',
+    'pages_read_engagement',
+    'read_insights'
+  ]);
+  assert.deepEqual(instagram.requestedScopes.map(scope => scope.name), [
+    'instagram_basic',
+    'instagram_manage_insights',
+    'pages_show_list',
+    'pages_read_engagement'
+  ]);
+  assert.equal(facebook.metrics.includes('facebook.page_impressions'), false);
 });
 
 test('provider catalog does not include write, ads, upload, messaging, or monetary scopes', () => {

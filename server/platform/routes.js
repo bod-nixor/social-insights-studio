@@ -70,6 +70,16 @@ const {
   listWorkspaceProviderCatalog
 } = require('./provider-registry');
 const { requestManualSync } = require('./sync-service');
+const {
+  consumeDownloadGrant,
+  createDownloadGrant,
+  deleteReport,
+  enqueueReport,
+  getPublicReportConfiguration,
+  getReport,
+  listReports,
+  previewReport
+} = require('./report-service');
 const { hashSecret: hashValue, parseCookies, randomToken, serializeCookie } = require('./security');
 
 function isSecureCookie(req) {
@@ -225,6 +235,10 @@ function createPlatformRouter() {
 
   router.get('/providers/catalog', async (req, res) => {
     return res.json({ providers: getPublicProviderCatalog() });
+  });
+
+  router.get('/reports/configuration', requireSession, async (req, res) => {
+    return res.json({ reporting: getPublicReportConfiguration() });
   });
 
   router.post('/auth/magic-link/request', async (req, res) => {
@@ -693,6 +707,73 @@ function createPlatformRouter() {
     try {
       return res.json({
         providers: await listWorkspaceProviderCatalog(req.session.user.id, req.params.workspaceId)
+      });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/workspaces/:workspaceId/reports/preview', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await previewReport(req.session.user.id, req.params.workspaceId, req.body));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/workspaces/:workspaceId/reports', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.status(202).json(await enqueueReport(req.session.user.id, req.params.workspaceId, req.body));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/workspaces/:workspaceId/reports', requireSession, async (req, res) => {
+    try {
+      return res.json(await listReports(req.session.user.id, req.params.workspaceId));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/workspaces/:workspaceId/reports/:reportRunId', requireSession, async (req, res) => {
+    try {
+      return res.json(await getReport(req.session.user.id, req.params.workspaceId, req.params.reportRunId));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/workspaces/:workspaceId/reports/:reportRunId/download-grants', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.status(201).json(await createDownloadGrant(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.params.reportRunId
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.delete('/workspaces/:workspaceId/reports/:reportRunId', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await deleteReport(req.session.user.id, req.params.workspaceId, req.params.reportRunId));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/report-downloads/:token', requireSession, async (req, res) => {
+    try {
+      const artifact = await consumeDownloadGrant(req.session.user.id, req.params.token);
+      res.setHeader('content-type', artifact.mimeType);
+      res.setHeader('content-length', artifact.byteSize);
+      res.setHeader('content-disposition', `attachment; filename="${artifact.filename.replace(/"/g, '')}"`);
+      res.setHeader('cache-control', 'private, no-store, max-age=0');
+      return res.sendFile(artifact.path, error => {
+        if (error && !res.headersSent) sendError(res, error);
       });
     } catch (error) {
       return sendError(res, error);

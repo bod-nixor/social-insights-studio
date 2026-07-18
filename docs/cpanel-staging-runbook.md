@@ -9,6 +9,10 @@ Do not modify DNS, TikTok production settings, production credentials, or existi
 - Standalone dashboard TikTok callback route: `GET /api/integrations/tiktok/callback`
 - Exact standalone staging callback URI: `https://lstc.nixorcorporate.com/api/integrations/tiktok/callback`
 - Legacy connector TikTok callback route retained for Looker: `GET /auth/tiktok/callback`
+- YouTube callback route: `GET /api/integrations/youtube/callback`
+- Facebook Pages callback route: `GET /api/integrations/facebook/callback`
+- Instagram callback route: `GET /api/integrations/instagram/callback`
+- Website Analytics callback route: `GET /api/integrations/google-analytics/callback`
 - Canonical React application URL: `https://lstc.nixorcorporate.com/`
 - Public compliance URLs: `/privacy`, `/terms`, `/support`, `/data-deletion`, and `/status`, with `.html` aliases retained.
 - Legacy application URLs under `/app` return a permanent same-origin redirect to the equivalent root path and preserve the query string.
@@ -39,7 +43,8 @@ The frontend uses Vite 7, which requires Node.js `20.19+` or `22.12+`; prefer cP
 - Local `db:seed` and `db:reset` refuse `NODE_ENV=production`; do not run either command on staging.
 - Standalone OAuth transactions, sessions, CSRF, credentials, sync jobs, snapshots, and audit logs are stored in MariaDB.
 - Legacy Looker token/state file stores remain file-backed and must stay outside `public_html`.
-- Cron workers use MariaDB leases in `sync_jobs` and bounded time budgets.
+- Separate cron commands use MariaDB leases and bounded time budgets for provider syncs and PDF generation/expiry cleanup.
+- PDF artifacts are never web-root files. Production reporting fails closed unless an absolute private `REPORT_ARTIFACT_ROOT` is configured and `FEATURE_PDF_REPORTS=true` is explicit.
 - Production cookies are emitted with `Secure`, session cookies are `HttpOnly`, and CSRF cookies use `SameSite=Lax`.
 - Deployment provenance is reported from sanitized `APP_COMMIT_SHA`, `APP_BUILD_TIME`, and `APP_RELEASE` values. Missing commit metadata is a production warning, not a build-time secret dump.
 - `BASE_URL` is the origin `https://lstc.nixorcorporate.com` with no application-path suffix.
@@ -58,7 +63,7 @@ The frontend uses Vite 7, which requires Node.js `20.19+` or `22.12+`; prefer cP
    - Application startup file: `server/index.js`.
    - Application URL: `https://lstc.nixorcorporate.com`.
 6. Configure environment variables from `.env.staging.example` with real staging values. Set `APP_COMMIT_SHA` to the exact deployed source commit. Do not paste secrets into Git.
-7. Create a private writable directory outside public web root, for example `/home/CPANEL_USER/secure/social-insights-staging`, with permissions `700`.
+7. Create private writable directories outside the public web root, including `/home/CPANEL_USER/secure/social-insights-staging/report-artifacts`, with permissions `700` and ownership shared by Passenger and cron.
 8. Configure cron after the app and migrations pass, using the worker command below.
 9. Restart the Passenger app only after preflight and migrations pass.
 
@@ -97,6 +102,10 @@ Use `.env.staging.example` as the sanitized template. Required staging values in
 - `APP_COMMIT_SHA`
 - `APP_BUILD_TIME` or `APP_RELEASE`
 - `GA4_CLIENT_ID`, `GA4_CLIENT_SECRET`, and `GA4_REDIRECT_URI=https://lstc.nixorcorporate.com/api/integrations/google-analytics/callback` only when the dedicated Website Analytics review client is being exercised
+- `WORKER_OVERDUE_SECONDS=1800`
+- `FEATURE_PDF_REPORTS=false` until private storage, report cron, monitoring, and the staged lifecycle smoke are ready
+- `REPORT_ARTIFACT_ROOT=/home/CPANEL_USER/secure/social-insights-staging/report-artifacts`
+- the bounded `REPORT_*` settings from `.env.staging.example`
 
 Provider feature gates should remain conservative:
 
@@ -105,6 +114,7 @@ Provider feature gates should remain conservative:
 - `FEATURE_FACEBOOK_PAGES_CONNECTOR=0`
 - `YOUTUBE_ENABLED=false` until the dedicated Google OAuth configuration and verification checklist is being exercised
 - `FEATURE_GA4_CONNECTOR=0` until the dedicated client differs from Google sign-in and YouTube, both Analytics APIs are enabled, the exact redirect and consent test user are configured, and an eligible non-production property is ready
+- `FEATURE_PDF_REPORTS=false` until the private artifact root and separate report cron have passed preflight and staging smoke
 
 `/health/version` must not expose host paths, dependency inventories, full environment dumps, or secret values.
 - `SYNC_INTERVAL_SECONDS`, `SYNC_STAGGER_SECONDS`, `SYNC_LEASE_SECONDS`, `SYNC_RETRY_BASE_SECONDS`, `SYNC_RETRY_MAX_SECONDS`, `MANUAL_SYNC_COOLDOWN_SECONDS`, `WORKER_TIME_BUDGET_SECONDS`
@@ -128,6 +138,8 @@ Create private writable paths:
 ```bash
 mkdir -p /home/CPANEL_USER/secure/social-insights-staging
 chmod 700 /home/CPANEL_USER/secure/social-insights-staging
+mkdir -p /home/CPANEL_USER/secure/social-insights-staging/report-artifacts
+chmod 700 /home/CPANEL_USER/secure/social-insights-staging/report-artifacts
 ```
 
 Install production backend dependencies and frontend build dependencies:
@@ -228,14 +240,19 @@ Worker smoke:
 
 ```bash
 node server/worker.js sync-due --time-budget-seconds 1
+node server/worker.js reports-due --time-budget-seconds 1
 ```
 
-Cron command:
+Run the two commands as separate cron entries every five minutes:
 
 ```bash
 cd /home/CPANEL_USER/apps/social-insights-staging/current && \
 node server/worker.js sync-due --time-budget-seconds 240 \
 >> /home/CPANEL_USER/logs/social-insights-worker.log 2>&1
+
+cd /home/CPANEL_USER/apps/social-insights-staging/current && \
+node server/worker.js reports-due --time-budget-seconds 240 \
+>> /home/CPANEL_USER/logs/social-insights-reports.log 2>&1
 ```
 
 If cPanel cron does not inherit the Node app environment variables, create an untracked `.env` from `.env.staging.example` with real values and permissions `600`, or use a private shell wrapper that exports the same variables before running the worker.
@@ -263,7 +280,10 @@ If cPanel cron does not inherit the Node app environment variables, create an un
 
 10. Confirm `/privacy`, `/terms`, `/support`, `/data-deletion`, and `/status` work without a session, along with their `.html` aliases.
 11. Confirm an unknown `/api/*` route returns a JSON `404`, while an arbitrary path such as `/server/index.js` does not return source or the React shell.
-12. Do not run `npm run db:seed` or `npm run db:reset` on staging.
+12. Confirm readiness reports categorical `sync_queue` and `report_queue` states without paths, job IDs, or user/resource identifiers. Treat `overdue` as a cron alert, not a Passenger restart signal.
+13. After all prior checks pass, configure the private report root, enable `FEATURE_PDF_REPORTS=true`, rerun preflight, restart Passenger, and create one single-resource report as an Analyst. Confirm queued/running/completed states, one successful download, failed replay of the same download grant, early deletion, and removal of its private file.
+14. Create a second fixture report, set up only a controlled non-production expiry test, run `reports-due`, and confirm its DB state becomes expired and the file is removed. Never edit production expiry timestamps for a smoke test.
+15. Do not run `npm run db:seed` or `npm run db:reset` on staging.
 
 ## TikTok Sandbox Portal Actions
 
@@ -355,5 +375,8 @@ Database rollback:
 - Optional Google OIDC client setup and browser UI enablement if Google sign-in is required.
 - TikTok Sandbox app settings, sandbox user access, and real consent flow completion.
 - Backup restore drill.
+- Private report-storage capacity/permissions, report cron, seven-day cleanup, and staged lifecycle validation.
 - cPanel/Passenger restart validation on the actual host.
 - Confirmation that the legacy Looker deployment remains untouched.
+
+The consolidated production activation, incident, key/provider-secret rotation, deletion, backup/restore, queue-alert, Cloudflare, and ModSecurity boundary is in [`docs/operations/production-operations.md`](operations/production-operations.md).

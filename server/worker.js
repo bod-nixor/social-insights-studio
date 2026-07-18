@@ -3,6 +3,7 @@ const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 const { closePool } = require('./database');
 const { runDueSyncs } = require('./platform/sync-service');
+const { runDueReports } = require('./platform/report-worker-service');
 
 function getArgValue(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -12,12 +13,17 @@ function getArgValue(name, fallback) {
 
 async function main() {
   const command = process.argv[2];
-  if (command !== 'sync-due') {
-    console.error('Usage: node server/worker.js sync-due --time-budget-seconds 240');
+  if (!['sync-due', 'reports-due'].includes(command)) {
+    console.error('Usage: node server/worker.js <sync-due|reports-due> --time-budget-seconds 240');
     process.exitCode = 1;
     return;
   }
   const timeBudgetSeconds = Number(getArgValue('--time-budget-seconds', process.env.WORKER_TIME_BUDGET_SECONDS || 240));
+  if (command === 'reports-due') {
+    const result = await runDueReports({ timeBudgetSeconds });
+    console.log(JSON.stringify(result));
+    return;
+  }
   const result = await runDueSyncs({ timeBudgetSeconds });
   console.log(JSON.stringify({
     processed: result.processed,

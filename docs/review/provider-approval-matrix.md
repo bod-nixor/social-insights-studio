@@ -4,6 +4,8 @@ Documentation verification date: 2026-07-18
 
 This matrix records implementation and submission evidence. It does not claim that Google, YouTube, TikTok, Meta, or any other provider has approved the application.
 
+The complete one-row-per-permission evidence is maintained in [`exact-permission-matrix.md`](exact-permission-matrix.md). Reviewer accounts, demo scripts, screenshots, screencasts, external configuration, and stop conditions are in [`submission-evidence-checklist.md`](submission-evidence-checklist.md).
+
 Readiness labels:
 
 - **Locally implemented**: source and synthetic tests exist in this repository.

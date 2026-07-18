@@ -16,6 +16,7 @@ const { getDeploymentReadinessCheck, getDeploymentVersion } = require('./platfor
 const { getYouTubeConfiguration } = require('./platform/youtube-config');
 const { getMetaConfiguration } = require('./platform/meta-config');
 const { getGoogleAnalyticsConfiguration } = require('./platform/google-analytics-config');
+const { getReportConfiguration, getReportProductionErrors } = require('./platform/report-config');
 
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -136,6 +137,10 @@ function validateRequiredEnv(env = process.env) {
     }
     if ((env.ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).includes('*')) {
       throw new Error('ALLOWED_ORIGINS must not contain wildcard origins in production.');
+    }
+    const reportErrors = getReportProductionErrors(env);
+    if (reportErrors.length > 0) {
+      throw new Error(`PDF report configuration is invalid: ${reportErrors.join(' ')}`);
     }
     const expectedTikTokRedirect = `${parsedBaseUrl.origin}/api/integrations/tiktok/callback`;
     const configuredTikTokRedirect = env.TIKTOK_REDIRECT_URI || expectedTikTokRedirect;
@@ -321,6 +326,8 @@ app.get('/health/version', (req, res) => {
 
 app.get('/health/ready', async (req, res) => {
   let database = 'not_configured';
+  let syncQueue = 'not_configured';
+  let reportQueue = 'not_configured';
   let youtubeFoundationReady = false;
   let metaFoundationReady = false;
   let ga4FoundationReady = false;
@@ -387,6 +394,23 @@ app.get('/health/ready', async (req, res) => {
         );
         metaFoundationReady = Number(metaFoundationColumnRows[0] && metaFoundationColumnRows[0].count) === 4;
       }
+      const overdueSeconds = Math.min(Math.max(Number(process.env.WORKER_OVERDUE_SECONDS) || 1800, 300), 86400);
+      const syncQueueRows = await connection.query(
+        `SELECT COUNT(*) AS count
+         FROM sync_jobs
+         WHERE (status = 'due' AND run_after < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? SECOND))
+            OR (status = 'leased' AND lease_expires_at < UTC_TIMESTAMP(3))`,
+        [overdueSeconds]
+      );
+      syncQueue = Number(syncQueueRows[0] && syncQueueRows[0].count) > 0 ? 'overdue' : 'ready';
+      const reportQueueRows = await connection.query(
+        `SELECT COUNT(*) AS count
+         FROM report_runs
+         WHERE (status = 'queued' AND run_after < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? SECOND))
+            OR (status = 'running' AND lease_expires_at < UTC_TIMESTAMP(3))`,
+        [overdueSeconds]
+      );
+      reportQueue = Number(reportQueueRows[0] && reportQueueRows[0].count) > 0 ? 'overdue' : 'ready';
     } catch (error) {
       database = 'unavailable';
     } finally {
@@ -414,6 +438,7 @@ app.get('/health/ready', async (req, res) => {
     foundationReady: ga4FoundationReady,
     workerReady: true
   });
+  const reports = getReportConfiguration();
   const body = {
     status: database === 'unavailable' ? 'not_ready' : 'ready',
     checks: {
@@ -423,7 +448,10 @@ app.get('/health/ready', async (req, res) => {
       youtube: youtube.status,
       facebook_pages: facebookPages.status,
       instagram: instagram.status,
-      google_analytics_4: googleAnalytics.status
+      google_analytics_4: googleAnalytics.status,
+      pdf_reports: !reports.enabled ? 'disabled' : reports.ready ? 'ready' : 'configuration_required',
+      sync_queue: syncQueue,
+      report_queue: reports.enabled ? reportQueue : 'disabled'
     }
   };
   const warnings = [
@@ -431,7 +459,10 @@ app.get('/health/ready', async (req, res) => {
     ...youtube.warnings,
     ...facebookPages.warnings,
     ...instagram.warnings,
-    ...googleAnalytics.warnings
+    ...googleAnalytics.warnings,
+    ...reports.errors.map(() => 'pdf_reports_configuration_invalid'),
+    ...(syncQueue === 'overdue' ? ['sync_jobs_overdue'] : []),
+    ...(reports.enabled && reportQueue === 'overdue' ? ['report_jobs_overdue'] : [])
   ];
   if (warnings.length > 0) {
     body.warnings = [...new Set(warnings)];

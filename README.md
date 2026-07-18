@@ -1,6 +1,6 @@
 # Social Insights Studio
 
-Social Insights Studio is a workspace-based, multiplatform analytics application with read-only TikTok plus gated YouTube, Facebook Pages, Instagram, and Google Analytics 4 verticals. The legacy TikTok Looker Studio connector remains preserved beside them. The standalone dashboard uses Express, React/Vite, MariaDB, server-side sessions, encrypted provider credentials, bounded one-shot worker syncs, stored snapshots, and CSV exports.
+Social Insights Studio is a workspace-based, multiplatform analytics application with read-only TikTok plus gated YouTube, Facebook Pages, Instagram, and Google Analytics 4 verticals. The legacy TikTok Looker Studio connector remains preserved beside them. The standalone dashboard uses Express, React/Vite, MariaDB, server-side sessions, encrypted provider credentials, bounded one-shot background jobs, stored snapshots, CSV exports, and protected asynchronous PDF reports.
 
 The production domain assumption remains `https://lstc.nixorcorporate.com`. Production deployment is cPanel/Passenger-compatible: the web process serves the API and compiled Vite app, migrations run as an explicit release command, and cron runs the bounded worker.
 
@@ -11,7 +11,7 @@ Production alignment is currently an evidence-backed assumption: local `phase-3-
 - `server/index.js` keeps the legacy connector routes and mounts the new application API under `/api`.
 - `server/platform/` contains auth, sessions, RBAC, provider connection lifecycles, sync, dashboard, and export services.
 - `server/migrations/` contains explicit MariaDB migrations. Migrations never run from normal web requests.
-- `server/worker.js` runs bounded cron-safe jobs for due TikTok and enabled YouTube, Facebook Pages, Instagram, and Google Analytics 4 connections.
+- `server/worker.js` runs separate bounded cron-safe commands for due provider syncs and queued PDF reports.
 - `apps/web/` contains the React/Vite application shell served by Express at `/` after `npm run web:build`.
 - `Code.gs` remains the legacy Apps Script connector. Do not delete the encrypted file store until a production migration/retirement plan is approved.
 - `server/platform/provider-registry.js` records the current provider catalog. TikTok, YouTube, Facebook Pages, Instagram, and Website Analytics are implemented. Newer provider verticals are disabled by default until their exact OAuth configuration, provider-review evidence, and eligible live test resources are ready.
@@ -45,6 +45,8 @@ Do not point destructive tests or reset commands at production or shared remote 
 | `npm --prefix server test` | Run backend tests, including Phase 0 regressions and MariaDB integration tests. |
 | `npm run web:build` | Type-check and build the React dashboard. |
 | `npm run worker -- sync-due --time-budget-seconds 240` | Run a bounded due-sync worker suitable for cron. |
+| `npm run worker:reports` | Run one bounded queued-report and expiry-cleanup pass. |
+| `npm run reports:samples` | Generate the ten ignored deterministic PDF QA samples under `output/pdf/`. |
 | `npm --prefix server audit --omit=dev` | Audit backend production dependencies. |
 | `npm --prefix apps/web audit --omit=dev` | Audit web production dependencies. |
 
@@ -66,6 +68,7 @@ Do not point destructive tests or reset commands at production or shared remote 
 - Bounded worker syncs use MariaDB leases, refresh credentials when needed, write immutable profile/content/provider Analytics snapshots, record request/quota/retry metadata and partial/failed states, preserve last valid data, and stagger six-hour schedules.
 - Dashboard APIs, including `/api/workspaces/:workspaceId/cross-platform-overview`, read stored snapshots only; page requests do not fetch provider APIs directly. See [`docs/cross-platform-overview.md`](docs/cross-platform-overview.md).
 - CSV content exports are workspace-scoped, analyst-or-higher, formula-injection safe, and recorded in export tables.
+- PDF reports are workspace-scoped and Analyst-or-higher, freeze stored-only provider snapshots at enqueue time, render outside HTTP requests, use private non-public storage, issue user-bound one-time downloads, and expire after seven days. See [`docs/pdf-reporting.md`](docs/pdf-reporting.md).
 
 ## Required Environment
 
@@ -106,6 +109,10 @@ Important variables:
 - `SYNC_INTERVAL_SECONDS`
 - `MANUAL_SYNC_COOLDOWN_SECONDS`
 - `WORKER_TIME_BUDGET_SECONDS`
+- `WORKER_OVERDUE_SECONDS`
+- `FEATURE_PDF_REPORTS` (production defaults to disabled and must be enabled explicitly)
+- `REPORT_ARTIFACT_ROOT` (absolute private path outside every public web root in production)
+- bounded `REPORT_*` rendering, grant, lease, page, byte, range, and resource settings from `.env.example`
 - `TRUST_PROXY`
 - `APP_COMMIT_SHA`
 - `APP_BUILD_TIME` or `APP_RELEASE`
@@ -135,17 +142,18 @@ For a controlled cPanel staging deployment and TikTok Sandbox verification, use
 5. Ensure the cPanel domain document root does not contain a separately served `index.html`; Express/Passenger must own `/`.
 6. Configure production MariaDB and set `DATABASE_URL`.
 7. Run migrations explicitly with `node server/scripts/migrate.js up --database dev` or the production-equivalent target command.
-8. Add a cron entry similar to:
+8. Add separate sync and report cron entries similar to:
 
    ```bash
    cd /path/to/social && npm run worker -- sync-due --time-budget-seconds 240
+   cd /path/to/social && npm run worker:reports
    ```
 
 9. Keep private token/state file-store paths configured for the legacy connector until retirement is approved.
 10. Set `LOOKER_REDIRECT_URIS` to the exact Apps Script callback URI for the retained connector.
 11. Use a precise `TRUST_PROXY` hop count for Passenger/Cloudflare.
 
-Backups, restore testing, legal retention approvals, Google OAuth/YouTube/Analytics verification, Meta dashboard configuration/review, mail delivery, and production provider reviews are external release gates. Reviewer and operations notes are documented in [`docs/youtube-readonly-integration.md`](docs/youtube-readonly-integration.md), [`docs/meta-readonly-integration.md`](docs/meta-readonly-integration.md), and [`docs/google-analytics-readonly-integration.md`](docs/google-analytics-readonly-integration.md).
+Backups, restore testing, legal retention approvals, Google OAuth/YouTube/Analytics verification, Meta dashboard configuration/review, mail delivery, and production provider reviews are external release gates. The consolidated review package is in [`docs/review/exact-permission-matrix.md`](docs/review/exact-permission-matrix.md) and [`docs/review/submission-evidence-checklist.md`](docs/review/submission-evidence-checklist.md). Production activation, queue monitoring, backup/restore, incident, rotation, deletion, and hosting guidance is in [`docs/operations/production-operations.md`](docs/operations/production-operations.md).
 
 ## Legacy Looker Connector
 

@@ -27,16 +27,16 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Worktree at start | Complete - clean. |
 | Tracked-artifact hygiene | Complete - no real environment file, `node_modules`, build output, coverage output, generated PDF/report, file-store data, or database volume is tracked. Only sanitized environment examples and intentional migration/design SQL are tracked. |
 | Format, lint, type check, server syntax | Complete - all passed. |
-| Web production build | Complete - passed after the account lifecycle slice; the 676.23 kB main-chunk warning remains an optimization item. |
-| Backend tests | Complete for current scope - 94/94 passed. |
-| Real-MariaDB tests | Complete for current scope - 35/35 passed. |
-| Backend coverage | Complete for current gate - 87.44% lines, 68.36% branches, 92.92% functions. New security/report modules still require focused branch coverage. |
+| Web production build | Complete - final Vite build passed; the 717.63 kB main-chunk warning remains a non-blocking optimization item. |
+| Backend tests | Complete - 127/127 passed in the final sequential run. |
+| Real-MariaDB tests | Complete - 39/39 passed in the focused final run. |
+| Backend coverage | Complete for current gate - 87.91% lines, 68.41% branches, and 92.34% functions. |
 | Migrations | Complete for 001-010 on development and test databases; clean migration, TikTok compatibility, provider/report tenant-integrity constraints, and repeated no-op application are covered. |
-| Worker smoke | Complete for current scope - bounded no-work run exited successfully without provider calls. |
+| Worker smoke | Complete - separate bounded sync and report commands both exited successfully with zero due work and no provider calls. |
 | Dependency audits | Complete - root, server, and web production audits reported zero known vulnerabilities. |
-| Production preflight | Complete for current enabled TikTok/YouTube/Meta contract with synthetic configuration; only missing deployment provenance was warned. |
+| Production preflight | Complete - synthetic production-safe configuration passed with reporting disabled and again with reporting enabled at a private absolute artifact root. |
 | Reference PDF audit | Complete - all five pages rendered and inspected; the existing PDF audit correctly identifies raw nulls, incorrect labels, broken provider pages, cramped tables, and over-dark styling. |
-| Responsive browser baseline | Complete for Phase 0/1 - public, member, invitation, and account/session screens were inspected at 360, 768, 1366, and 1920 pixels through local Chrome; no horizontal document overflow, console exception, or unexpected failed request was observed. Focus traversal and reduced-motion emulation were verified. The in-app browser backend rejected localhost navigation, so local Chrome/CDP was used. Full all-provider/report interaction coverage remains a final gate. |
+| Responsive browser baseline | Complete - 26 public/application route audits covered 360, 768, 1366, and 1920 pixels, all navigation areas, provider/dashboard/connection states, direct refresh, report generation/download, onboarding/session restoration, visible focus, and reduced motion. No horizontal overflow, unnamed control, unexpected console error, or unexpected failed request was observed. Local Chrome/CDP was used because the in-app browser backend rejected localhost navigation. |
 | Local database tooling | Complete - destructive local reset/seed checks remain restricted to loopback and now require the exact configured `MARIADB_PORT`; the configured 3317 instance is accepted without weakening the guard. |
 
 ## Product And UX Requirements
@@ -58,8 +58,8 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Member role changes/removal/last-owner protection | Complete | Server-enforced RBAC, audit logs, production wording, and last-owner coverage exist. |
 | Accessible temporary notifications | Complete for current actions | Success notifications auto-dismiss, errors use polite/alert live regions with user-facing text, and durable provider state remains in the relevant view. |
 | Provider empty/stale/partial/error states | Complete for current dashboard scope | The cross-platform endpoint and UI normalize stored-only sample, ready, stale, delayed, thresholded, partial, empty, pending, failed, reconnect, configuration, and disconnected states without hiding provider availability. |
-| Mobile navigation and no horizontal overflow | Complete for current views | Scrollable mobile navigation and the Overview/Sources views were inspected at 360 pixels without document-level horizontal overflow or console errors; full keyboard and screen-reader QA remains. |
-| Keyboard access, visible focus, reduced motion | Partially complete | Semantic controls and reduced-motion CSS exist in places, but complete route/control verification is outstanding. |
+| Mobile navigation and no horizontal overflow | Complete for current views | Overview, Content, Reports, public surfaces, and the scrollable bottom navigation were verified at 360 pixels; all principal views were audited at larger required widths. |
+| Keyboard access, visible focus, reduced motion | Complete for current repository gate | Browser focus traversal produced a visible solid focus indicator, controls passed accessible-name checks, and reduced-motion emulation reduced animation to one 0.01 ms iteration. Full assistive-technology user testing remains a release practice, not an unimplemented control. |
 | Clean URL state | Complete | Routes remain refreshable while each view writes only its own relevant filters; invitation secrets are removed after authenticated accept/dismiss. |
 | Internal implementation terminology removed | Complete for current primary screens | Cookie/CSRF, deployment, feature-gate, raw scope/configuration, worker, and provider-error codes are no longer rendered in the account, member, public, connection, or sync-history UX. |
 
@@ -77,7 +77,7 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Sync cursor/checkpoint/quota/request metadata | Complete and exercised by GA4 | Connection sync state, per-run provider API version, cursors, data-through timestamps, retry state, bounded quota summaries, and request telemetry are populated without raw payloads. |
 | Immutable account/profile and content observations | Complete for TikTok, YouTube, and Meta | Provider-specific snapshot tables preserve null and date semantics. |
 | Dimension/breakdown observations | Complete for GA4 | Six aggregate GA4 breakdown families use canonical dimension hashes, explicit per-metric availability, threshold flags, period semantics, and tenant constraints. |
-| Report definitions, runs, jobs, and protected artifacts | Complete as a schema foundation | Workspace definitions, relational resources, idempotent leased runs, resource/metric snapshots, private artifact metadata, expiry, and hashed one-time grants exist. Rendering/API/worker behavior remains the PDF phase. |
+| Report definitions, runs, jobs, and protected artifacts | Complete | Workspace definitions, relational resources, idempotent leased runs, immutable data/metric-definition snapshots, private artifact metadata, renderer jobs, expiry, deletion, and hashed one-time grants are implemented and tested. |
 | Live-compatible TikTok migration | Complete | Provider-foundation upgrade preserves ciphertext without token rewrite. |
 | Universal metrics avoided | Complete in current registry and overview | Every advertised metric has a versioned provider-specific definition, unit, aggregation, date semantics, and unavailable rule. The cross-platform contract separates every resource and provider, has no analytics total, and uses independent trend scales. GA4 active users are explicitly not summed across daily rows. |
 | Executable provider adapter contract | Complete for new integrations | A validated versioned boundary covers authorization, refresh/revocation, scope inspection, discovery/selection, synchronization, and deletion. Existing providers remain tested compatibility adapters until refactoring can occur without behavior change. |
@@ -103,36 +103,36 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Resource filter | Complete for multi-resource providers | Sources exposes the selected connection for YouTube, Facebook Pages, Instagram, and GA4. Cross-platform cards load every connection by ID. TikTok retains its existing single-account contract. |
 | Date and comparison filters | Complete for current provider dashboards | 7/30/90/custom and comparison semantics exist, with provider-specific limitations. |
 | Timezone semantics | Complete for GA4 property reports | GA4 ranges use the selected property's timezone and the UI displays it. A user-selectable timezone override is deliberately rejected so provider date semantics are not relabeled. |
-| Cross-provider content and capability-aware columns | Partially complete | Normalized content/filter/detail exists, but the UI remains TikTok-shaped and lacks the full dynamic provider/resource column model. |
+| Cross-provider content and capability-aware columns | Complete for social content | The global Content API/UI/CSV support explicit TikTok, YouTube, Facebook Pages, Instagram, and selected-resource filters; rows/details identify their provider/resource, preserve unavailable values, and retain provider semantics. GA4 paths and aggregate breakdowns remain correctly in the Website Analytics Source view. |
 | CSV export | Complete for current filtered content | Workspace-scoped, analyst-or-higher, bounded, audited, and spreadsheet-injection safe. |
-| Reports navigation and builder | Not implemented | No Reports view or API exists. |
+| Reports navigation and builder | Complete | Analyst-or-higher users can select explicit resources, ranges/comparison/timezone/title/sections, preview, queue, monitor, download once, and delete; Viewers fail closed. |
 
 ## PDF Reporting
 
 | Requirement | Status | Evidence and remaining work |
 | --- | --- | --- |
-| Async DB-backed report pipeline | Partially complete | Additive definitions and idempotent leased run/job tables exist; worker claims, rendering, retries, and retention execution remain. |
-| Stored-only report data selection | Not implemented | Dashboard query foundations can be reused, but report snapshots/definitions are absent. |
-| Protected artifact storage/download/delete | Partially complete | Private artifact metadata, expiry, hashes, size/page limits, and one-time grant records exist; filesystem validation and authorized APIs remain. |
-| cPanel-compatible renderer | Not implemented | A pure renderer must be selected and documented; system Chromium cannot be assumed. |
-| Branded cover, cross-platform summary, provider sections, methodology | Not implemented | Reference hierarchy is documented only. |
-| Deterministic five-provider fixtures and generated samples | Not implemented | No local sample PDFs exist. |
-| Text, page, size, injection, traversal, expiry, render-to-PNG, and visual QA | Not implemented | Required before the reporting phase can be complete. |
+| Async DB-backed report pipeline | Complete | HTTP requests freeze/idempotently queue work; the bounded leased report command renders, retries, completes transactionally, and performs expiry cleanup outside Passenger requests. |
+| Stored-only report data selection | Complete | Every run freezes selected stored dashboard observations, provider definitions, resource identities, missing states, and data-through dates; rendering makes no provider or remote request. |
+| Protected artifact storage/download/delete | Complete | Generated-only keys resolve below a private root, files use restrictive modes, downloads require user-bound one-time grants, deletion invalidates grants/removes files, and artifacts expire after seven days. |
+| cPanel-compatible renderer | Complete | Pure-Node PDFKit is pinned in the server lockfile and requires no system browser or remote asset. |
+| Branded cover, cross-platform summary, provider sections, methodology | Complete | The renderer emits the required hierarchy with explicit provider/resource semantics and unavailable-state notes. |
+| Deterministic five-provider fixtures and generated samples | Complete | Ten ignored samples cover every provider, all-platform, no-content, missing-metric, long-title, and long-table cases under `output/pdf/`. |
+| Text, page, size, injection, traversal, expiry, render-to-PNG, and visual QA | Complete | Independent pypdf/pdfplumber checks passed all ten files and all 48 final Poppler-rendered pages were visually inspected without clipping, overlap, blank provider pages, broken glyphs, or unsafe links/files. |
 
 ## Review, Legal, And Operations
 
 | Requirement | Status | Evidence and remaining work |
 | --- | --- | --- |
-| Per-permission provider approval matrix | Partially complete | YouTube, Meta, and GA4 contain strong evidence; TikTok still needs one row per scope. |
-| Reviewer scripts and screencast checklists | Partially complete | YouTube, Meta, and GA4 walkthroughs exist; TikTok and a consolidated screenshot checklist remain. |
+| Per-permission provider approval matrix | Complete for preparation | All 14 exact requested permissions have a consolidated row with classification, justification, action/feature/API/data/retention/revoke/delete/test/recording/docs/implementation/console fields. External console confirmation remains explicit. |
+| Reviewer scripts and screencast checklists | Complete for preparation | Consolidated TikTok, Facebook, Instagram, YouTube, and GA4 scripts plus account/resource, screenshot, screencast, configuration, and stop-condition checklists are present. No submission was performed. |
 | Public legal/support/deletion surfaces | Partially complete | Accurate implementation boundaries are present. Legal entity, address/contact, jurisdictions, subprocessors, SLA, and approved retention remain external blockers. |
-| Startup validation and feature flags | Complete for provider connectors | TikTok, YouTube, Meta, and GA4 fail closed. Report-rendering settings remain for the PDF phase. |
-| Provider cadence/quota/retry documentation | Partially complete | YouTube, Meta, and GA4 are covered; TikTok and consolidated operational thresholds need further detail. |
-| Structured logs, correlation IDs, and secret redaction | Partially complete | Core flows are sanitized, but a consolidated production observability/alert integration and operational log contract are incomplete. |
-| Stale-worker/overdue-source checks | Not implemented | Readiness does not yet expose a complete operational freshness summary. |
-| Backup/restore, migration, rollback | Partially complete | Staging backup and rollback steps exist; a documented restore drill, RPO/RTO policy, report-artifact backup boundary, and all-provider release sequence are incomplete. |
-| Incident response and secret/key rotation runbooks | Partially complete | Encryption previous-key behavior exists, but complete incident/provider-secret/deletion runbooks are absent. |
-| cPanel/Passenger/Cloudflare/ModSecurity guidance | Partially complete | Strong TikTok staging guidance exists; complete all-provider/report activation and artifact storage guidance remains. |
+| Startup validation and feature flags | Complete | TikTok, YouTube, Meta, GA4, and PDF reporting fail closed; exact callbacks/scopes/clients and private report storage are validated when enabled. |
+| Provider cadence/quota/retry documentation | Complete for current providers | The operations runbook records bounded cadence, lookbacks/pages/items/quota behavior, retries, leases, and stop rules for all five providers and reports. |
+| Structured logs, correlation IDs, and secret redaction | Complete for current repository scope | Core request/provider/job flows use sanitized IDs/categories, tests reject secret leakage, and the operations contract defines allowed fields, forbidden values, rotation, and alert handling. External log shipping is an operator choice. |
+| Stale-worker/overdue-source checks | Complete | Readiness exposes only categorical sync/report queue states plus sanitized overdue warnings, with configurable bounded thresholds and a regression test. |
+| Backup/restore, migration, rollback | Complete for engineering documentation | Safe activation, isolated restore drill, artifact-backup exclusion, schema-compatible rollback/forward-fix, and migration sequence are documented. Owner-approved RPO/RTO/retention remain external policy inputs. |
+| Incident response and secret/key rotation runbooks | Complete | Incident containment/recovery, encryption current/previous-key rotation, provider-secret rotation, and provider/account/workspace/report deletion runbooks are documented. |
+| cPanel/Passenger/Cloudflare/ModSecurity guidance | Complete | Private report storage/cron, Passenger ownership, trust-proxy/Cloudflare cache boundaries, and narrow route/rule-specific ModSecurity exceptions are documented. |
 
 ## Superseded Requirements
 
@@ -143,9 +143,12 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Looker Studio as the primary product | No longer applicable | The standalone React application is canonical; the connector remains a compatibility integration. |
 | Repairing the legacy report PDF as a data contract | No longer applicable | The attached PDF is only a hierarchy/visual reference and contains known metric and missing-data defects. |
 
-## First Safe Implementation Order
+## Safe External Activation Order
 
-1. Build the cross-platform overview and global provider/resource/timezone filters.
-2. Implement the protected asynchronous PDF report pipeline and deterministic render QA.
-3. Complete per-scope review packages and full operations documentation.
-4. Run the final clean-install/upgrade/idempotence, full browser/accessibility, report-render, worker, coverage, preflight, audit, and secret checks.
+The independent repository phases above are complete. External activation must still follow this order:
+
+1. Deploy/migrate with every new provider and PDF reporting disabled; verify public/auth/readiness surfaces and both idle bounded commands.
+2. Configure, preflight, enable, smoke, revoke, and delete one provider at a time with its eligible reviewer resource.
+3. Keep Instagram disabled unless the dedicated Facebook Login configuration exposes the exact four-scope set and a no-ads eligible professional account works.
+4. Configure private report storage and monitoring, enable reports, then smoke generate/download/delete/expiry.
+5. Obtain owner legal/retention/RPO/RTO inputs and provider approvals before making submission-ready or live claims.

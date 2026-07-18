@@ -1,6 +1,6 @@
 # PDF Reference Audit
 
-Date: 2026-07-17
+Date: 2026-07-18
 
 Reference file: `/home/shahzain/Downloads/Website_Performance_Analytics (1).pdf`
 
@@ -34,3 +34,7 @@ Rendered pages: 5
 - Render zero only when the provider explicitly returns zero.
 - Render `Not available`, `Not granted`, `Delayed`, `Thresholded`, or `No data in range` for non-zero missing states.
 - Validate rendered pages as PNGs before release to catch clipping, overlap, black boxes, blank pages, and unreadable text.
+
+## Implemented Replacement
+
+The reference remains an audit input only. The replacement is the protected, stored-only, asynchronous renderer documented in [`../pdf-reporting.md`](../pdf-reporting.md). Ten deterministic samples cover all five providers, a full cross-platform report, no-content and missing-metric states, long title wrapping, and repeated-table-header pagination. The ignored artifacts are generated under `output/pdf/` with `npm run reports:samples` and independently verified with pypdf, pdfplumber, Poppler rendering, and page-by-page visual inspection.

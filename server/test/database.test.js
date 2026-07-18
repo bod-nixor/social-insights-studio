@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 const dotenv = require('dotenv');
 const jwt = require('jsonwebtoken');
@@ -42,6 +43,8 @@ delete process.env.LOOKER_CLIENT_SECRET;
 process.env.LOOKER_REDIRECT_URIS = 'https://script.google.com/macros/d/abc123/usercallback';
 process.env.RATE_LIMIT_MAX = '1000';
 process.env.API_RATE_LIMIT_MAX = '2000';
+process.env.FEATURE_PDF_REPORTS = 'true';
+process.env.REPORT_ARTIFACT_ROOT = path.join(os.tmpdir(), `sis-report-db-${process.pid}`);
 
 const { app, stopStores } = require('../index');
 const { closePool } = require('../database');
@@ -60,9 +63,11 @@ const { compareMetric, engagementRate } = require('../platform/analytics');
 const { assertCapability, hasCapability, canAssignRole } = require('../platform/rbac');
 const { hashSecret } = require('../platform/security');
 const { runDueSyncs } = require('../platform/sync-service');
+const { cleanupExpiredReports, runDueReports } = require('../platform/report-worker-service');
 const { buildDateWindows } = require('../platform/google-analytics-sync-service');
 const { safeCsvCell } = require('../platform/export-service');
 const { decryptSecret, encryptSecret, parsePreviousKeys } = require('../platform/secret-envelope');
+const { upsertProviderFoundation } = require('../scripts/seed-provider-foundation');
 const {
   assertLocalDatabaseUrl,
   assertNotProductionCommand,
@@ -86,6 +91,7 @@ after(async () => {
   setMailTransportFactory(null);
   stopStores();
   await closePool();
+  await fs.rm(process.env.REPORT_ARTIFACT_ROOT, { recursive: true, force: true });
   if (db) await db.end();
 });
 
@@ -2352,7 +2358,23 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   const contentBody = content.json();
   assert.equal(contentBody.total, 1);
   assert.equal(contentBody.rows[0].engagement_rate, 13);
+  assert.equal(contentBody.rows[0].provider, 'tiktok');
   assert.equal(contentBody.rows.some(row => row.provider_content_id === 'youtube-video'), false);
+
+  const allProviderContent = await requestApp(`/api/workspaces/${workspace.id}/content?provider=all&sort=views`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(allProviderContent.statusCode, 200);
+  assert.equal(allProviderContent.json().total, 2);
+  assert.deepEqual(
+    new Set(allProviderContent.json().rows.map(row => row.provider)),
+    new Set(['tiktok', 'youtube'])
+  );
+  const youtubeContent = await requestApp(`/api/workspaces/${workspace.id}/content?provider=youtube`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(youtubeContent.json().total, 1);
+  assert.equal(youtubeContent.json().rows[0].provider_content_id, 'youtube-video');
 
   const searchContent = await requestApp(`/api/workspaces/${workspace.id}/content?search=${encodeURIComponent('sum')}&sort=engagement&direction=asc&limit=1&offset=0`, {
     headers: { cookie: cookieHeader(owner.cookies) }
@@ -2405,6 +2427,13 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   assert.match(csv.body, /published_at,title,views/);
   assert.ok(csv.body.includes("'=SUM(1,1)"));
   assert.equal(csv.body.includes('YouTube must stay isolated'), false);
+
+  const allProviderCsv = await requestApp(`/api/workspaces/${workspace.id}/exports/content.csv?provider=all`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(allProviderCsv.statusCode, 200);
+  assert.ok(allProviderCsv.body.includes('YouTube must stay isolated'));
+  assert.match(allProviderCsv.body, /provider,resource/);
 
   const sourceRows = await db.query('SELECT id, last_successful_sync_at FROM data_sources WHERE workspace_id = ?', [workspace.id]);
   const firstSuccess = sourceRows[0].last_successful_sync_at;
@@ -4965,6 +4994,307 @@ test('seeded fixture snapshots are exposed as clearly labeled demo data', async 
     1200
   );
   assert.ok(!Object.hasOwn(crossPlatformBody, 'total'));
+});
+
+test('development seed foundation creates one idempotent workspace-owned TikTok resource connection', async () => {
+  await clearDatabase();
+  const owner = await signIn('seed-foundation-owner@example.com');
+  const workspace = await createWorkspace(owner, 'Seed Foundation Workspace');
+  const sourceId = '20000000-0000-4000-8000-000000000777';
+  await db.query(
+    `INSERT INTO data_sources
+      (id, workspace_id, provider, status, last_sync_at, last_successful_sync_at, next_sync_at)
+     VALUES (?, ?, 'tiktok', 'active', UTC_TIMESTAMP(3), UTC_TIMESTAMP(3), DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 HOUR))`,
+    [sourceId, workspace.id]
+  );
+  const source = {
+    id: sourceId,
+    workspaceId: workspace.id,
+    workspaceName: workspace.name,
+    status: 'active',
+    lastSyncAt: new Date('2026-07-18T10:00:00.000Z'),
+    lastSuccessfulSyncAt: new Date('2026-07-18T10:00:00.000Z'),
+    nextSyncAt: new Date('2026-07-18T11:00:00.000Z')
+  };
+
+  await upsertProviderFoundation(db, source, owner.user.id);
+  await upsertProviderFoundation(db, source, owner.user.id);
+
+  const rows = await db.query(
+    `SELECT pauth.workspace_id, pauth.provider, pauth.status AS authorization_status,
+            pr.workspace_id AS resource_workspace_id, pr.provider AS resource_provider,
+            wpc.workspace_id AS connection_workspace_id, wpc.provider AS connection_provider,
+            wpc.status AS connection_status, wpc.data_source_id,
+            (SELECT COUNT(*) FROM provider_authorizations WHERE source_data_source_id = ?) AS authorizations,
+            (SELECT COUNT(*) FROM provider_resources WHERE provider_authorization_id = pauth.id) AS resources,
+            (SELECT COUNT(*) FROM workspace_provider_connections WHERE data_source_id = ?) AS connections
+     FROM provider_authorizations pauth
+     JOIN provider_resources pr ON pr.provider_authorization_id = pauth.id
+     JOIN workspace_provider_connections wpc ON wpc.provider_resource_id = pr.id
+     WHERE pauth.source_data_source_id = ?`,
+    [sourceId, sourceId, sourceId]
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].workspace_id, workspace.id);
+  assert.equal(rows[0].resource_workspace_id, workspace.id);
+  assert.equal(rows[0].connection_workspace_id, workspace.id);
+  assert.equal(rows[0].data_source_id, sourceId);
+  assert.equal(rows[0].provider, 'tiktok');
+  assert.equal(rows[0].resource_provider, 'tiktok');
+  assert.equal(rows[0].connection_provider, 'tiktok');
+  assert.equal(rows[0].authorization_status, 'active');
+  assert.equal(rows[0].connection_status, 'active');
+  assert.equal(Number(rows[0].authorizations), 1);
+  assert.equal(Number(rows[0].resources), 1);
+  assert.equal(Number(rows[0].connections), 1);
+});
+
+test('PDF reports are authorized, queued idempotently, rendered by the worker, downloaded once, expired, and deleted safely', async () => {
+  await clearDatabase();
+  await fs.rm(process.env.REPORT_ARTIFACT_ROOT, { recursive: true, force: true });
+  const owner = await signIn('report-owner@example.com');
+  const viewer = await signIn('report-viewer@example.com');
+  const outsider = await signIn('report-outsider@example.com');
+  const workspace = await createWorkspace(owner, 'Report Workspace');
+  const authorizationId = crypto.randomUUID();
+  const resourceId = crypto.randomUUID();
+  const dataSourceId = crypto.randomUUID();
+  const connectionId = crypto.randomUUID();
+  const syncRunId = crypto.randomUUID();
+
+  await db.query(
+    `INSERT INTO workspace_memberships
+      (workspace_id, user_id, role, status, invited_by, joined_at)
+     VALUES (?, ?, 'viewer', 'active', ?, UTC_TIMESTAMP(3))`,
+    [workspace.id, viewer.user.id, owner.user.id]
+  );
+  await db.query(
+    `INSERT INTO provider_authorizations
+      (id, workspace_id, provider, actor_user_id, provider_subject, display_name, status, granted_at)
+     VALUES (?, ?, 'tiktok', ?, 'report-tiktok-account', 'Report TikTok', 'active', UTC_TIMESTAMP(3))`,
+    [authorizationId, workspace.id, owner.user.id]
+  );
+  await db.query(
+    `INSERT INTO provider_resources
+      (id, provider_authorization_id, workspace_id, provider, resource_type,
+       provider_resource_id, display_name, metadata)
+     VALUES (?, ?, ?, 'tiktok', 'tiktok_account', 'report-tiktok-account', 'Report TikTok', JSON_OBJECT())`,
+    [resourceId, authorizationId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status, last_sync_at, last_successful_sync_at)
+     VALUES (?, ?, 'tiktok', 'active', UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+    [dataSourceId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO provider_accounts
+      (id, workspace_id, data_source_id, provider, provider_account_id, username, display_name)
+     VALUES (?, ?, ?, 'tiktok', 'report-tiktok-account', 'report_creator', 'Report TikTok')`,
+    [crypto.randomUUID(), workspace.id, dataSourceId]
+  );
+  await db.query(
+    `INSERT INTO workspace_provider_connections
+      (id, workspace_id, provider_resource_id, data_source_id, provider, status,
+       last_sync_at, last_successful_sync_at, data_through_at)
+     VALUES (?, ?, ?, ?, 'tiktok', 'active', UTC_TIMESTAMP(3), UTC_TIMESTAMP(3), DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 DAY))`,
+    [connectionId, workspace.id, resourceId, dataSourceId]
+  );
+  await db.query(
+    `INSERT INTO sync_runs
+      (id, workspace_id, data_source_id, workspace_provider_connection_id,
+       trigger_type, status, finished_at, profile_count)
+     VALUES (?, ?, ?, ?, 'scheduled', 'success', UTC_TIMESTAMP(3), 1)`,
+    [syncRunId, workspace.id, dataSourceId, connectionId]
+  );
+  await db.query(
+    `INSERT INTO profile_snapshots
+      (id, workspace_id, data_source_id, sync_run_id, observed_at,
+       follower_count, following_count, likes_count, video_count)
+     VALUES (?, ?, ?, ?, DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 DAY), 1420, 87, 9300, 44)`,
+    [crypto.randomUUID(), workspace.id, dataSourceId, syncRunId]
+  );
+
+  const reportBody = {
+    request_id: 'report-request-0001',
+    title: 'Security review report https://untrusted.example/file file:///etc/passwd',
+    subtitle: 'Stored analytics only',
+    timezone: 'UTC',
+    range: '7d',
+    comparison_enabled: true,
+    sections: ['executive_summary', 'cross_platform_summary', 'resource_sections', 'methodology'],
+    resources: [{ provider: 'tiktok', connection_id: connectionId }]
+  };
+  const preview = await requestApp(`/api/workspaces/${workspace.id}/reports/preview`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: reportBody
+  });
+  assert.equal(preview.statusCode, 200);
+  assert.equal(preview.json().preview.resources[0].connection_id, connectionId);
+
+  const viewerDenied = await requestApp(`/api/workspaces/${workspace.id}/reports/preview`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(viewer.cookies), 'x-csrf-token': viewer.csrf },
+    body: reportBody
+  });
+  assert.equal(viewerDenied.statusCode, 403);
+  const outsiderHidden = await requestApp(`/api/workspaces/${workspace.id}/reports`, {
+    headers: { cookie: cookieHeader(outsider.cookies) }
+  });
+  assert.equal(outsiderHidden.statusCode, 404);
+
+  const queued = await requestApp(`/api/workspaces/${workspace.id}/reports`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: reportBody
+  });
+  assert.equal(queued.statusCode, 202);
+  assert.equal(queued.json().report.status, 'queued');
+  assert.equal(queued.json().idempotent, false);
+  const reportId = queued.json().report.id;
+  const beforeWorkerArtifacts = await db.query('SELECT id FROM report_artifacts WHERE report_run_id = ?', [reportId]);
+  assert.equal(beforeWorkerArtifacts.length, 0);
+
+  const duplicate = await requestApp(`/api/workspaces/${workspace.id}/reports`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: reportBody
+  });
+  assert.equal(duplicate.statusCode, 202);
+  assert.equal(duplicate.json().report.id, reportId);
+  assert.equal(duplicate.json().idempotent, true);
+
+  await db.query(
+    `UPDATE report_runs
+     SET run_after = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)
+     WHERE id = ?`,
+    [reportId]
+  );
+  const overdueReadiness = await requestApp('/health/ready');
+  assert.equal(overdueReadiness.statusCode, 200);
+  assert.equal(overdueReadiness.json().checks.sync_queue, 'ready');
+  assert.equal(overdueReadiness.json().checks.report_queue, 'overdue');
+  assert.ok(overdueReadiness.json().warnings.includes('report_jobs_overdue'));
+  await db.query(
+    `UPDATE report_runs
+     SET run_after = UTC_TIMESTAMP(3)
+     WHERE id = ?`,
+    [reportId]
+  );
+
+  const rendered = await runDueReports({ timeBudgetSeconds: 30, leaseOwner: 'report-test-worker' });
+  assert.equal(rendered.processed, 1);
+  assert.equal(rendered.results[0].status, 'completed');
+  const completed = await requestApp(`/api/workspaces/${workspace.id}/reports/${reportId}`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(completed.statusCode, 200);
+  assert.equal(completed.json().report.status, 'completed');
+  assert.ok(completed.json().report.artifact.byte_size > 1000);
+  assert.ok(completed.json().report.artifact.page_count >= 4);
+
+  const artifactRows = await db.query(
+    'SELECT storage_key, byte_size FROM report_artifacts WHERE report_run_id = ?',
+    [reportId]
+  );
+  const artifactPath = path.join(process.env.REPORT_ARTIFACT_ROOT, ...artifactRows[0].storage_key.split('/'));
+  const artifactStat = await fs.stat(artifactPath);
+  assert.equal(artifactStat.size, Number(artifactRows[0].byte_size));
+
+  const grant = await requestApp(`/api/workspaces/${workspace.id}/reports/${reportId}/download-grants`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: {}
+  });
+  assert.equal(grant.statusCode, 201);
+  assert.ok(grant.json().download_url.startsWith('/api/report-downloads/'));
+  const download = await requestApp(grant.json().download_url, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(download.statusCode, 200, download.body);
+  assert.equal(download.headers['content-type'], 'application/pdf');
+  assert.equal(download.body.slice(0, 5), '%PDF-');
+  const replayDownload = await requestApp(grant.json().download_url, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(replayDownload.statusCode, 410);
+  assert.equal(replayDownload.json().error, 'download_grant_consumed');
+
+  const deletionBody = { ...reportBody, request_id: 'report-request-0002', title: 'Deletion report' };
+  const deletionQueued = await requestApp(`/api/workspaces/${workspace.id}/reports`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: deletionBody
+  });
+  const deletionReportId = deletionQueued.json().report.id;
+  const deletionWorker = await runDueReports({ timeBudgetSeconds: 30, leaseOwner: 'report-deletion-worker' });
+  assert.equal(deletionWorker.processed, 1);
+  const deletionArtifact = await db.query(
+    'SELECT storage_key FROM report_artifacts WHERE report_run_id = ?',
+    [deletionReportId]
+  );
+  const deletionPath = path.join(
+    process.env.REPORT_ARTIFACT_ROOT,
+    ...deletionArtifact[0].storage_key.split('/')
+  );
+  const deletionResponse = await requestApp(`/api/workspaces/${workspace.id}/reports/${deletionReportId}`, {
+    method: 'DELETE',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: {}
+  });
+  assert.equal(deletionResponse.statusCode, 200);
+  await assert.rejects(fs.stat(deletionPath), error => error.code === 'ENOENT');
+
+  const missingGrant = await requestApp(`/api/workspaces/${workspace.id}/reports/${reportId}/download-grants`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: {}
+  });
+  await fs.rm(artifactPath, { force: true });
+  const missingDownload = await requestApp(missingGrant.json().download_url, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(missingDownload.statusCode, 404);
+  assert.equal(missingDownload.json().error, 'report_artifact_missing');
+
+  const deleted = await requestApp(`/api/workspaces/${workspace.id}/reports/${reportId}`, {
+    method: 'DELETE',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: {}
+  });
+  assert.equal(deleted.statusCode, 200);
+  assert.equal(deleted.json().deleted, true);
+  const afterDelete = await requestApp(`/api/workspaces/${workspace.id}/reports`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(afterDelete.json().reports.length, 0);
+
+  const expiryBody = { ...reportBody, request_id: 'report-request-0003', title: 'Expiry report' };
+  const expiryQueued = await requestApp(`/api/workspaces/${workspace.id}/reports`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: expiryBody
+  });
+  const expiryReportId = expiryQueued.json().report.id;
+  const expiryWorker = await runDueReports({ timeBudgetSeconds: 30, leaseOwner: 'report-expiry-worker' });
+  assert.equal(expiryWorker.processed, 1);
+  const expiryArtifact = await db.query('SELECT storage_key FROM report_artifacts WHERE report_run_id = ?', [expiryReportId]);
+  const expiryPath = path.join(process.env.REPORT_ARTIFACT_ROOT, ...expiryArtifact[0].storage_key.split('/'));
+  await db.query(
+    `UPDATE report_artifacts SET expires_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 SECOND)
+     WHERE report_run_id = ?`,
+    [expiryReportId]
+  );
+  const cleanup = await cleanupExpiredReports();
+  assert.equal(cleanup.expired, 1);
+  await assert.rejects(fs.stat(expiryPath), error => error.code === 'ENOENT');
+  const expired = await requestApp(`/api/workspaces/${workspace.id}/reports/${expiryReportId}`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(expired.json().report.status, 'expired');
+  assert.equal(expired.json().report.artifact, null);
+  const idleWorker = await runDueReports({ timeBudgetSeconds: 5, leaseOwner: 'report-idle-worker' });
+  assert.equal(idleWorker.processed, 0);
 });
 
 test('analytics and CSV safety helpers preserve nulls and avoid fabricated baselines', () => {

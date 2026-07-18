@@ -58,7 +58,7 @@
         <li>Encrypted YouTube token records are retained only while the authorization is active. Disconnecting YouTube attempts Google revocation and immediately deletes credentials, discovered channels, and associated local snapshots, even if provider revocation fails.</li>
         <li>Normalized channel, video, and Analytics snapshots are retained only for the active user-facing connection purpose. Social Insights Studio validates the authorization and refreshes stored YouTube data within each 30-day policy window; if an authorization cannot be validated by its deadline, the associated YouTube data is deleted. Raw Google or YouTube API responses are not stored by default.</li>
         <li>Encrypted GA4 token records and normalized aggregate property observations are retained only for active selected properties. Disconnecting one property deletes its local observations while preserving a shared grant for selected sibling properties; disconnecting the final property attempts Google revocation and deletes the authorization, credentials, properties, jobs, and observations. Raw GA4 API responses and individual visitor records are not stored by default.</li>
-        <li>Generated reports should have a short retention window and be deleted after expiry.</li>
+        <li>Generated PDF artifacts expire seven days after generation and may be deleted earlier by an authorized workspace user. Routine long-term backups should exclude these derived artifacts; any approved backup policy may affect final erasure timing and must be disclosed here before production use.</li>
       </ul>
 
       <h2>Sharing</h2>

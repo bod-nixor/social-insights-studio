@@ -37,6 +37,8 @@ function rowsToCsv(rows) {
     'published_at',
     'title',
     'views',
+    'provider',
+    'resource',
     'likes',
     'comments',
     'shares',
@@ -50,6 +52,8 @@ function rowsToCsv(rows) {
       row.published_at,
       row.title || row.description || '',
       row.view_count,
+      row.provider,
+      row.resource_name,
       row.like_count,
       row.comment_count,
       row.share_count,
@@ -72,7 +76,12 @@ async function createContentCsvExport(userId, workspaceId, query = {}) {
       await connection.query(
         `INSERT INTO exports (id, workspace_id, type, configuration, created_by)
          VALUES (?, ?, 'csv', ?, ?)`,
-        [exportId, workspaceId, JSON.stringify({ range, sort: query.sort || 'views' }), userId]
+        [exportId, workspaceId, JSON.stringify({
+          range,
+          sort: query.sort || 'views',
+          provider: query.provider || 'tiktok',
+          connection_id: query.connection_id || null
+        }), userId]
       );
       await connection.query(
         `INSERT INTO export_runs (id, export_id, status)
@@ -85,6 +94,8 @@ async function createContentCsvExport(userId, workspaceId, query = {}) {
         sort: query.sort,
         direction: query.direction,
         search: query.search,
+        provider: query.provider,
+        connectionId: query.connection_id,
         limit: Math.min(Number(query.limit || 1000), 1000),
         offset: 0
       });

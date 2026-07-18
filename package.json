@@ -18,6 +18,8 @@
     "coverage:backend": "node --test --experimental-test-coverage server/test/*.test.js",
     "preflight:production": "node server/scripts/validate-production-env.js",
     "worker": "node server/worker.js",
+    "worker:reports": "node server/worker.js reports-due --time-budget-seconds 240",
+    "reports:samples": "node server/scripts/generate-report-samples.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format:check": "prettier --check \"apps/web/src/**/*.{ts,tsx,css}\" \"*.{js,json}\" \"apps/web/package.json\"",

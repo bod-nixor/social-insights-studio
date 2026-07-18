@@ -7,6 +7,7 @@ const { getDeploymentReadinessCheck } = require('../platform/version');
 const { getYouTubeProductionErrors } = require('../platform/youtube-config');
 const { getMetaProductionErrors } = require('../platform/meta-config');
 const { getGoogleAnalyticsProductionErrors } = require('../platform/google-analytics-config');
+const { getReportProductionErrors } = require('../platform/report-config');
 
 try {
   validateRequiredEnv({ ...process.env, NODE_ENV: 'production' });
@@ -21,6 +22,10 @@ try {
   const ga4Errors = getGoogleAnalyticsProductionErrors({ ...process.env, NODE_ENV: 'production' });
   if (ga4Errors.length > 0) {
     throw new Error(`GA4 production configuration is incomplete: ${ga4Errors.join(', ')}`);
+  }
+  const reportErrors = getReportProductionErrors({ ...process.env, NODE_ENV: 'production' });
+  if (reportErrors.length > 0) {
+    throw new Error(`PDF report production configuration is incomplete: ${reportErrors.join(', ')}`);
   }
   const deployment = getDeploymentReadinessCheck({ ...process.env, NODE_ENV: 'production' });
   for (const warning of deployment.warnings) {

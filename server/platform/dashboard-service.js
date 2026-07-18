@@ -168,9 +168,19 @@ async function queryContentRows(connection, workspaceId, options = {}) {
   const sortColumn = SORT_COLUMNS[options.sort] || SORT_COLUMNS.views;
   const direction = String(options.direction || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
   const allowedProviders = new Set(['tiktok', 'youtube', 'facebook_pages', 'instagram']);
-  const provider = allowedProviders.has(options.provider) ? options.provider : 'tiktok';
-  const where = ['ci.workspace_id = ?', 'ds.provider = ?', 'ci.deleted_at IS NULL'];
-  const params = [workspaceId, provider];
+  const provider = options.provider === 'all' ? 'all' : allowedProviders.has(options.provider) ? options.provider : 'tiktok';
+  const where = ['ci.workspace_id = ?', 'ci.deleted_at IS NULL'];
+  const params = [workspaceId];
+  if (provider !== 'all') {
+    where.push('ds.provider = ?');
+    params.push(provider);
+  } else {
+    where.push("ds.provider IN ('tiktok', 'youtube', 'facebook_pages', 'instagram')");
+  }
+  if (options.connectionId) {
+    where.push('wpc.id = ?');
+    params.push(options.connectionId);
+  }
   if (options.dataSourceId) {
     where.push('ds.id = ?');
     params.push(options.dataSourceId);
@@ -190,12 +200,17 @@ async function queryContentRows(connection, workspaceId, options = {}) {
     params.push(pattern, pattern, pattern);
   }
   const rows = await connection.query(
-    `SELECT ci.id, ci.provider_content_id, ci.published_at, ci.title, ci.description,
+    `SELECT ci.id, ds.provider, wpc.id AS connection_id,
+            COALESCE(pr.display_name, pa.display_name, pa.username) AS resource_name,
+            ci.provider_content_id, ci.published_at, ci.title, ci.description,
             ci.share_url, ci.duration_seconds, ci.height, ci.width,
             latest.observed_at, latest.view_count, latest.like_count,
             latest.comment_count, latest.share_count
      FROM content_items ci
      JOIN data_sources ds ON ds.id = ci.data_source_id
+     LEFT JOIN workspace_provider_connections wpc ON wpc.data_source_id = ds.id
+     LEFT JOIN provider_resources pr ON pr.id = wpc.provider_resource_id
+     LEFT JOIN provider_accounts pa ON pa.data_source_id = ds.id
      LEFT JOIN (
        SELECT cms.*
        FROM content_metric_snapshots cms
@@ -215,12 +230,16 @@ async function queryContentRows(connection, workspaceId, options = {}) {
     `SELECT COUNT(*) AS count
      FROM content_items ci
      JOIN data_sources ds ON ds.id = ci.data_source_id
+     LEFT JOIN workspace_provider_connections wpc ON wpc.data_source_id = ds.id
      WHERE ${where.join(' AND ')}`,
     params
   );
   return {
     rows: rows.map(row => ({
       id: row.id,
+      provider: row.provider,
+      connection_id: row.connection_id || null,
+      resource_name: row.resource_name || null,
       provider_content_id: row.provider_content_id,
       published_at: serializeDate(row.published_at),
       title: row.title,
@@ -254,7 +273,8 @@ async function getContent(userId, workspaceId, query = {}) {
       search: query.search,
       limit: query.limit,
       offset: query.offset,
-      provider: query.provider
+      provider: query.provider,
+      connectionId: query.connection_id
     });
   });
 }
@@ -273,9 +293,13 @@ async function getContentDetail(userId, workspaceId, contentItemId) {
   return withConnection(async connection => {
     await requireWorkspaceCapability(connection, workspaceId, userId, 'viewDashboard');
     const rows = await connection.query(
-      `SELECT ci.*
+      `SELECT ci.*, ds.provider, wpc.id AS connection_id,
+              COALESCE(pr.display_name, pa.display_name, pa.username) AS resource_name
        FROM content_items ci
        JOIN data_sources ds ON ds.id = ci.data_source_id
+       LEFT JOIN workspace_provider_connections wpc ON wpc.data_source_id = ds.id
+       LEFT JOIN provider_resources pr ON pr.id = wpc.provider_resource_id
+       LEFT JOIN provider_accounts pa ON pa.data_source_id = ds.id
        WHERE ci.id = ? AND ci.workspace_id = ? AND ci.deleted_at IS NULL
          AND ds.provider IN ('tiktok', 'youtube', 'facebook_pages', 'instagram')
        LIMIT 1`,
@@ -294,6 +318,9 @@ async function getContentDetail(userId, workspaceId, contentItemId) {
     return {
       item: {
         id: item.id,
+        provider: item.provider,
+        connection_id: item.connection_id || null,
+        resource_name: item.resource_name || null,
         provider_content_id: item.provider_content_id,
         published_at: serializeDate(item.published_at),
         title: item.title,

@@ -407,6 +407,8 @@ function toWorkspaceProvider(provider, source, env) {
   }
   const configured = publicProvider.enabled && publicProvider.status === 'available';
   const connection = {
+    id: source ? source.connection_id : null,
+    data_source_id: source ? source.data_source_id : null,
     status,
     reconnect_reason: source ? source.reconnect_reason : null,
     last_sync_at: source ? source.last_sync_at : null,
@@ -424,7 +426,8 @@ function toWorkspaceProvider(provider, source, env) {
     ...publicProvider,
     status: source ? status : publicProvider.status,
     connectable: configured && status !== 'connecting',
-    connection
+    connection,
+    connections: connection.id ? [connection] : []
   };
 }
 
@@ -1017,7 +1020,9 @@ async function listWorkspaceProviderCatalog(userId, workspaceId, env = process.e
     }
     assertCapability(membership.role, 'viewDashboard');
     const sourceRows = await connection.query(
-      `SELECT ds.provider,
+      `SELECT ds.id AS data_source_id,
+              wpc.id AS connection_id,
+              ds.provider,
               ds.status,
               ds.reconnect_reason,
               ds.last_sync_at,
@@ -1027,6 +1032,7 @@ async function listWorkspaceProviderCatalog(userId, workspaceId, env = process.e
               pa.username,
               pa.display_name
        FROM data_sources ds
+       LEFT JOIN workspace_provider_connections wpc ON wpc.data_source_id = ds.id
        LEFT JOIN provider_accounts pa ON pa.data_source_id = ds.id
        WHERE ds.workspace_id = ? AND ds.deleted_at IS NULL`,
       [workspaceId]

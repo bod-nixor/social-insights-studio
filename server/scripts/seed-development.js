@@ -2,6 +2,7 @@
 const crypto = require('crypto');
 const mariadb = require('mariadb');
 const { assertLocalDatabaseUrl, assertNotProductionCommand, getDatabaseUrl } = require('./database-env');
+const { upsertProviderFoundation } = require('./seed-provider-foundation');
 
 function fixedId(group, index) {
   return `${String(group).padStart(8, '0')}-0000-4000-8000-${String(index).padStart(12, '0')}`;
@@ -468,6 +469,19 @@ async function main() {
             : clock.daysAgo(workspace.lastSyncAge),
         nextSyncAt: workspace.nextAge === null ? null : clock.daysAgo(workspace.nextAge)
       });
+      await upsertProviderFoundation(connection, {
+        id: workspace.sourceId,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        status: workspace.status,
+        lastSyncAt: workspace.lastSyncAge === null ? null : clock.daysAgo(workspace.lastSyncAge),
+        lastSuccessfulSyncAt: workspace.lastSuccessfulSyncAge !== undefined
+          ? clock.daysAgo(workspace.lastSuccessfulSyncAge)
+          : workspace.lastSyncAge === null || workspace.status === 'reconnect_required'
+            ? null
+            : clock.daysAgo(workspace.lastSyncAge),
+        nextSyncAt: workspace.nextAge === null ? null : clock.daysAgo(workspace.nextAge)
+      }, ownerId);
     }
 
     await seedMembersAndInvitations(connection, workspaces[0].id, ownerId);
@@ -509,7 +523,9 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch(error => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}

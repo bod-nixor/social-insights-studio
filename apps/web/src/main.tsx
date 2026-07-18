@@ -11,6 +11,7 @@ import {
   Download,
   ExternalLink,
   Facebook,
+  FileText,
   Instagram,
   Link2,
   Loader2,
@@ -43,13 +44,14 @@ import {
 } from 'recharts';
 import './styles.css';
 
-type View = 'overview' | 'sources' | 'content' | 'connections' | 'members' | 'sync' | 'account';
+type View = 'overview' | 'sources' | 'content' | 'reports' | 'connections' | 'members' | 'sync' | 'account';
 type LoadState = 'ready' | 'loading' | 'empty' | 'stale' | 'partial' | 'permission' | 'error' | 'reconnect';
 type RangeKey = '7d' | '30d' | '90d' | 'custom';
 type Role = 'owner' | 'admin' | 'analyst' | 'viewer';
 type SortDirection = 'asc' | 'desc';
 type ContentSort = 'published_at' | 'views' | 'likes' | 'comments' | 'shares' | 'engagement';
 type OverviewProvider = 'tiktok' | 'youtube' | 'facebook_pages' | 'instagram' | 'google_analytics_4';
+type SocialContentProvider = 'all' | Exclude<OverviewProvider, 'google_analytics_4'>;
 
 type User = {
   id: string;
@@ -92,6 +94,9 @@ type DashboardData = {
 
 type ContentRow = {
   id: string;
+  provider: Exclude<OverviewProvider, 'google_analytics_4'>;
+  connection_id: string | null;
+  resource_name: string | null;
   provider_content_id: string;
   published_at: string | null;
   title: string | null;
@@ -465,6 +470,84 @@ type CrossPlatformDashboardData = {
   methodology: string[];
 };
 
+type ReportConfiguration = {
+  enabled: boolean;
+  ready: boolean;
+  retention_days: number;
+  max_resources: number;
+  max_range_days: number;
+  supported_sections: string[];
+  renderer: string;
+};
+
+type ReportResource = {
+  connection_id: string;
+  provider: OverviewProvider;
+  provider_resource_id: string;
+  resource_name: string;
+  data_through_at: string | null;
+};
+
+type ReportRun = {
+  id: string;
+  definition_id: string;
+  title: string;
+  subtitle: string | null;
+  timezone: string;
+  range: { from: string; to: string };
+  comparison_enabled: boolean;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'expired';
+  progress_percent: number;
+  failure_category: string | null;
+  failure_code: string | null;
+  queued_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  expires_at: string | null;
+  data_through_at: string | null;
+  artifact: {
+    id: string;
+    filename: string;
+    byte_size: number;
+    page_count: number;
+    sha256: string;
+  } | null;
+  sections: string[];
+  resources: ReportResource[];
+};
+
+type ReportRequest = {
+  title: string;
+  subtitle: string;
+  timezone: string;
+  range: RangeKey;
+  from?: string;
+  to?: string;
+  comparison_enabled: boolean;
+  sections: string[];
+  resources: Array<{ provider: OverviewProvider; connection_id: string }>;
+};
+
+type ReportPreview = {
+  title: string;
+  subtitle: string | null;
+  timezone: string;
+  range: { from: string; to: string };
+  comparison_enabled: boolean;
+  sections: Array<{ key: string; included: boolean }>;
+  resources: Array<{
+    provider: OverviewProvider;
+    provider_name: string;
+    connection_id: string;
+    resource_name: string;
+    status: string;
+    data_through_date: string | null;
+    available_metric_count: number;
+  }>;
+  estimated_page_count: number;
+  retention_days: number;
+};
+
 type DisconnectTarget = {
   provider: 'tiktok' | 'youtube' | 'facebook' | 'instagram' | 'google-analytics';
   connectionId?: string;
@@ -525,6 +608,7 @@ const views: Array<{ id: View; label: string; icon: React.ComponentType<{ size?:
     { id: 'overview', label: 'Overview', icon: BarChart3 },
     { id: 'sources', label: 'Sources', icon: Activity },
     { id: 'content', label: 'Content', icon: Video },
+    { id: 'reports', label: 'Reports', icon: FileText },
     { id: 'connections', label: 'Connections', icon: Link2 },
     { id: 'members', label: 'Members', icon: Users },
     { id: 'sync', label: 'Sync history', icon: RefreshCw },
@@ -646,7 +730,19 @@ function friendlyError(code: string) {
     display_name_too_long: 'Display names must be 100 characters or fewer.',
     session_not_found: 'That session is no longer active.',
     invalid_email: 'Enter a valid email address.',
-    mail_send_failed: 'The invitation could not be sent. Try again or contact support.'
+    mail_send_failed: 'The invitation could not be sent. Try again or contact support.',
+    pdf_reports_disabled: 'PDF reports are not enabled for this environment.',
+    pdf_reports_not_configured: 'PDF report storage is not configured. Ask an operator to review the reporting setup.',
+    invalid_report_resource_count: 'Select at least one connected resource.',
+    report_resource_not_found: 'A selected resource is no longer available in this workspace.',
+    report_resource_not_connected: 'A selected resource is disconnected and cannot be included.',
+    report_source_snapshot_unavailable: 'Stored analytics for a selected resource could not be prepared.',
+    report_snapshot_too_large: 'This report selection is too large. Choose fewer resources or a shorter range.',
+    report_artifact_not_available: 'This report is not ready to download or has expired.',
+    report_artifact_missing: 'The report file is unavailable. Generate the report again.',
+    report_artifact_delete_failed: 'The report file could not be removed. Try again or contact support.',
+    download_grant_expired: 'The download link expired. Request a new one.',
+    download_grant_consumed: 'That one-time download link has already been used.'
   };
   return messages[code] || 'Something went wrong. Try again or contact support if the problem continues.';
 }
@@ -659,6 +755,7 @@ function pathDetailState() {
 function initialUrlState() {
   const params = new URLSearchParams(window.location.search);
   const detail = pathDetailState();
+  const contentProvider = params.get('provider');
   return {
     view: (params.get('view') as View) || (detail ? 'content' : 'overview'),
     workspaceId: detail?.workspaceId || params.get('workspace') || '',
@@ -668,6 +765,10 @@ function initialUrlState() {
     to: params.get('to') || todayInputValue(0),
     metric: params.get('metric') || 'both',
     resource: params.get('resource') || '',
+    contentProvider: (['all', 'tiktok', 'youtube', 'facebook_pages', 'instagram'].includes(contentProvider || '')
+      ? contentProvider
+      : 'all') as SocialContentProvider,
+    contentResource: params.get('resource') || '',
     provider: (['youtube', 'facebook_pages', 'instagram', 'google_analytics_4'].includes(params.get('provider') || '')
       ? params.get('provider')
       : 'tiktok') as OverviewProvider,
@@ -757,6 +858,23 @@ function roleCanSync(role?: Role) {
   return role === 'owner' || role === 'admin' || role === 'analyst';
 }
 
+function roleCanReport(role?: Role) {
+  return role === 'owner' || role === 'admin' || role === 'analyst';
+}
+
+function reportFailureMessage(report: ReportRun) {
+  if (report.failure_category === 'storage') {
+    return 'Private report storage is temporarily unavailable. Try again after an operator restores it.';
+  }
+  if (report.failure_category === 'limit') {
+    return 'This report exceeded a generation limit. Choose fewer resources or a shorter range.';
+  }
+  if (report.failure_category === 'cancelled') {
+    return 'This report was cancelled and is no longer being prepared.';
+  }
+  return 'The report could not be generated. Try again or contact support if the problem continues.';
+}
+
 function providerAccessLabels(providerId: string) {
   const labels: Record<string, string[]> = {
     tiktok: ['Profile and audience totals', 'Published video performance'],
@@ -792,6 +910,8 @@ function App() {
   const [contentSort, setContentSort] = useState<ContentSort>(initial.contentSort);
   const [contentDir, setContentDir] = useState<SortDirection>(initial.contentDir);
   const [contentSearch, setContentSearch] = useState(initial.search);
+  const [contentProvider, setContentProvider] = useState<SocialContentProvider>(initial.contentProvider);
+  const [contentConnectionId, setContentConnectionId] = useState(initial.contentResource);
   const [contentPage, setContentPage] = useState(initial.page);
   const [contentPageSize, setContentPageSize] = useState(initial.pageSize);
   const [syncPage, setSyncPage] = useState(1);
@@ -802,6 +922,9 @@ function App() {
   const [googleAnalyticsDashboard, setGoogleAnalyticsDashboard] = useState<GoogleAnalyticsDashboardData | null>(null);
   const [crossPlatformDashboard, setCrossPlatformDashboard] = useState<CrossPlatformDashboardData | null>(null);
   const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogItem[]>([]);
+  const [reportConfiguration, setReportConfiguration] = useState<ReportConfiguration | null>(null);
+  const [reports, setReports] = useState<ReportRun[]>([]);
+  const [reportPreview, setReportPreview] = useState<ReportPreview | null>(null);
   const [accountData, setAccountData] = useState<AccountData | null>(null);
   const [invitationToken, setInvitationToken] = useState(initial.invitation);
   const [content, setContent] = useState<ContentData | null>(null);
@@ -888,6 +1011,8 @@ function App() {
       setContentSort(next.contentSort);
       setContentDir(next.contentDir);
       setContentSearch(next.search);
+      setContentProvider(next.contentProvider);
+      setContentConnectionId(next.contentResource);
       setContentPage(next.page);
       setContentPageSize(next.pageSize);
     }
@@ -914,6 +1039,8 @@ function App() {
     }
     if (view === 'content') {
       params.set('range', range);
+      params.set('provider', contentProvider);
+      if (contentConnectionId) params.set('resource', contentConnectionId);
       params.set('sort', contentSort);
       params.set('direction', contentDir);
       params.set('page', String(contentPage));
@@ -942,6 +1069,8 @@ function App() {
     contentSort,
     contentDir,
     contentSearch,
+    contentProvider,
+    contentConnectionId,
     contentPage,
     contentPageSize,
     contentDetailId,
@@ -986,6 +1115,8 @@ function App() {
       const contentParams = new URLSearchParams(rangeQuery);
       contentParams.set('sort', contentSort);
       contentParams.set('direction', contentDir);
+      contentParams.set('provider', contentProvider);
+      if (contentConnectionId) contentParams.set('connection_id', contentConnectionId);
       contentParams.set('limit', String(contentPageSize));
       contentParams.set('offset', String((contentPage - 1) * contentPageSize));
       if (contentSearch.trim()) contentParams.set('search', contentSearch.trim());
@@ -1000,8 +1131,8 @@ function App() {
         return params.toString();
       };
       const loadProviderDashboards = view === 'sources';
-      const loadTikTokDashboard = ['sources', 'content', 'connections'].includes(view);
-      const loadCatalog = ['sources', 'connections'].includes(view);
+      const loadTikTokDashboard = ['sources', 'connections'].includes(view);
+      const loadCatalog = ['sources', 'content', 'connections', 'reports'].includes(view);
       try {
         const [
           dashboardResult,
@@ -1012,7 +1143,9 @@ function App() {
           crossPlatformDashboardResult,
           contentResult,
           syncResult,
-          catalogResult
+          catalogResult,
+          reportsResult,
+          reportConfigurationResult
         ] = await Promise.all([
           loadTikTokDashboard
             ? api<DashboardData>(`/api/workspaces/${workspace.id}/dashboard?${dashboardParams.toString()}`)
@@ -1050,7 +1183,13 @@ function App() {
             : Promise.resolve<SyncData | null>(null),
           loadCatalog
             ? api<{ providers: ProviderCatalogItem[] }>(`/api/workspaces/${workspace.id}/provider-catalog`)
-            : Promise.resolve<{ providers: ProviderCatalogItem[] } | null>(null)
+            : Promise.resolve<{ providers: ProviderCatalogItem[] } | null>(null),
+          view === 'reports' && roleCanReport(workspace.role)
+            ? api<{ reports: ReportRun[] }>(`/api/workspaces/${workspace.id}/reports`)
+            : Promise.resolve<{ reports: ReportRun[] } | null>(null),
+          view === 'reports'
+            ? api<{ reporting: ReportConfiguration }>('/api/reports/configuration')
+            : Promise.resolve<{ reporting: ReportConfiguration } | null>(null)
         ]);
         if (dashboardResult) setDashboard(dashboardResult);
         if (youtubeDashboardResult) setYouTubeDashboard(youtubeDashboardResult);
@@ -1061,6 +1200,9 @@ function App() {
         if (contentResult) setContent(contentResult);
         if (syncResult) setSyncData(syncResult);
         if (catalogResult) setProviderCatalog(catalogResult.providers);
+        if (reportsResult) setReports(reportsResult.reports);
+        else if (view === 'reports') setReports([]);
+        if (reportConfigurationResult) setReportConfiguration(reportConfigurationResult.reporting);
         if (view === 'members' && roleCanManage(workspace.role)) {
           const memberResult = await api<{ members: Member[]; invitations: Invitation[] }>(
             `/api/workspaces/${workspace.id}/members`
@@ -1086,7 +1228,7 @@ function App() {
                     : resolveLoadState(dashboardResult)
           );
         } else if (view === 'content') {
-          setState(resolveLoadState(dashboardResult));
+          setState(contentResult && contentResult.total > 0 ? 'ready' : 'empty');
         } else {
           setState('ready');
         }
@@ -1100,6 +1242,8 @@ function App() {
       contentDir,
       contentPage,
       contentPageSize,
+      contentProvider,
+      contentConnectionId,
       contentSearch,
       contentSort,
       overviewProvider,
@@ -1116,6 +1260,23 @@ function App() {
     if (!user || !activeWorkspace) return;
     void loadWorkspaceData(activeWorkspace);
   }, [user, activeWorkspace, loadWorkspaceData]);
+
+  useEffect(() => {
+    if (
+      !user ||
+      !activeWorkspace ||
+      view !== 'reports' ||
+      !roleCanReport(activeWorkspace.role) ||
+      !reports.some((report) => report.status === 'queued' || report.status === 'running')
+    )
+      return undefined;
+    const interval = window.setInterval(() => {
+      void api<{ reports: ReportRun[] }>(`/api/workspaces/${activeWorkspace.id}/reports`)
+        .then((result) => setReports(result.reports))
+        .catch((error) => setMessage(error instanceof Error ? error.message : 'report_status_failed'));
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [activeWorkspace, reports, user, view]);
 
   useEffect(() => {
     if (!initial.youtubeOutcome) return;
@@ -1320,6 +1481,88 @@ function App() {
       setMessage(
         code === 'manual_sync_cooldown' ? 'Manual sync is cooling down. Try again after the 15-minute window.' : code
       );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function previewPdfReport(request: ReportRequest) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ preview: ReportPreview }>(`/api/workspaces/${activeWorkspace.id}/reports/preview`, {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify(request)
+      });
+      setReportPreview(result.preview);
+      setToast('Report preview updated from stored analytics.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'report_preview_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generatePdfReport(request: ReportRequest) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const requestId = window.crypto.randomUUID();
+      await api<{ report: ReportRun }>(`/api/workspaces/${activeWorkspace.id}/reports`, {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({ ...request, request_id: requestId })
+      });
+      setReportPreview(null);
+      setToast('Report queued. It will be generated in the background from the stored snapshot.');
+      await loadWorkspaceData(activeWorkspace);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'report_generation_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function downloadPdfReport(report: ReportRun) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const grant = await api<{ download_url: string }>(
+        `/api/workspaces/${activeWorkspace.id}/reports/${report.id}/download-grants`,
+        {
+          method: 'POST',
+          headers: { 'x-csrf-token': csrf },
+          body: JSON.stringify({})
+        }
+      );
+      window.location.assign(grant.download_url);
+      setToast('Your one-time report download has started.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'report_download_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deletePdfReport(report: ReportRun) {
+    if (!activeWorkspace || !window.confirm(`Delete “${report.title}”? Its PDF will no longer be downloadable.`))
+      return;
+    setBusy(true);
+    setMessage('');
+    try {
+      await api(`/api/workspaces/${activeWorkspace.id}/reports/${report.id}`, {
+        method: 'DELETE',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({})
+      });
+      setToast('Report deleted.');
+      await loadWorkspaceData(activeWorkspace);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'report_delete_failed');
     } finally {
       setBusy(false);
     }
@@ -2158,6 +2401,9 @@ function App() {
               <Content
                 workspace={activeWorkspace}
                 content={content}
+                providers={providerCatalog}
+                provider={contentProvider}
+                connectionId={contentConnectionId}
                 sort={contentSort}
                 direction={contentDir}
                 search={contentSearch}
@@ -2173,6 +2419,15 @@ function App() {
                   setContentSearch(value);
                   setContentPage(1);
                 }}
+                onProviderChange={(provider) => {
+                  setContentProvider(provider);
+                  setContentConnectionId('');
+                  setContentPage(1);
+                }}
+                onConnectionChange={(connectionId) => {
+                  setContentConnectionId(connectionId);
+                  setContentPage(1);
+                }}
                 onPageChange={setContentPage}
                 onPageSizeChange={(size) => {
                   setContentPageSize(size);
@@ -2181,6 +2436,20 @@ function App() {
                 onOpenDetail={openContentDetail}
               />
             ) : null}
+            {view === 'reports' && (
+              <Reports
+                role={activeWorkspace.role}
+                configuration={reportConfiguration}
+                providers={providerCatalog}
+                reports={reports}
+                preview={reportPreview}
+                busy={busy}
+                onPreview={previewPdfReport}
+                onGenerate={generatePdfReport}
+                onDownload={downloadPdfReport}
+                onDelete={deletePdfReport}
+              />
+            )}
             {view === 'connections' && (
               <Connections
                 role={activeWorkspace.role}
@@ -3842,9 +4111,23 @@ function contentLabel(row: ContentRow) {
   return row.title || row.description || row.provider_content_id;
 }
 
+const socialProviderNames: Record<Exclude<OverviewProvider, 'google_analytics_4'>, string> = {
+  tiktok: 'TikTok',
+  youtube: 'YouTube',
+  facebook_pages: 'Facebook Pages',
+  instagram: 'Instagram'
+};
+
+function socialProviderName(provider: Exclude<OverviewProvider, 'google_analytics_4'>) {
+  return socialProviderNames[provider];
+}
+
 function Content({
   workspace,
   content,
+  providers,
+  provider,
+  connectionId,
   sort,
   direction,
   search,
@@ -3853,12 +4136,17 @@ function Content({
   rangeQuery,
   onSort,
   onSearch,
+  onProviderChange,
+  onConnectionChange,
   onPageChange,
   onPageSizeChange,
   onOpenDetail
 }: {
   workspace: Workspace;
   content: ContentData | null;
+  providers: ProviderCatalogItem[];
+  provider: SocialContentProvider;
+  connectionId: string;
   sort: ContentSort;
   direction: SortDirection;
   search: string;
@@ -3867,13 +4155,35 @@ function Content({
   rangeQuery: URLSearchParams;
   onSort: (sort: ContentSort, direction: SortDirection) => void;
   onSearch: (search: string) => void;
+  onProviderChange: (provider: SocialContentProvider) => void;
+  onConnectionChange: (connectionId: string) => void;
   onPageChange: (page: number) => void;
   onPageSizeChange: (size: number) => void;
   onOpenDetail: (contentId: string) => void;
 }) {
   const total = content?.total || 0;
   const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+  const availableProviders = providers.filter((item) =>
+    ['tiktok', 'youtube', 'facebook_pages', 'instagram'].includes(item.id)
+  );
+  const resourceOptions = availableProviders
+    .filter((item) => provider === 'all' || item.id === provider)
+    .flatMap((item) =>
+      (item.connections || [])
+        .filter((connection) => Boolean(connection.id))
+        .map((connection) => ({
+          id: connection.id,
+          provider: item.id as Exclude<OverviewProvider, 'google_analytics_4'>,
+          name:
+            connection.account?.display_name ||
+            connection.account?.username ||
+            connection.account?.id ||
+            item.resourceName
+        }))
+    );
   const exportParams = new URLSearchParams(rangeQuery);
+  exportParams.set('provider', provider);
+  if (connectionId) exportParams.set('connection_id', connectionId);
   exportParams.set('sort', sort);
   exportParams.set('direction', direction);
   if (search.trim()) exportParams.set('search', search.trim());
@@ -3895,6 +4205,29 @@ function Content({
         </a>
       </div>
       <div className="toolbar content-toolbar">
+        <label>
+          Provider
+          <select value={provider} onChange={(event) => onProviderChange(event.target.value as SocialContentProvider)}>
+            <option value="all">All social providers</option>
+            {availableProviders.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Resource
+          <select value={connectionId} onChange={(event) => onConnectionChange(event.target.value)}>
+            <option value="">All selected resources</option>
+            {resourceOptions.map((resource) => (
+              <option key={resource.id} value={resource.id}>
+                {provider === 'all' ? `${socialProviderName(resource.provider)} · ` : ''}
+                {resource.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <label>
           Search
           <span className="input-icon">
@@ -3931,6 +4264,7 @@ function Content({
                     onSort={onSort}
                   />
                   <th scope="col">Content</th>
+                  <th scope="col">Source</th>
                   <SortableTh label="Views" value="views" sort={sort} direction={direction} onSort={onSort} />
                   <SortableTh label="Likes" value="likes" sort={sort} direction={direction} onSort={onSort} />
                   <SortableTh label="Comments" value="comments" sort={sort} direction={direction} onSort={onSort} />
@@ -3947,6 +4281,10 @@ function Content({
                         {contentLabel(row)}
                       </button>
                       <small>{row.provider_content_id}</small>
+                    </td>
+                    <td data-label="Source">
+                      <strong>{socialProviderName(row.provider)}</strong>
+                      <small>{row.resource_name || 'Selected resource'}</small>
                     </td>
                     <MetricCell label="Views" value={row.view_count} />
                     <MetricCell label="Likes" value={row.like_count} />
@@ -3968,9 +4306,15 @@ function Content({
         </>
       ) : (
         <div className="table-empty">
-          {search ? 'No content matches the active filters.' : 'No content performance is available.'}
+          {search || provider !== 'all' || connectionId
+            ? 'No content matches the active filters.'
+            : 'No social content performance is available.'}
         </div>
       )}
+      <p className="muted">
+        Counts retain each provider’s reporting semantics. Missing or unsupported values remain N/A and are never
+        converted to zero.
+      </p>
     </section>
   );
 }
@@ -4027,9 +4371,10 @@ function ContentDetailView({ detail, onBack }: { detail: ContentDetail | null; o
       </button>
       <div className="panel detail-hero">
         <div>
-          <p className="eyebrow">Content detail</p>
+          <p className="eyebrow">{socialProviderName(detail.item.provider)} content detail</p>
           <h2 id="content-detail-title">{contentLabel(detail.item)}</h2>
           <p>{detail.item.description || 'No provider description available.'}</p>
+          <p className="muted">{detail.item.resource_name || 'Selected provider resource'}</p>
         </div>
         <div className="thumbnail-fallback">
           <Video size={32} aria-hidden />
@@ -4102,6 +4447,410 @@ function ContentDetailView({ detail, onBack }: { detail: ContentDetail | null; o
         )}
       </section>
     </section>
+  );
+}
+
+function Reports({
+  role,
+  configuration,
+  providers,
+  reports,
+  preview,
+  busy,
+  onPreview,
+  onGenerate,
+  onDownload,
+  onDelete
+}: {
+  role: Role;
+  configuration: ReportConfiguration | null;
+  providers: ProviderCatalogItem[];
+  reports: ReportRun[];
+  preview: ReportPreview | null;
+  busy: boolean;
+  onPreview: (request: ReportRequest) => Promise<void>;
+  onGenerate: (request: ReportRequest) => Promise<void>;
+  onDownload: (report: ReportRun) => Promise<void>;
+  onDelete: (report: ReportRun) => Promise<void>;
+}) {
+  const [title, setTitle] = useState('Monthly performance report');
+  const [subtitle, setSubtitle] = useState('Read-only analytics summary');
+  const [reportRange, setReportRange] = useState<RangeKey>('30d');
+  const [from, setFrom] = useState(todayInputValue(-30));
+  const [to, setTo] = useState(todayInputValue(-1));
+  const [timezone, setTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  const [comparisonEnabled, setComparisonEnabled] = useState(true);
+  const [sections, setSections] = useState<string[]>([
+    'executive_summary',
+    'cross_platform_summary',
+    'resource_sections',
+    'methodology'
+  ]);
+  const [selectedResourceKeys, setSelectedResourceKeys] = useState<string[]>([]);
+  const [formError, setFormError] = useState('');
+
+  const resources = useMemo(
+    () =>
+      providers.flatMap((provider) => {
+        if (!['tiktok', 'youtube', 'facebook_pages', 'instagram', 'google_analytics_4'].includes(provider.id))
+          return [];
+        return (provider.connections || [])
+          .filter(
+            (connection) =>
+              Boolean(connection.id) && !['disconnected', 'revoked', 'disabled'].includes(connection.status)
+          )
+          .map((connection) => ({
+            key: `${provider.id}:${connection.id}`,
+            provider: provider.id as OverviewProvider,
+            providerName: provider.name,
+            connectionId: connection.id as string,
+            name:
+              connection.account?.display_name ||
+              connection.account?.username ||
+              connection.account?.id ||
+              provider.resourceName,
+            resourceId: connection.account?.id || '',
+            status: connection.status,
+            dataThrough: connection.data_through_at || null
+          }));
+      }),
+    [providers]
+  );
+
+  if (!roleCanReport(role)) {
+    return (
+      <section className="empty-band" aria-labelledby="reports-permission-title">
+        <Lock size={24} aria-hidden />
+        <div>
+          <h2 id="reports-permission-title">Reports require Analyst access</h2>
+          <p className="muted">
+            Ask a workspace owner or admin to change your role before creating or downloading reports.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  if (!configuration) {
+    return <StateBanner state="loading" />;
+  }
+
+  if (!configuration.enabled || !configuration.ready) {
+    return (
+      <section className="empty-band" aria-labelledby="reports-configuration-title">
+        <AlertCircle size={24} aria-hidden />
+        <div>
+          <h2 id="reports-configuration-title">PDF reports are unavailable</h2>
+          <p className="muted">Report generation and private storage are not available for this environment.</p>
+        </div>
+      </section>
+    );
+  }
+  const activeReportConfiguration = configuration;
+
+  const selectedResources = resources.filter((resource) => selectedResourceKeys.includes(resource.key));
+  const sectionLabels: Record<string, string> = {
+    executive_summary: 'Executive summary',
+    cross_platform_summary: 'Cross-platform summary',
+    resource_sections: 'Provider and resource detail',
+    methodology: 'Methodology and data notes'
+  };
+
+  function requestFromForm(): ReportRequest | null {
+    setFormError('');
+    if (!title.trim()) {
+      setFormError('Enter a report title.');
+      return null;
+    }
+    if (selectedResources.length < 1) {
+      setFormError('Select at least one connected resource.');
+      return null;
+    }
+    if (selectedResources.length > activeReportConfiguration.max_resources) {
+      setFormError(`Select no more than ${activeReportConfiguration.max_resources} resources.`);
+      return null;
+    }
+    if (reportRange === 'custom' && (!from || !to || new Date(from) > new Date(to))) {
+      setFormError('Choose a valid custom date range.');
+      return null;
+    }
+    return {
+      title: title.trim(),
+      subtitle: subtitle.trim(),
+      timezone,
+      range: reportRange,
+      ...(reportRange === 'custom' ? { from, to } : {}),
+      comparison_enabled: comparisonEnabled,
+      sections,
+      resources: selectedResources.map((resource) => ({
+        provider: resource.provider,
+        connection_id: resource.connectionId
+      }))
+    };
+  }
+
+  async function previewReport() {
+    const request = requestFromForm();
+    if (request) await onPreview(request);
+  }
+
+  async function generateReport() {
+    const request = requestFromForm();
+    if (request) await onGenerate(request);
+  }
+
+  return (
+    <div className="reports-layout">
+      <section className="panel report-builder" aria-labelledby="report-builder-title">
+        <div className="panel-title between">
+          <div>
+            <p className="eyebrow">Stored-data export</p>
+            <h2 id="report-builder-title">Create PDF report</h2>
+            <p>Choose explicit connected resources. Generation runs securely in the background.</p>
+          </div>
+          <span className="status-badge ready">7-day retention</span>
+        </div>
+
+        <div className="report-form-grid">
+          <label>
+            Report title
+            <input maxLength={180} value={title} onChange={(event) => setTitle(event.target.value)} />
+          </label>
+          <label>
+            Report timezone
+            <input maxLength={64} value={timezone} onChange={(event) => setTimezone(event.target.value)} />
+          </label>
+          <label className="report-subtitle-field">
+            Subtitle
+            <textarea maxLength={300} rows={3} value={subtitle} onChange={(event) => setSubtitle(event.target.value)} />
+          </label>
+        </div>
+
+        <fieldset className="report-fieldset">
+          <legend>Date range</legend>
+          <div className="segmented" aria-label="Report date range">
+            {(['7d', '30d', '90d', 'custom'] as RangeKey[]).map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={reportRange === value ? 'active' : ''}
+                onClick={() => setReportRange(value)}
+              >
+                {value === 'custom' ? 'Custom' : value.toUpperCase()}
+              </button>
+            ))}
+          </div>
+          {reportRange === 'custom' && (
+            <div className="date-pair">
+              <label>
+                From
+                <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} />
+              </label>
+              <label>
+                To
+                <input type="date" value={to} onChange={(event) => setTo(event.target.value)} />
+              </label>
+            </div>
+          )}
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={comparisonEnabled}
+              onChange={(event) => setComparisonEnabled(event.target.checked)}
+            />
+            Compare with the previous period where a stored baseline exists
+          </label>
+        </fieldset>
+
+        <fieldset className="report-fieldset">
+          <legend>Resources</legend>
+          {resources.length === 0 ? (
+            <p className="muted">Connect and select at least one provider resource before creating a report.</p>
+          ) : (
+            <div className="report-resource-list">
+              {resources.map((resource) => (
+                <label className="report-resource-option" key={resource.key}>
+                  <input
+                    type="checkbox"
+                    aria-label={`Include ${resource.name} from ${resource.providerName}`}
+                    checked={selectedResourceKeys.includes(resource.key)}
+                    onChange={(event) =>
+                      setSelectedResourceKeys((current) =>
+                        event.target.checked
+                          ? [...current, resource.key]
+                          : current.filter((key) => key !== resource.key)
+                      )
+                    }
+                  />
+                  <span>
+                    <strong>{resource.name}</strong>
+                    <small>
+                      {resource.providerName} · {resource.status.replace(/_/g, ' ')}
+                      {resource.dataThrough
+                        ? ` · data through ${formatDate(resource.dataThrough, { dateStyle: 'medium' })}`
+                        : ''}
+                    </small>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+        </fieldset>
+
+        <fieldset className="report-fieldset">
+          <legend>Sections</legend>
+          <div className="report-section-list">
+            {Object.entries(sectionLabels).map(([key, label]) => (
+              <label className="toggle" key={key}>
+                <input
+                  type="checkbox"
+                  checked={sections.includes(key)}
+                  disabled={key === 'resource_sections'}
+                  onChange={(event) =>
+                    setSections((current) =>
+                      event.target.checked ? [...current, key] : current.filter((section) => section !== key)
+                    )
+                  }
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        {formError && (
+          <p className="form-error" role="alert">
+            {formError}
+          </p>
+        )}
+        <div className="button-row start">
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={busy || resources.length === 0}
+            onClick={previewReport}
+          >
+            <Search size={18} aria-hidden />
+            Preview outline
+          </button>
+          <button type="button" disabled={busy || resources.length === 0} onClick={generateReport}>
+            {busy ? <Loader2 className="spin" size={18} aria-hidden /> : <FileText size={18} aria-hidden />}
+            Generate PDF
+          </button>
+        </div>
+      </section>
+
+      {preview && (
+        <section className="panel report-preview" aria-labelledby="report-preview-title">
+          <div className="panel-title between">
+            <div>
+              <p className="eyebrow">Preview</p>
+              <h2 id="report-preview-title">{preview.title}</h2>
+              <p>
+                {preview.range.from} to {preview.range.to} · {preview.timezone}
+              </p>
+            </div>
+            <span className="status-badge ready">About {preview.estimated_page_count} pages</span>
+          </div>
+          <div className="report-preview-grid">
+            <div>
+              <h3>Sections</h3>
+              <ul>
+                {preview.sections
+                  .filter((section) => section.included)
+                  .map((section) => (
+                    <li key={section.key}>{sectionLabels[section.key] || section.key}</li>
+                  ))}
+              </ul>
+            </div>
+            <div>
+              <h3>Selected resources</h3>
+              <ul>
+                {preview.resources.map((resource) => (
+                  <li key={`${resource.provider}:${resource.connection_id}`}>
+                    {resource.provider_name} · {resource.resource_name} · {resource.available_metric_count} available
+                    metrics
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          <p className="muted">
+            The final artifact uses the immutable stored snapshot captured when generation is queued.
+          </p>
+        </section>
+      )}
+
+      <section className="panel" aria-labelledby="report-history-title">
+        <div className="panel-title between">
+          <div>
+            <p className="eyebrow">Report history</p>
+            <h2 id="report-history-title">Generated reports</h2>
+            <p>Queued and running reports refresh automatically.</p>
+          </div>
+          {reports.some((report) => report.status === 'queued' || report.status === 'running') && (
+            <span className="status-badge pending">
+              <Loader2 className="spin" size={14} aria-hidden /> Preparing
+            </span>
+          )}
+        </div>
+        {reports.length === 0 ? (
+          <div className="empty-band">
+            <FileText size={22} aria-hidden />
+            <p>No reports have been generated for this workspace.</p>
+          </div>
+        ) : (
+          <div className="report-history-list">
+            {reports.map((report) => (
+              <article className="report-history-item" key={report.id}>
+                <div className="report-history-heading">
+                  <div>
+                    <h3>{report.title}</h3>
+                    <p className="muted">
+                      {report.range.from} to {report.range.to} · {report.resources.length} resource
+                      {report.resources.length === 1 ? '' : 's'} · queued {formatDate(report.queued_at)}
+                    </p>
+                  </div>
+                  <span
+                    className={`status-badge ${report.status === 'completed' ? 'ready' : report.status === 'running' ? 'connecting' : report.status === 'queued' ? 'pending' : report.status}`}
+                  >
+                    {report.status === 'running' ? `${report.progress_percent}% running` : report.status}
+                  </span>
+                </div>
+                <div className="report-history-meta">
+                  {report.artifact ? (
+                    <span>
+                      {report.artifact.page_count} pages · {(report.artifact.byte_size / 1024).toFixed(1)} KB
+                    </span>
+                  ) : report.failure_code ? (
+                    <span>{reportFailureMessage(report)}</span>
+                  ) : (
+                    <span>The report is still being prepared.</span>
+                  )}
+                  {report.expires_at && report.status === 'completed' && (
+                    <span>Expires {formatDate(report.expires_at)}</span>
+                  )}
+                </div>
+                <div className="button-row start">
+                  <button
+                    type="button"
+                    disabled={busy || report.status !== 'completed' || !report.artifact}
+                    onClick={() => void onDownload(report)}
+                  >
+                    <Download size={17} aria-hidden />
+                    Download
+                  </button>
+                  <button type="button" className="danger" disabled={busy} onClick={() => void onDelete(report)}>
+                    <Trash2 size={17} aria-hidden />
+                    Delete
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
   );
 }
 

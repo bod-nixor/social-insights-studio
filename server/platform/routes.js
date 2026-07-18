@@ -58,6 +58,13 @@ const {
 } = require('./meta-connection-service');
 const { getMetaDashboard } = require('./meta-dashboard-service');
 const {
+  completeGoogleAnalyticsConnection,
+  disconnectGoogleAnalytics,
+  selectGoogleAnalyticsResource,
+  startGoogleAnalyticsConnection
+} = require('./google-analytics-connection-service');
+const { getGoogleAnalyticsDashboard } = require('./google-analytics-dashboard-service');
+const {
   getPublicProviderCatalog,
   listWorkspaceProviderCatalog
 } = require('./provider-registry');
@@ -163,6 +170,22 @@ function metaCallbackOutcome(provider, error) {
     code === `${provider}_token_exchange_failed` ||
     code === `${provider}_long_lived_token_failed` ||
     code === `${provider}_resource_discovery_failed`
+  ) return 'provider_error';
+  return 'failed';
+}
+
+function googleAnalyticsCallbackOutcome(error) {
+  const code = error && (error.code || error.message);
+  if (code === 'ga4_authorization_denied') return 'denied';
+  if (code === 'ga4_required_scopes_missing') return 'missing_scopes';
+  if (code === 'ga4_oauth_redirect_mismatch' || code === 'ga4_not_configured') {
+    return 'configuration_error';
+  }
+  if (
+    code === 'ga4_authorization_failed' ||
+    code === 'ga4_token_exchange_failed' ||
+    code === 'ga4_property_discovery_failed' ||
+    code === 'ga4_property_discovery_incomplete'
   ) return 'provider_error';
   return 'failed';
 }
@@ -515,6 +538,44 @@ function createPlatformRouter() {
     }
   });
 
+  router.post('/workspaces/:workspaceId/connections/google-analytics/start', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await startGoogleAnalyticsConnection({
+        userId: req.session.user.id,
+        sessionId: req.session.id,
+        workspaceId: req.params.workspaceId,
+        returnPath: (req.body && req.body.return_path) || '/',
+        targetConnectionId: (req.body && req.body.connection_id) || null
+      }));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/workspaces/:workspaceId/connections/google-analytics/select', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.status(201).json(await selectGoogleAnalyticsResource(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.body && req.body.resource_id
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.delete('/workspaces/:workspaceId/connections/google-analytics', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await disconnectGoogleAnalytics(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.body && req.body.connection_id ? req.body.connection_id : null
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
   for (const route of [
     { path: 'facebook', provider: 'facebook_pages' },
     { path: 'instagram', provider: 'instagram' }
@@ -603,6 +664,18 @@ function createPlatformRouter() {
     }
   });
 
+  router.get('/workspaces/:workspaceId/providers/google_analytics_4/dashboard', requireSession, async (req, res) => {
+    try {
+      return res.json(await getGoogleAnalyticsDashboard(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.query
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
   router.get('/workspaces/:workspaceId/provider-catalog', requireSession, async (req, res) => {
     try {
       return res.json({
@@ -673,6 +746,17 @@ function createPlatformRouter() {
     });
   }
 
+  router.post('/workspaces/:workspaceId/providers/google_analytics_4/sync-runs', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.status(202).json(await requestManualSync(req.session.user.id, req.params.workspaceId, {
+        provider: 'google_analytics_4',
+        connectionId: (req.body && req.body.connection_id) || null
+      }));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
   router.get('/workspaces/:workspaceId/exports/content.csv', requireSession, async (req, res) => {
     try {
       const result = await createContentCsvExport(req.session.user.id, req.params.workspaceId, req.query);
@@ -713,6 +797,26 @@ function createPlatformRouter() {
       return res.redirect(303, `${destination.pathname}${destination.search}${destination.hash}`);
     } catch (error) {
       return res.redirect(303, `/?view=connections&youtube=${youtubeCallbackOutcome(error)}`);
+    }
+  });
+
+  router.get('/integrations/google-analytics/callback', async (req, res) => {
+    try {
+      const cookies = parseCookies(req.get('cookie'));
+      const session = await authenticate(cookies[SESSION_COOKIE]);
+      if (!session) return res.redirect(303, '/?view=connections&analytics=failed');
+      const result = await completeGoogleAnalyticsConnection({
+        code: req.query.code,
+        state: req.query.state,
+        providerError: req.query.error,
+        sessionId: session.id,
+        userId: session.user.id
+      });
+      const destination = new URL(result.return_path || '/', 'https://social-insights.local');
+      destination.searchParams.set('analytics', result.outcome);
+      return res.redirect(303, `${destination.pathname}${destination.search}${destination.hash}`);
+    } catch (error) {
+      return res.redirect(303, `/?view=connections&analytics=${googleAnalyticsCallbackOutcome(error)}`);
     }
   });
 

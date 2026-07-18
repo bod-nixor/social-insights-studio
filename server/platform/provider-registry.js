@@ -2,6 +2,7 @@ const { getConnection } = require('../database');
 const { assertCapability } = require('./rbac');
 const { getYouTubeConfiguration } = require('./youtube-config');
 const { getMetaConfiguration } = require('./meta-config');
+const { getGoogleAnalyticsConfiguration } = require('./google-analytics-config');
 
 const PROVIDERS = [
   {
@@ -198,7 +199,7 @@ const PROVIDERS = [
     name: 'Website Analytics',
     resourceName: 'GA4 property',
     featureFlag: 'FEATURE_GA4_CONNECTOR',
-    statusWhenDisabled: 'coming_soon',
+    statusWhenDisabled: 'disabled',
     authModel: 'Google OAuth incremental authorization',
     selectedResourceModel: 'one authorization can discover multiple GA4 properties; selected properties become workspace connections',
     requestedScopes: [
@@ -343,11 +344,14 @@ function getProviderStatus(env, provider) {
   if (provider.id === 'facebook_pages' || provider.id === 'instagram') {
     return getMetaConfiguration(provider.id, env).status;
   }
+  if (provider.id === 'google_analytics_4') {
+    return getGoogleAnalyticsConfiguration(env).status;
+  }
   return 'feature_flagged';
 }
 
 function providerIsImplemented(provider) {
-  return ['tiktok', 'youtube', 'facebook_pages', 'instagram'].includes(provider.id);
+  return ['tiktok', 'youtube', 'facebook_pages', 'instagram', 'google_analytics_4'].includes(provider.id);
 }
 
 function toPublicProvider(provider, env) {
@@ -361,7 +365,9 @@ function toPublicProvider(provider, env) {
     implemented,
     connectable: provider.id === 'facebook_pages' || provider.id === 'instagram'
       ? getMetaConfiguration(provider.id, env).connectable
-      : false,
+      : provider.id === 'google_analytics_4'
+        ? getGoogleAnalyticsConfiguration(env).connectable
+        : false,
     status: getProviderStatus(env, provider),
     featureFlag: provider.featureFlag,
     authModel: provider.authModel,
@@ -817,6 +823,176 @@ async function getMetaWorkspaceProvider(connection, workspaceId, providerId, env
   };
 }
 
+async function getGoogleAnalyticsWorkspaceProvider(connection, workspaceId, env) {
+  const provider = PROVIDERS.find(item => item.id === 'google_analytics_4');
+  const publicProvider = toPublicProvider(provider, env);
+  const tableRows = await connection.query(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME IN (
+         'provider_authorizations',
+         'provider_authorization_credentials',
+         'provider_authorization_scopes',
+         'provider_resources',
+         'workspace_provider_connections',
+         'provider_resource_observations',
+         'provider_metric_observations',
+         'provider_dimension_observations',
+         'provider_request_events'
+       )`
+  );
+  const foundationReady = Number(tableRows[0] && tableRows[0].count) === 9;
+  const configuration = getGoogleAnalyticsConfiguration(env, {
+    databaseReady: true,
+    foundationReady,
+    workerReady: true
+  });
+  if (!foundationReady) {
+    return {
+      ...publicProvider,
+      enabled: configuration.enabled,
+      implemented: true,
+      connectable: false,
+      status: configuration.status,
+      configuration: { status: configuration.status, warnings: configuration.warnings },
+      authorization: null,
+      resources: [],
+      connections: [],
+      connection: null
+    };
+  }
+  const authorizationRows = await connection.query(
+    `SELECT pauth.id, pauth.status, pauth.granted_at, pauth.last_validated_at, pauth.revoked_at,
+            (
+              SELECT JSON_UNQUOTE(JSON_EXTRACT(al.metadata, '$.outcome_category'))
+              FROM audit_logs al
+              WHERE al.target_id = pauth.id AND al.action = 'connection.ga4.authorization_failed'
+              ORDER BY al.created_at DESC LIMIT 1
+            ) AS failure_category
+     FROM provider_authorizations pauth
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'google_analytics_4'
+     ORDER BY FIELD(pauth.status, 'active', 'authorizing', 'reconnect_required', 'disabled', 'revoked'),
+              pauth.updated_at DESC LIMIT 1`,
+    [workspaceId]
+  );
+  const authorization = authorizationRows[0] || null;
+  const scopeRows = authorization
+    ? await connection.query(
+        `SELECT scope, status FROM provider_authorization_scopes
+         WHERE provider_authorization_id = ? ORDER BY scope`,
+        [authorization.id]
+      )
+    : [];
+  const resourceRows = await connection.query(
+    `SELECT pr.id AS resource_id, pr.provider_resource_id, pr.display_name, pr.metadata,
+            wpc.id AS connection_id, wpc.data_source_id, wpc.status AS connection_status,
+            wpc.last_sync_at, wpc.last_successful_sync_at, wpc.next_sync_at, wpc.data_through_at,
+            ds.reconnect_reason
+     FROM provider_resources pr
+     JOIN provider_authorizations pauth ON pauth.id = pr.provider_authorization_id
+     LEFT JOIN workspace_provider_connections wpc
+       ON wpc.provider_resource_id = pr.id AND wpc.workspace_id = pr.workspace_id
+     LEFT JOIN data_sources ds ON ds.id = wpc.data_source_id
+     WHERE pr.workspace_id = ? AND pr.provider = 'google_analytics_4'
+       AND pr.resource_type = 'ga4_property'
+     ORDER BY pr.display_name, pr.created_at`,
+    [workspaceId]
+  );
+  const capabilityRows = await connection.query(
+    `SELECT pc.workspace_provider_connection_id, pc.capability_key, pc.status, pc.reason
+     FROM provider_capabilities pc
+     JOIN workspace_provider_connections wpc ON wpc.id = pc.workspace_provider_connection_id
+     WHERE wpc.workspace_id = ? AND wpc.provider = 'google_analytics_4'
+     ORDER BY pc.capability_key`,
+    [workspaceId]
+  );
+  const capabilitiesByConnection = new Map();
+  for (const capability of capabilityRows) {
+    const values = capabilitiesByConnection.get(capability.workspace_provider_connection_id) || [];
+    values.push({ key: capability.capability_key, status: capability.status, reason: capability.reason });
+    capabilitiesByConnection.set(capability.workspace_provider_connection_id, values);
+  }
+  const resources = resourceRows.map(row => {
+    const metadata = parseJson(row.metadata);
+    return {
+      id: row.resource_id,
+      provider_resource_id: row.provider_resource_id,
+      display_name: row.display_name,
+      account_name: metadata.accountDisplayName || null,
+      timezone: metadata.timezone || null,
+      currency: metadata.currency || null,
+      available: metadata.selectable === true,
+      unavailable_reason: metadata.selectable === true ? null : metadata.discoveryStatus || 'property_details_unavailable',
+      selected: Boolean(row.connection_id)
+    };
+  });
+  const connections = resourceRows.filter(row => row.connection_id).map(row => {
+    const metadata = parseJson(row.metadata);
+    const status = authorization && authorization.status === 'authorizing'
+      ? 'connecting'
+      : authorization && ['reconnect_required', 'disabled'].includes(authorization.status)
+        ? 'reconnect_required'
+        : row.connection_status;
+    return {
+      id: row.connection_id,
+      data_source_id: row.data_source_id,
+      status,
+      reconnect_reason: row.reconnect_reason,
+      last_sync_at: row.last_sync_at,
+      last_successful_sync_at: row.last_successful_sync_at,
+      next_sync_at: row.next_sync_at,
+      data_through_at: row.data_through_at,
+      account: {
+        id: row.provider_resource_id,
+        display_name: row.display_name,
+        account_name: metadata.accountDisplayName || null,
+        timezone: metadata.timezone || null,
+        currency: metadata.currency || null
+      },
+      capabilities: capabilitiesByConnection.get(row.connection_id) || []
+    };
+  });
+  const primaryConnection = connections[0] || null;
+  let status = configuration.status;
+  if (!configuration.connectable) status = configuration.status;
+  else if (authorization && authorization.status === 'authorizing') status = 'authorizing';
+  else if (authorization && authorization.status !== 'active' && authorization.failure_category === 'user_denied') {
+    status = 'authorization_denied';
+  } else if (
+    authorization && authorization.status !== 'active' &&
+    authorization.failure_category === 'missing_required_scopes'
+  ) status = 'missing_scopes';
+  else if (authorization && authorization.status === 'reconnect_required') status = 'reconnect_required';
+  else if (authorization && authorization.status === 'disabled') status = 'provider_error';
+  else if (primaryConnection) status = primaryConnection.status;
+  else if (authorization && authorization.status === 'active') {
+    status = resources.some(resource => resource.available) ? 'selection_required' : 'no_properties';
+  } else if (configuration.connectable) status = 'available';
+  const grantedScopeNames = new Set(scopeRows.filter(scope => scope.status === 'granted').map(scope => scope.scope));
+  const missingScopes = provider.requestedScopes.map(scope => scope.name).filter(scope => !grantedScopeNames.has(scope));
+  return {
+    ...publicProvider,
+    enabled: configuration.enabled,
+    implemented: true,
+    connectable: configuration.connectable,
+    status,
+    configuration: { status: configuration.status, warnings: configuration.warnings },
+    authorization: authorization ? {
+      id: authorization.id,
+      status: authorization.status,
+      granted_at: authorization.granted_at,
+      last_validated_at: authorization.last_validated_at,
+      failure_category: authorization.failure_category,
+      missing_scopes: missingScopes,
+      scopes: scopeRows
+    } : null,
+    resources,
+    connections,
+    connection: primaryConnection
+  };
+}
+
 async function listWorkspaceProviderCatalog(userId, workspaceId, env = process.env) {
   const connection = await getConnection();
   if (!connection) {
@@ -859,10 +1035,12 @@ async function listWorkspaceProviderCatalog(userId, workspaceId, env = process.e
     const youtubeProvider = await getYouTubeWorkspaceProvider(connection, workspaceId, userId, env);
     const facebookProvider = await getMetaWorkspaceProvider(connection, workspaceId, 'facebook_pages', env);
     const instagramProvider = await getMetaWorkspaceProvider(connection, workspaceId, 'instagram', env);
+    const googleAnalyticsProvider = await getGoogleAnalyticsWorkspaceProvider(connection, workspaceId, env);
     return PROVIDERS.map(provider => {
       if (provider.id === 'youtube') return youtubeProvider;
       if (provider.id === 'facebook_pages') return facebookProvider;
       if (provider.id === 'instagram') return instagramProvider;
+      if (provider.id === 'google_analytics_4') return googleAnalyticsProvider;
       return toWorkspaceProvider(provider, sourceByProvider.get(provider.id), env);
     });
   } finally {

@@ -46,7 +46,7 @@ test('implemented providers remain gated until their runtime configuration is co
   assert.equal(byId.facebook_pages.status, 'configuration_required');
   assert.equal(byId.youtube.implemented, true);
   assert.equal(byId.youtube.status, 'configuration_required');
-  assert.equal(byId.google_analytics_4.implemented, false);
+  assert.equal(byId.google_analytics_4.implemented, true);
   assert.equal(providers.every(provider => provider.connectable === false), true);
 });
 
@@ -128,6 +128,28 @@ test('GA4 metric dictionary keeps users, sessions, and views distinct', () => {
   assert.equal(metrics['ga4.average_session_duration'].unit, 'seconds');
   assert.equal(metrics['ga4.sessions_per_user'].label, 'Sessions per user');
   assert.equal(metrics['ga4.screen_page_views_per_user'].label, 'Views per user');
+});
+
+test('GA4 uses only analytics.readonly and remains disabled until its dedicated OAuth client is complete', () => {
+  const disabled = getPublicProviderCatalog({}).find(provider => provider.id === 'google_analytics_4');
+  const configured = getPublicProviderCatalog({
+    NODE_ENV: 'test',
+    BASE_URL: 'http://localhost:3001',
+    FEATURE_GA4_CONNECTOR: 'true',
+    GA4_CLIENT_ID: 'ga4-client-id',
+    GA4_CLIENT_SECRET: 'ga4-client-secret',
+    GA4_REDIRECT_URI: 'http://localhost:3001/api/integrations/google-analytics/callback',
+    ENCRYPTION_KEY: '2'.repeat(64)
+  }).find(provider => provider.id === 'google_analytics_4');
+
+  assert.equal(disabled.enabled, false);
+  assert.equal(disabled.status, 'disabled');
+  assert.deepEqual(configured.requestedScopes.map(scope => scope.name), [
+    'https://www.googleapis.com/auth/analytics.readonly'
+  ]);
+  assert.equal(configured.implemented, true);
+  assert.equal(configured.connectable, true);
+  assert.equal(configured.status, 'available');
 });
 
 test('every advertised metric has a versioned provider-specific definition and unit', () => {

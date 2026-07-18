@@ -39,7 +39,7 @@ Composite foreign keys bind provider authorizations, resources, selected connect
 - Existing TikTok ciphertext and legacy tables are not read, rewritten, or deleted by these migrations.
 - Existing TikTok, YouTube, and Meta snapshot tables remain unchanged.
 - `sync_runs` gains only nullable connection/API-version columns.
-- GA4 is added to the existing provider checks but remains disabled and unimplemented until its complete vertical slice passes validation.
+- GA4 uses these observation envelopes for its completed local vertical slice and remains disabled by default until external OAuth configuration, review evidence, and live validation are complete.
 
 ## Consequences
 

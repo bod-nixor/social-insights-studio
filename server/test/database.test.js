@@ -31,6 +31,10 @@ process.env.FACEBOOK_REDIRECT_URI = 'http://localhost:3001/api/integrations/face
 process.env.INSTAGRAM_REDIRECT_URI = 'http://localhost:3001/api/integrations/instagram/callback';
 process.env.META_FACEBOOK_APPROVED_SCOPES = 'pages_show_list,pages_read_engagement,read_insights';
 process.env.META_INSTAGRAM_APPROVED_SCOPES = 'instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement';
+process.env.FEATURE_GA4_CONNECTOR = 'true';
+process.env.GA4_CLIENT_ID = 'ga4-test-client-id';
+process.env.GA4_CLIENT_SECRET = 'ga4-test-client-secret';
+process.env.GA4_REDIRECT_URI = 'http://localhost:3001/api/integrations/google-analytics/callback';
 process.env.BACKEND_JWT_SECRET = 'b'.repeat(64);
 process.env.ENCRYPTION_KEY = '2'.repeat(64);
 process.env.LOOKER_CLIENT_ID = 'looker-studio-connector';
@@ -45,11 +49,18 @@ const { setGoogleOidcFetchImplementation } = require('../platform/google-oidc');
 const { setTikTokFetchImplementation, TIKTOK_SCOPES } = require('../integrations/tiktok');
 const { setYouTubeTestHooks, YOUTUBE_SCOPES } = require('../integrations/youtube');
 const { setMetaTestHooks } = require('../integrations/meta');
+const {
+  GA4_BREAKDOWNS,
+  GA4_METRICS,
+  GA4_SCOPES,
+  setGoogleAnalyticsTestHooks
+} = require('../integrations/google-analytics');
 const { sendInvitationEmail, setMailTransportFactory } = require('../platform/mail');
 const { compareMetric, engagementRate } = require('../platform/analytics');
 const { assertCapability, hasCapability, canAssignRole } = require('../platform/rbac');
 const { hashSecret } = require('../platform/security');
 const { runDueSyncs } = require('../platform/sync-service');
+const { buildDateWindows } = require('../platform/google-analytics-sync-service');
 const { safeCsvCell } = require('../platform/export-service');
 const { decryptSecret, encryptSecret, parsePreviousKeys } = require('../platform/secret-envelope');
 const {
@@ -71,6 +82,7 @@ after(async () => {
   setTikTokFetchImplementation(null);
   setYouTubeTestHooks();
   setMetaTestHooks();
+  setGoogleAnalyticsTestHooks();
   setMailTransportFactory(null);
   stopStores();
   await closePool();
@@ -230,6 +242,20 @@ function installYouTubeQueue(handlers) {
 function installMetaMock(handler) {
   const calls = [];
   setMetaTestHooks({
+    fetch: async (url, options = {}) => {
+      const call = { url: new URL(String(url)), options };
+      calls.push(call);
+      return handler(call, calls);
+    },
+    sleep: async () => {},
+    random: () => 0
+  });
+  return calls;
+}
+
+function installGoogleAnalyticsMock(handler) {
+  const calls = [];
+  setGoogleAnalyticsTestHooks({
     fetch: async (url, options = {}) => {
       const call = { url: new URL(String(url)), options };
       calls.push(call);
@@ -3648,6 +3674,365 @@ test('YouTube invalid_grant is terminal and immediately purges the authorization
   assert.equal(Number(authorizationRows[0].revocation_count), 1);
   const sourceRows = await db.query('SELECT COUNT(*) AS count FROM data_sources WHERE id = ?', [dataSourceId]);
   assert.equal(Number(sourceRows[0].count), 0);
+});
+
+test('GA4 uses explicit property selection, encrypted credentials, worker-only reports, stored dashboards, and purge', async () => {
+  await clearDatabase();
+  const owner = await signIn('ga4-owner@example.com');
+  const workspace = await createWorkspace(owner, 'GA4 Workspace');
+  const windows = buildDateWindows('UTC', 180);
+  const priorDailyDate = new Date(`${windows.endDate}T00:00:00.000Z`);
+  priorDailyDate.setUTCDate(priorDailyDate.getUTCDate() - 1);
+  const priorDailyKey = priorDailyDate.toISOString().slice(0, 10).replaceAll('-', '');
+  const breakdownDimensions = [...new Set(GA4_BREAKDOWNS.flatMap(item => item.dimensions))];
+  const reportMetricValue = (metric, context) => {
+    const defaults = {
+      activeUsers: 8,
+      newUsers: 3,
+      sessions: 12,
+      screenPageViews: 20,
+      engagementRate: 0.6,
+      bounceRate: 0.4,
+      averageSessionDuration: 42.5,
+      sessionsPerUser: 1.5,
+      screenPageViewsPerUser: 2.5
+    };
+    if (context === 'current-30') {
+      return {
+        ...defaults,
+        activeUsers: 30,
+        newUsers: 11,
+        sessions: 45,
+        screenPageViews: 90
+      }[metric];
+    }
+    if (context === 'previous-30') {
+      return {
+        ...defaults,
+        activeUsers: 20,
+        newUsers: 7,
+        sessions: 30,
+        screenPageViews: 60
+      }[metric];
+    }
+    return defaults[metric];
+  };
+  const propertyBody = {
+    name: 'properties/123',
+    account: 'accounts/456',
+    displayName: 'Read-only Web Property',
+    timeZone: 'UTC',
+    currencyCode: 'USD',
+    propertyType: 'PROPERTY_TYPE_ORDINARY',
+    serviceLevel: 'GOOGLE_ANALYTICS_STANDARD'
+  };
+  const calls = installGoogleAnalyticsMock(call => {
+    const pathName = call.url.pathname;
+    if (call.url.hostname === 'oauth2.googleapis.com' && pathName === '/token') {
+      const body = new URLSearchParams(call.options.body);
+      assert.equal(body.get('client_id'), process.env.GA4_CLIENT_ID);
+      assert.equal(body.get('client_secret'), process.env.GA4_CLIENT_SECRET);
+      assert.equal(body.get('redirect_uri'), process.env.GA4_REDIRECT_URI);
+      assert.equal(body.get('grant_type'), 'authorization_code');
+      assert.ok(body.get('code_verifier'));
+      return jsonResponse(200, {
+        access_token: 'ga4-access-token',
+        refresh_token: 'ga4-refresh-token',
+        expires_in: 3600,
+        token_type: 'Bearer',
+        scope: GA4_SCOPES.join(' ')
+      });
+    }
+    if (call.url.hostname === 'analyticsadmin.googleapis.com' && pathName === '/v1beta/accountSummaries') {
+      assert.equal(call.options.headers.Authorization, 'Bearer ga4-access-token');
+      assert.equal(call.url.searchParams.get('pageSize'), '200');
+      return jsonResponse(200, {
+        accountSummaries: [{
+          account: 'accounts/456',
+          displayName: 'Analytics Account',
+          propertySummaries: [{ property: 'properties/123', displayName: 'Read-only Web Property' }]
+        }]
+      });
+    }
+    if (call.url.hostname === 'analyticsadmin.googleapis.com' && pathName === '/v1beta/properties/123') {
+      assert.equal(call.options.headers.Authorization, 'Bearer ga4-access-token');
+      return jsonResponse(200, propertyBody);
+    }
+    if (call.url.hostname === 'analyticsdata.googleapis.com' && pathName === '/v1beta/properties/123/metadata') {
+      assert.equal(call.options.headers.Authorization, 'Bearer ga4-access-token');
+      return jsonResponse(200, {
+        dimensions: ['date', ...breakdownDimensions].map(apiName => ({ apiName, uiName: apiName })),
+        metrics: GA4_METRICS.map(apiName => ({ apiName, uiName: apiName, type: 'TYPE_FLOAT' }))
+      });
+    }
+    if (call.url.hostname === 'analyticsdata.googleapis.com' && pathName === '/v1beta/properties/123:checkCompatibility') {
+      assert.equal(call.options.method, 'POST');
+      assert.equal(call.options.headers.Authorization, 'Bearer ga4-access-token');
+      const request = JSON.parse(call.options.body);
+      return jsonResponse(200, {
+        ...(request.dimensions.length > 0 ? {
+          dimensionCompatibilities: request.dimensions.map(item => ({
+            dimensionMetadata: { apiName: item.name },
+            compatibility: 'COMPATIBLE'
+          }))
+        } : {}),
+        metricCompatibilities: request.metrics.map(item => ({
+          metricMetadata: { apiName: item.name },
+          compatibility: 'COMPATIBLE'
+        }))
+      });
+    }
+    if (call.url.hostname === 'analyticsdata.googleapis.com' && pathName === '/v1beta/properties/123:runReport') {
+      assert.equal(call.options.method, 'POST');
+      assert.equal(call.options.headers.Authorization, 'Bearer ga4-access-token');
+      const request = JSON.parse(call.options.body);
+      assert.equal(request.returnPropertyQuota, true);
+      const dimensions = request.dimensions.map(item => item.name);
+      const metrics = request.metrics.map(item => item.name);
+      const range = request.dateRanges[0];
+      let context = 'default';
+      const current30 = windows.ranges.find(item => item.key === '30d');
+      const previous30 = windows.ranges.find(item => item.key === '30d_previous');
+      if (range.startDate === current30.startDate && range.endDate === current30.endDate) context = 'current-30';
+      if (range.startDate === previous30.startDate && range.endDate === previous30.endDate) context = 'previous-30';
+      const dimensionValue = name => ({
+        sessionSource: 'google',
+        sessionMedium: 'organic',
+        pagePath: '/home',
+        pageTitle: 'Home',
+        landingPagePlusQueryString: '/home?source=organic',
+        deviceCategory: 'desktop',
+        country: 'Pakistan',
+        city: 'Lahore'
+      })[name] || '(not set)';
+      const rows = dimensions.includes('date')
+        ? [
+            {
+              dimensionValues: [{ value: windows.endDate.replaceAll('-', '') }],
+              metricValues: metrics.map(metric => ({ value: String(reportMetricValue(metric, 'default')) }))
+            },
+            {
+              dimensionValues: [{ value: priorDailyKey }],
+              metricValues: metrics.map(metric => ({ value: String(metric === 'activeUsers' ? 10 : reportMetricValue(metric, 'default')) }))
+            }
+          ]
+        : [{
+            dimensionValues: dimensions.map(name => ({ value: dimensionValue(name) })),
+            metricValues: metrics.map(metric => ({ value: String(reportMetricValue(metric, context)) }))
+          }];
+      return jsonResponse(200, {
+        dimensionHeaders: dimensions.map(name => ({ name })),
+        metricHeaders: metrics.map(name => ({ name, type: 'TYPE_FLOAT' })),
+        rows,
+        rowCount: rows.length,
+        metadata: {
+          subjectToThresholding: dimensions.includes('city'),
+          dataLossFromOtherRow: false
+        },
+        propertyQuota: {
+          tokensPerDay: { consumed: 1, remaining: 9999 },
+          potentiallyThresholdedRequestsPerHour: { consumed: dimensions.includes('city') ? 1 : 0, remaining: 119 }
+        }
+      });
+    }
+    if (call.url.hostname === 'oauth2.googleapis.com' && pathName === '/revoke') {
+      const body = new URLSearchParams(call.options.body);
+      assert.equal(body.get('token'), 'ga4-refresh-token');
+      return jsonResponse(200, {});
+    }
+    throw new Error(`unexpected Google Analytics mock call: ${call.url.toString()}`);
+  });
+
+  const start = await requestApp(`/api/workspaces/${workspace.id}/connections/google-analytics/start`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { return_path: `/?workspace=${workspace.id}&view=connections&provider=google_analytics_4` }
+  });
+  assert.equal(start.statusCode, 200);
+  const authorizationUrl = new URL(start.json().authorization_url);
+  assert.equal(authorizationUrl.origin, 'https://accounts.google.com');
+  assert.equal(authorizationUrl.searchParams.get('scope'), GA4_SCOPES.join(' '));
+  assert.equal(authorizationUrl.searchParams.get('access_type'), 'offline');
+  assert.equal(authorizationUrl.searchParams.get('prompt'), 'consent');
+  assert.equal(authorizationUrl.searchParams.get('code_challenge_method'), 'S256');
+  assert.equal(authorizationUrl.searchParams.get('client_id'), process.env.GA4_CLIENT_ID);
+  const state = authorizationUrl.searchParams.get('state');
+  const transactionRows = await db.query(
+    `SELECT requested_scopes, redirect_uri, pkce_verifier_ciphertext,
+            pkce_verifier_iv, pkce_verifier_tag, pkce_key_version
+     FROM oauth_transactions WHERE state_hash = ? AND provider = 'google_analytics_4'`,
+    [hashSecret(state)]
+  );
+  assert.deepEqual(
+    typeof transactionRows[0].requested_scopes === 'string'
+      ? JSON.parse(transactionRows[0].requested_scopes)
+      : transactionRows[0].requested_scopes,
+    GA4_SCOPES
+  );
+  assert.equal(transactionRows[0].redirect_uri, process.env.GA4_REDIRECT_URI);
+  assert.ok(transactionRows[0].pkce_verifier_ciphertext);
+  assert.notEqual(transactionRows[0].pkce_verifier_ciphertext, authorizationUrl.searchParams.get('code_challenge'));
+
+  const callback = await requestApp(
+    `/api/integrations/google-analytics/callback?code=ga4-provider-code&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(callback.statusCode, 303);
+  assert.equal(new URL(callback.headers.location, 'http://localhost').searchParams.get('analytics'), 'selection_required');
+  assert.equal(calls.length, 3);
+
+  const replay = await requestApp(
+    `/api/integrations/google-analytics/callback?code=ga4-provider-code&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(replay.statusCode, 303);
+  assert.equal(new URL(replay.headers.location, 'http://localhost').searchParams.get('analytics'), 'failed');
+  assert.equal(calls.length, 3, 'replayed state must fail before another Google call');
+
+  const beforeSelection = await db.query(
+    `SELECT
+       (SELECT COUNT(*) FROM data_sources WHERE workspace_id = ? AND provider = 'google_analytics_4') AS sources,
+       (SELECT COUNT(*) FROM provider_resources WHERE workspace_id = ? AND provider = 'google_analytics_4') AS resources`,
+    [workspace.id, workspace.id]
+  );
+  assert.equal(Number(beforeSelection[0].sources), 0);
+  assert.equal(Number(beforeSelection[0].resources), 1);
+  const catalog = await requestApp(`/api/workspaces/${workspace.id}/provider-catalog`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(catalog.statusCode, 200);
+  const analyticsProvider = catalog.json().providers.find(provider => provider.id === 'google_analytics_4');
+  assert.equal(analyticsProvider.status, 'selection_required');
+  assert.equal(analyticsProvider.resources[0].selected, false);
+  assert.equal(analyticsProvider.resources[0].available, true);
+  assert.equal(analyticsProvider.resources[0].timezone, 'UTC');
+  assert.equal(analyticsProvider.resources[0].currency, 'USD');
+
+  const otherWorkspace = await createWorkspace(owner, 'Other GA4 Workspace');
+  const crossWorkspaceSelection = await requestApp(
+    `/api/workspaces/${otherWorkspace.id}/connections/google-analytics/select`,
+    {
+      method: 'POST',
+      headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+      body: { resource_id: analyticsProvider.resources[0].id }
+    }
+  );
+  assert.equal(crossWorkspaceSelection.statusCode, 404);
+
+  const selection = await requestApp(`/api/workspaces/${workspace.id}/connections/google-analytics/select`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { resource_id: analyticsProvider.resources[0].id }
+  });
+  assert.equal(selection.statusCode, 201);
+  const selectedConnection = selection.json().connection;
+  assert.equal(selectedConnection.account.id, 'properties/123');
+  const duplicateSelection = await requestApp(`/api/workspaces/${workspace.id}/connections/google-analytics/select`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { resource_id: analyticsProvider.resources[0].id }
+  });
+  assert.equal(duplicateSelection.statusCode, 409);
+
+  const credentials = await db.query(
+    `SELECT access_token_ciphertext, access_token_iv, access_token_tag,
+            refresh_token_ciphertext, refresh_token_iv, refresh_token_tag, key_version
+     FROM provider_authorization_credentials pac
+     JOIN provider_authorizations pauth ON pauth.id = pac.provider_authorization_id
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'google_analytics_4'`,
+    [workspace.id]
+  );
+  assert.notEqual(credentials[0].access_token_ciphertext, 'ga4-access-token');
+  assert.notEqual(credentials[0].refresh_token_ciphertext, 'ga4-refresh-token');
+  assert.equal(decryptSecret({
+    ciphertext: credentials[0].refresh_token_ciphertext,
+    iv: credentials[0].refresh_token_iv,
+    tag: credentials[0].refresh_token_tag,
+    keyVersion: credentials[0].key_version
+  }), 'ga4-refresh-token');
+
+  const queued = await requestApp(`/api/workspaces/${workspace.id}/providers/google_analytics_4/sync-runs`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { connection_id: selectedConnection.id }
+  });
+  assert.equal(queued.statusCode, 202);
+  assert.equal(queued.json().status, 'queued');
+  assert.equal(calls.length, 3, 'manual sync API must queue work without calling Google');
+
+  const worker = await runDueSyncs({ timeBudgetSeconds: 20, leaseOwner: 'ga4-worker' });
+  assert.equal(worker.processed, 1);
+  assert.equal(worker.results[0].status, 'success');
+  assert.ok(worker.results[0].metric_observation_count > 0);
+  assert.ok(worker.results[0].dimension_observation_count > 0);
+  const callsAfterWorker = calls.length;
+
+  const dashboard = await requestApp(
+    `/api/workspaces/${workspace.id}/providers/google_analytics_4/dashboard?range=30d&connection_id=${selectedConnection.id}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(dashboard.statusCode, 200);
+  const dashboardBody = dashboard.json();
+  assert.equal(dashboardBody.connection.status, 'active');
+  assert.equal(dashboardBody.property.id, 'properties/123');
+  assert.equal(dashboardBody.property.timezone, 'UTC');
+  assert.equal(dashboardBody.property.currency, 'USD');
+  assert.equal(dashboardBody.metrics.find(metric => metric.key === 'ga4.active_users').value, 30);
+  assert.equal(dashboardBody.metrics.find(metric => metric.key === 'ga4.active_users').baseline, 20);
+  assert.equal(dashboardBody.metrics.find(metric => metric.key === 'ga4.sessions').value, 45);
+  assert.equal(dashboardBody.metrics.find(metric => metric.key === 'ga4.screen_page_views').value, 90);
+  assert.equal(dashboardBody.trend.length, 2);
+  assert.equal(dashboardBody.breakdowns.length, GA4_BREAKDOWNS.length);
+  assert.equal(dashboardBody.breakdowns.find(item => item.key === 'ga4.city').subject_to_thresholding, true);
+  assert.equal(dashboardBody.availability.state, 'thresholded');
+  assert.equal(calls.length, callsAfterWorker, 'dashboard must read stored observations only');
+
+  const stored = await db.query(
+    `SELECT
+       (SELECT COUNT(*) FROM provider_resource_observations WHERE workspace_id = ? AND provider = 'google_analytics_4') AS resources,
+       (SELECT COUNT(*) FROM provider_metric_observations WHERE workspace_id = ? AND provider = 'google_analytics_4') AS metrics,
+       (SELECT COUNT(*) FROM provider_dimension_observations WHERE workspace_id = ? AND provider = 'google_analytics_4') AS dimensions,
+       (SELECT COUNT(*) FROM provider_request_events WHERE workspace_id = ? AND provider = 'google_analytics_4') AS requests`,
+    [workspace.id, workspace.id, workspace.id, workspace.id]
+  );
+  assert.equal(Number(stored[0].resources), 1);
+  assert.ok(Number(stored[0].metrics) >= GA4_METRICS.length * 8);
+  assert.ok(Number(stored[0].dimensions) >= GA4_BREAKDOWNS.length * 3);
+  assert.ok(Number(stored[0].requests) > 0);
+  const requestEvents = await db.query(
+    `SELECT request_category, method_name, status, failure_category
+     FROM provider_request_events WHERE workspace_id = ? AND provider = 'google_analytics_4'`,
+    [workspace.id]
+  );
+  assert.equal(JSON.stringify(requestEvents).includes('ga4-access-token'), false);
+  assert.equal(JSON.stringify(requestEvents).includes('ga4-refresh-token'), false);
+
+  const disconnect = await requestApp(`/api/workspaces/${workspace.id}/connections/google-analytics`, {
+    method: 'DELETE',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { connection_id: selectedConnection.id }
+  });
+  assert.equal(disconnect.statusCode, 200);
+  assert.equal(disconnect.json().provider_revoke.success, true);
+  assert.equal(calls.length, callsAfterWorker + 1);
+  const purged = await db.query(
+    `SELECT pauth.status, pauth.provider_subject,
+            (SELECT COUNT(*) FROM provider_resources WHERE provider_authorization_id = pauth.id) AS resources,
+            (SELECT COUNT(*) FROM provider_authorization_credentials WHERE provider_authorization_id = pauth.id) AS credentials,
+            (SELECT COUNT(*) FROM data_sources WHERE workspace_id = pauth.workspace_id AND provider = 'google_analytics_4') AS sources,
+            (SELECT COUNT(*) FROM provider_metric_observations WHERE workspace_id = pauth.workspace_id AND provider = 'google_analytics_4') AS metrics,
+            (SELECT COUNT(*) FROM provider_dimension_observations WHERE workspace_id = pauth.workspace_id AND provider = 'google_analytics_4') AS dimensions
+     FROM provider_authorizations pauth
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'google_analytics_4'`,
+    [workspace.id]
+  );
+  assert.equal(purged[0].status, 'revoked');
+  assert.equal(purged[0].provider_subject, null);
+  assert.equal(Number(purged[0].resources), 0);
+  assert.equal(Number(purged[0].credentials), 0);
+  assert.equal(Number(purged[0].sources), 0);
+  assert.equal(Number(purged[0].metrics), 0);
+  assert.equal(Number(purged[0].dimensions), 0);
 });
 
 test('Facebook Pages uses explicit selection, encrypted Page tokens, worker-only insights, dashboards, and purge', async () => {

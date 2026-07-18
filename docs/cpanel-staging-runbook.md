@@ -96,6 +96,7 @@ Use `.env.staging.example` as the sanitized template. Required staging values in
 - `TRUST_PROXY`
 - `APP_COMMIT_SHA`
 - `APP_BUILD_TIME` or `APP_RELEASE`
+- `GA4_CLIENT_ID`, `GA4_CLIENT_SECRET`, and `GA4_REDIRECT_URI=https://lstc.nixorcorporate.com/api/integrations/google-analytics/callback` only when the dedicated Website Analytics review client is being exercised
 
 Provider feature gates should remain conservative:
 
@@ -103,7 +104,7 @@ Provider feature gates should remain conservative:
 - `FEATURE_INSTAGRAM_CONNECTOR=0`
 - `FEATURE_FACEBOOK_PAGES_CONNECTOR=0`
 - `YOUTUBE_ENABLED=false` until the dedicated Google OAuth configuration and verification checklist is being exercised
-- `FEATURE_GA4_CONNECTOR=0`
+- `FEATURE_GA4_CONNECTOR=0` until the dedicated client differs from Google sign-in and YouTube, both Analytics APIs are enabled, the exact redirect and consent test user are configured, and an eligible non-production property is ready
 
 `/health/version` must not expose host paths, dependency inventories, full environment dumps, or secret values.
 - `SYNC_INTERVAL_SECONDS`, `SYNC_STAGGER_SECONDS`, `SYNC_LEASE_SECONDS`, `SYNC_RETRY_BASE_SECONDS`, `SYNC_RETRY_MAX_SECONDS`, `MANUAL_SYNC_COOLDOWN_SECONDS`, `WORKER_TIME_BUDGET_SECONDS`

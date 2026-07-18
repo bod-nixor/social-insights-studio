@@ -779,7 +779,9 @@ th {
 
 .status-badge.partial,
 .status-badge.connecting,
-.status-badge.stale {
+.status-badge.stale,
+.status-badge.delayed,
+.status-badge.thresholded {
   background: var(--amber-bg);
   border-color: #ecd28f;
   color: var(--amber);
@@ -1040,6 +1042,32 @@ th {
   overflow-x: auto;
 }
 
+.ga4-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.ga4-breakdown {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.ga4-breakdown .between {
+  min-height: 28px;
+}
+
+.ga4-breakdown table {
+  min-width: 520px;
+}
+
+.ga4-breakdown td:first-child {
+  min-width: 150px;
+  font-weight: 650;
+}
+
 .youtube-content-table table {
   min-width: 1060px;
 }
@@ -1143,6 +1171,10 @@ button.danger {
 
   .metric-grid.youtube-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ga4-breakdown-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1286,6 +1318,16 @@ button.danger {
   .segmented {
     width: 100%;
     overflow-x: auto;
+  }
+
+  .source-switcher .segmented {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow: visible;
+  }
+
+  .source-switcher .segmented button {
+    min-width: 0;
   }
 
   .panel-title.between {

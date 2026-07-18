@@ -45,6 +45,7 @@
         <li>Meta data is limited to Pages and linked professional Instagram accounts the authorizing user explicitly selects. Social Insights Studio does not request publishing, comment-management, messaging, advertising, app-events, demographic, webhook, or broad business-management access.</li>
         <li>YouTube uses only <code>youtube.readonly</code> to discover authorized channels and read channel/video metadata, and <code>yt-analytics.readonly</code> to read channel and video Analytics reports. Social Insights Studio does not request YouTube write, upload, advertising, messaging, or monetary-data access.</li>
         <li>YouTube users are also subject to the <a href="https://www.youtube.com/t/terms" rel="noopener" target="_blank">YouTube Terms of Service</a>.</li>
+        <li>Website Analytics uses only <code>analytics.readonly</code> to discover explicitly selected GA4 properties and read aggregate reports. It does not request Google Ads, profile, email, demographic, individual-user, publishing, or administrative mutation access.</li>
       </ul>
 
       <h2>Google API Services User Data Policy</h2>
@@ -56,6 +57,7 @@
         <li>Meta app-user and Page tokens are encrypted and retained while their authorization or selected resource is active, with a bounded 30-day deletion grace period after token expiry to allow reauthorization. Meta disconnect, deauthorization, data-deletion, and expired-authorization cleanup flows delete the associated credentials, resources, sync jobs, content, and stored insight snapshots. Raw Meta API responses are not retained by default.</li>
         <li>Encrypted YouTube token records are retained only while the authorization is active. Disconnecting YouTube attempts Google revocation and immediately deletes credentials, discovered channels, and associated local snapshots, even if provider revocation fails.</li>
         <li>Normalized channel, video, and Analytics snapshots are retained only for the active user-facing connection purpose. Social Insights Studio validates the authorization and refreshes stored YouTube data within each 30-day policy window; if an authorization cannot be validated by its deadline, the associated YouTube data is deleted. Raw Google or YouTube API responses are not stored by default.</li>
+        <li>Encrypted GA4 token records and normalized aggregate property observations are retained only for active selected properties. Disconnecting one property deletes its local observations while preserving a shared grant for selected sibling properties; disconnecting the final property attempts Google revocation and deletes the authorization, credentials, properties, jobs, and observations. Raw GA4 API responses and individual visitor records are not stored by default.</li>
         <li>Generated reports should have a short retention window and be deleted after expiry.</li>
       </ul>
 

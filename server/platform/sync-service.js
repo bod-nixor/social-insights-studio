@@ -10,6 +10,8 @@ const { getYouTubeConfiguration } = require('./youtube-config');
 const { performMetaSyncForJob } = require('./meta-sync-service');
 const { getMetaConfiguration } = require('./meta-config');
 const { purgeOverdueMetaAuthorizations } = require('./meta-connection-service');
+const { performGoogleAnalyticsSyncForJob } = require('./google-analytics-sync-service');
+const { getGoogleAnalyticsConfiguration } = require('./google-analytics-config');
 
 const SYNC_INTERVAL_SECONDS = Number(process.env.SYNC_INTERVAL_SECONDS || 6 * 60 * 60);
 const MANUAL_COOLDOWN_SECONDS = Number(process.env.MANUAL_SYNC_COOLDOWN_SECONDS || 15 * 60);
@@ -546,6 +548,7 @@ async function performSyncForJob(job, options = {}) {
   const provider = await providerForJob(job.data_source_id);
   if (provider === 'youtube') return performYouTubeSyncForJob(job, options);
   if (provider === 'facebook_pages' || provider === 'instagram') return performMetaSyncForJob(job, options);
+  if (provider === 'google_analytics_4') return performGoogleAnalyticsSyncForJob(job, options);
   return performTikTokSyncForJob(job, options);
 }
 
@@ -557,7 +560,13 @@ async function requestManualSync(userId, workspaceId, options = {}) {
   if ((provider === 'facebook_pages' || provider === 'instagram') && !getMetaConfiguration(provider).connectable) {
     throw createHttpError(503, `${provider}_not_available`);
   }
-  if (provider === 'youtube' || provider === 'facebook_pages' || provider === 'instagram') {
+  if (provider === 'google_analytics_4' && !getGoogleAnalyticsConfiguration().connectable) {
+    throw createHttpError(503, 'ga4_not_available');
+  }
+  if (
+    provider === 'youtube' || provider === 'facebook_pages' || provider === 'instagram' ||
+    provider === 'google_analytics_4'
+  ) {
     return withConnection(async connection => {
       await connection.beginTransaction();
       try {

@@ -49,7 +49,7 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Authenticated app replaces public marketing | Complete | Restored sessions render the application shell. |
 | Public privacy, terms, support, deletion, and status routes plus `.html` compatibility | Complete | Routes and aliases are tested. Final legal facts remain externally blocked. |
 | Unknown API routes return JSON and SPA exclusions are safe | Complete | API/OAuth/health/legal/artifact boundaries and traversal cases are tested. |
-| Production connection cards and state-specific actions | Complete for current providers | Cards expose friendly access summaries, explicit selected resources, real availability/reconnect actions, and no raw setup warnings or scope identifiers. Further consolidation will accompany GA4 and the cross-platform view. |
+| Production connection cards and state-specific actions | Complete for all five current providers | Cards expose friendly access summaries, explicit selected resources, real availability/reconnect/sync/disconnect actions, and no raw setup warnings or scope identifiers. |
 | Account profile and authentication methods | Complete | Users can edit their display name and see email-code or Google sign-in identities without exposing identity subjects. |
 | Active-session list, current/all-session sign-out, session revocation | Complete | Active sessions are user-bound, labelled with a coarse device/browser description, and support one, other, or all-session revocation. Raw user agents and locations are not stored. |
 | Account privacy controls and account deletion request | Complete for request intake | Authenticated, CSRF-protected, email-confirmed requests are idempotent and visible with status. Permanent processing remains governed by the owner-supplied deletion policy. |
@@ -57,7 +57,7 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Invitation resend/revoke with rate limits | Complete | Resends rotate the secret, extend expiry, enforce a 60-second cooldown and five-send cap, and revocation is owner/admin controlled and audited. |
 | Member role changes/removal/last-owner protection | Complete | Server-enforced RBAC, audit logs, production wording, and last-owner coverage exist. |
 | Accessible temporary notifications | Complete for current actions | Success notifications auto-dismiss, errors use polite/alert live regions with user-facing text, and durable provider state remains in the relevant view. |
-| Provider empty/stale/partial/error states | Partially complete | TikTok, YouTube, and Meta state distinctions exist; cross-provider consistency and product wording remain incomplete. |
+| Provider empty/stale/partial/error states | Partially complete | TikTok, YouTube, Meta, and GA4 state distinctions exist; cross-provider overview consistency remains incomplete. |
 | Mobile navigation and no horizontal overflow | Complete for current views | Fixed mobile navigation is usable at 360 pixels; full keyboard and screen-reader QA remains. |
 | Keyboard access, visible focus, reduced motion | Partially complete | Semantic controls and reduced-motion CSS exist in places, but complete route/control verification is outstanding. |
 | Clean URL state | Complete | Routes remain refreshable while each view writes only its own relevant filters; invitation secrets are removed after authenticated accept/dismiss. |
@@ -68,15 +68,15 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Requirement | Status | Evidence and remaining work |
 | --- | --- | --- |
 | MariaDB modular-monolith and bounded worker | Complete | Current cPanel-compatible architecture is accepted and tested. |
-| One authorization backing multiple resources | Complete for YouTube and Meta | Shared authorization/resource/connection rows and explicit selection are implemented. |
+| One authorization backing multiple resources | Complete for YouTube, Meta, and GA4 | Shared authorization/resource/connection rows and explicit selection are implemented. |
 | Independent workspace-owned data sources and tenant isolation | Complete for current providers | Cross-workspace tests fail closed. |
 | Exact granted/missing/denied/revoked scopes | Complete for current provider foundation | Authorization scope rows preserve exact state; product copy summarizes partial consent without exposing raw implementation identifiers. |
 | Encrypted, versioned credentials | Complete | AES-256-GCM current/previous-key support covers authorization and resource credentials. |
 | Incremental provider authorization | Complete for YouTube; provider-specific for Meta/TikTok | Google product auth is separate from OIDC. Meta uses dedicated Login for Business configurations. |
 | Provider API version and capability metadata | Complete for current provider slices | Catalog, authorization, connection capability, and sync-state fields exist. |
-| Sync cursor/checkpoint/quota/request metadata | Complete as a shared foundation | Connection sync state, per-run provider API version, cursors, data-through timestamps, retry state, and request telemetry are modeled. GA4 will populate them in its vertical slice. |
+| Sync cursor/checkpoint/quota/request metadata | Complete and exercised by GA4 | Connection sync state, per-run provider API version, cursors, data-through timestamps, retry state, bounded quota summaries, and request telemetry are populated without raw payloads. |
 | Immutable account/profile and content observations | Complete for TikTok, YouTube, and Meta | Provider-specific snapshot tables preserve null and date semantics. |
-| Dimension/breakdown observations | Complete as a storage/contract foundation | Namespaced aggregate rows have canonical dimension hashes, explicit per-metric availability, threshold flags, period semantics, and tenant constraints. GA4 will be the first writer. |
+| Dimension/breakdown observations | Complete for GA4 | Six aggregate GA4 breakdown families use canonical dimension hashes, explicit per-metric availability, threshold flags, period semantics, and tenant constraints. |
 | Report definitions, runs, jobs, and protected artifacts | Complete as a schema foundation | Workspace definitions, relational resources, idempotent leased runs, resource/metric snapshots, private artifact metadata, expiry, and hashed one-time grants exist. Rendering/API/worker behavior remains the PDF phase. |
 | Live-compatible TikTok migration | Complete | Provider-foundation upgrade preserves ciphertext without token rewrite. |
 | Universal metrics avoided | Complete in current registry | Every advertised metric now has a versioned provider-specific definition, unit, aggregation, date semantics, and unavailable rule. GA4 active users are explicitly not summed across daily rows. |
@@ -91,7 +91,7 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Facebook Pages | Implemented but disabled | `pages_show_list`, `pages_read_engagement`, `read_insights` through Facebook Login for Business | Exact production config, access level, reviewer Page, legal review, provider review, and live smoke are external. |
 | Instagram professional accounts | Implemented but disabled and externally blocked | `instagram_basic`, `instagram_manage_insights`, `pages_show_list`, `pages_read_engagement` through Facebook Login | First-party documentation re-verified 2026-07-18. Supplied dashboard evidence proves the Page permission inventory but not both Instagram permissions in the dedicated Login for Business configuration; an eligible linked account that needs no ads permissions is also required. |
 | YouTube channels | Implemented but disabled | `https://www.googleapis.com/auth/youtube.readonly`, `https://www.googleapis.com/auth/yt-analytics.readonly` | First-party documentation re-verified 2026-07-18, including the current `reports.query` requirement for both scopes. Google project/consent configuration, verified domain, test channel, legal review, verification, and live smoke are external. |
-| Google Analytics 4 | Not implemented | Candidate exact scope: `https://www.googleapis.com/auth/analytics.readonly` | Implement OAuth, discovery, Admin/Data adapters, metadata/compatibility checks, worker snapshots, dashboard, deletion, tests, and review evidence before external configuration. |
+| Google Analytics 4 | Implemented but disabled | Exact scope: `https://www.googleapis.com/auth/analytics.readonly` | Local OAuth/discovery, explicit selection, Admin/Data adapters, metadata/compatibility checks, worker observations, stored dashboard, revocation/deletion, UI, tests, and review notes are complete. Google client/API/consent configuration, test property, legal review, verification evidence, and live smoke are external. |
 
 ## Analytics, Navigation, And Export Requirements
 
@@ -99,10 +99,10 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | --- | --- | --- |
 | Cross-platform Overview | Not implemented | Current overview switches between provider pages; it does not render side-by-side health, trends, alerts, comparisons, and top content. |
 | Platforms/Sources navigation | Not implemented | Connection management exists, but no dedicated source-detail navigation model. |
-| Provider dashboards | Complete for TikTok/YouTube/Facebook/Instagram current capabilities | Stored-snapshot APIs and visible provider-specific views exist. GA4 is absent. |
+| Provider dashboards | Complete for all five current providers | Stored-snapshot APIs and visible provider-specific views exist, including GA4 exact-range metrics, daily traffic, property timezone/currency, compatible breakdowns, data-through state, and threshold warnings. |
 | Resource filter | Partially complete | APIs support connection/data-source targeting in newer providers, but a consistent global resource filter is absent. |
 | Date and comparison filters | Complete for current provider dashboards | 7/30/90/custom and comparison semantics exist, with provider-specific limitations. |
-| Timezone filter | Not implemented | Storage is UTC and GA4 property timezone is not yet modeled in the UI/report filter. |
+| Timezone semantics | Complete for GA4 property reports | GA4 ranges use the selected property's timezone and the UI displays it. A user-selectable timezone override is deliberately rejected so provider date semantics are not relabeled. |
 | Cross-provider content and capability-aware columns | Partially complete | Normalized content/filter/detail exists, but the UI remains TikTok-shaped and lacks the full dynamic provider/resource column model. |
 | CSV export | Complete for current filtered content | Workspace-scoped, analyst-or-higher, bounded, audited, and spreadsheet-injection safe. |
 | Reports navigation and builder | Not implemented | No Reports view or API exists. |
@@ -123,11 +123,11 @@ This matrix is the engineering baseline for the complete multi-platform continua
 
 | Requirement | Status | Evidence and remaining work |
 | --- | --- | --- |
-| Per-permission provider approval matrix | Partially complete | YouTube and Meta contain strong evidence; TikTok needs one row per scope and GA4 needs a complete package. |
-| Reviewer scripts and screencast checklists | Partially complete | YouTube and Meta walkthroughs exist; TikTok and GA4 need equivalent per-scope assets and a consolidated screenshot checklist. |
+| Per-permission provider approval matrix | Partially complete | YouTube, Meta, and GA4 contain strong evidence; TikTok still needs one row per scope. |
+| Reviewer scripts and screencast checklists | Partially complete | YouTube, Meta, and GA4 walkthroughs exist; TikTok and a consolidated screenshot checklist remain. |
 | Public legal/support/deletion surfaces | Partially complete | Accurate implementation boundaries are present. Legal entity, address/contact, jurisdictions, subprocessors, SLA, and approved retention remain external blockers. |
-| Startup validation and feature flags | Complete for current providers | TikTok/YouTube/Meta fail closed. GA4 and report settings remain to be added. |
-| Provider cadence/quota/retry documentation | Partially complete | TikTok/YouTube/Meta are covered to differing depth; GA4 is absent. |
+| Startup validation and feature flags | Complete for provider connectors | TikTok, YouTube, Meta, and GA4 fail closed. Report-rendering settings remain for the PDF phase. |
+| Provider cadence/quota/retry documentation | Partially complete | YouTube, Meta, and GA4 are covered; TikTok and consolidated operational thresholds need further detail. |
 | Structured logs, correlation IDs, and secret redaction | Partially complete | Core flows are sanitized, but a consolidated production observability/alert integration and operational log contract are incomplete. |
 | Stale-worker/overdue-source checks | Not implemented | Readiness does not yet expose a complete operational freshness summary. |
 | Backup/restore, migration, rollback | Partially complete | Staging backup and rollback steps exist; a documented restore drill, RPO/RTO policy, report-artifact backup boundary, and all-provider release sequence are incomplete. |
@@ -145,8 +145,7 @@ This matrix is the engineering baseline for the complete multi-platform continua
 
 ## First Safe Implementation Order
 
-1. Implement GA4 behind a disabled-by-default exact-scope gate.
-2. Build the cross-platform overview and global provider/resource/timezone filters.
-3. Implement the protected asynchronous PDF report pipeline and deterministic render QA.
-4. Complete per-scope review packages and full operations documentation.
-5. Run the final clean-install/upgrade/idempotence, full browser/accessibility, report-render, worker, coverage, preflight, audit, and secret checks.
+1. Build the cross-platform overview and global provider/resource/timezone filters.
+2. Implement the protected asynchronous PDF report pipeline and deterministic render QA.
+3. Complete per-scope review packages and full operations documentation.
+4. Run the final clean-install/upgrade/idempotence, full browser/accessibility, report-render, worker, coverage, preflight, audit, and secret checks.

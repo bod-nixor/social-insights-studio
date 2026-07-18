@@ -49,7 +49,7 @@ type RangeKey = '7d' | '30d' | '90d' | 'custom';
 type Role = 'owner' | 'admin' | 'analyst' | 'viewer';
 type SortDirection = 'asc' | 'desc';
 type ContentSort = 'published_at' | 'views' | 'likes' | 'comments' | 'shares' | 'engagement';
-type OverviewProvider = 'tiktok' | 'youtube' | 'facebook_pages' | 'instagram';
+type OverviewProvider = 'tiktok' | 'youtube' | 'facebook_pages' | 'instagram' | 'google_analytics_4';
 
 type User = {
   id: string;
@@ -173,6 +173,9 @@ type ProviderConnection = {
     username?: string | null;
     display_name?: string | null;
     thumbnail_url?: string | null;
+    account_name?: string | null;
+    timezone?: string | null;
+    currency?: string | null;
   } | null;
   capabilities?: Array<{ key: string; status: string; reason?: string | null }>;
 };
@@ -205,6 +208,9 @@ type ProviderCatalogItem = {
     thumbnail_url?: string | null;
     username?: string | null;
     source_page_name?: string | null;
+    account_name?: string | null;
+    timezone?: string | null;
+    currency?: string | null;
     subscriber_count_hidden?: boolean;
     attached_elsewhere_count?: number;
     available?: boolean;
@@ -301,8 +307,73 @@ type MetaDashboardData = {
   availability: { state: string; note?: string | null };
 };
 
+type GoogleAnalyticsMetric = DashboardMetric & {
+  unit: 'count' | 'ratio' | 'seconds';
+  available: boolean;
+  availability_status: string;
+  availability_reason?: string | null;
+  baseline_availability_status: string;
+  definition: string;
+  definition_version: string;
+};
+
+type GoogleAnalyticsBreakdown = {
+  key: string;
+  label: string;
+  subject_to_thresholding: boolean;
+  data_through_date: string | null;
+  rows: Array<{
+    dimensions: Record<string, string>;
+    metrics: Record<string, number | null>;
+    availability: Record<string, { status: string; reason?: string | null }>;
+    thresholded: boolean;
+  }>;
+};
+
+type GoogleAnalyticsDashboardData = {
+  provider: 'google_analytics_4';
+  range: {
+    key: RangeKey;
+    from: string;
+    to: string;
+    previousFrom: string;
+    previousTo: string;
+    timezone: string;
+  };
+  connection: ProviderConnection;
+  property: {
+    id: string;
+    display_name: string;
+    account_name: string | null;
+    timezone: string;
+    currency: string | null;
+    property_type: string | null;
+    service_level: string | null;
+  } | null;
+  metrics: GoogleAnalyticsMetric[];
+  trend: Array<{
+    date: string;
+    active_users?: number | null;
+    new_users?: number | null;
+    sessions?: number | null;
+    screen_page_views?: number | null;
+    engagement_rate?: number | null;
+    bounce_rate?: number | null;
+    availability: Record<string, { status: string; reason?: string | null }>;
+  }>;
+  breakdowns: GoogleAnalyticsBreakdown[];
+  availability: {
+    state: string;
+    data_through_date: string | null;
+    requested_through_date: string;
+    subject_to_thresholding?: boolean;
+    exact_range_available?: boolean;
+    note?: string | null;
+  };
+};
+
 type DisconnectTarget = {
-  provider: 'tiktok' | 'youtube' | 'facebook' | 'instagram';
+  provider: 'tiktok' | 'youtube' | 'facebook' | 'instagram' | 'google-analytics';
   connectionId?: string;
   label: string;
 };
@@ -502,12 +573,13 @@ function initialUrlState() {
     from: params.get('from') || todayInputValue(-30),
     to: params.get('to') || todayInputValue(0),
     metric: params.get('metric') || 'both',
-    provider: (['youtube', 'facebook_pages', 'instagram'].includes(params.get('provider') || '')
+    provider: (['youtube', 'facebook_pages', 'instagram', 'google_analytics_4'].includes(params.get('provider') || '')
       ? params.get('provider')
       : 'tiktok') as OverviewProvider,
     youtubeOutcome: params.get('youtube') || '',
     facebookOutcome: params.get('facebook') || '',
     instagramOutcome: params.get('instagram') || '',
+    analyticsOutcome: params.get('analytics') || '',
     invitation: params.get('invitation') || '',
     compare: params.get('compare') !== 'false',
     topSort: (params.get('topSort') as ContentSort) || 'views',
@@ -565,6 +637,15 @@ function resolveMetaLoadState(dashboard: MetaDashboardData | null): LoadState {
   return dashboard.metrics.some((metric) => metric.available) || dashboard.content.length > 0 ? 'ready' : 'empty';
 }
 
+function resolveGoogleAnalyticsLoadState(dashboard: GoogleAnalyticsDashboardData | null): LoadState {
+  if (!dashboard || dashboard.connection.status === 'disconnected') return 'empty';
+  if (dashboard.connection.status === 'reconnect_required') return 'reconnect';
+  if (dashboard.connection.status !== 'active') return 'partial';
+  if (dashboard.availability.state === 'ready' && dashboard.metrics.some((metric) => metric.available)) return 'ready';
+  if (['partial', 'delayed', 'thresholded'].includes(dashboard.availability.state)) return 'partial';
+  return dashboard.metrics.some((metric) => metric.available) ? 'ready' : 'empty';
+}
+
 function roleCanManage(role?: Role) {
   return role === 'owner' || role === 'admin';
 }
@@ -614,6 +695,7 @@ function App() {
   const [youtubeDashboard, setYouTubeDashboard] = useState<YouTubeDashboardData | null>(null);
   const [facebookDashboard, setFacebookDashboard] = useState<MetaDashboardData | null>(null);
   const [instagramDashboard, setInstagramDashboard] = useState<MetaDashboardData | null>(null);
+  const [googleAnalyticsDashboard, setGoogleAnalyticsDashboard] = useState<GoogleAnalyticsDashboardData | null>(null);
   const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogItem[]>([]);
   const [accountData, setAccountData] = useState<AccountData | null>(null);
   const [invitationToken, setInvitationToken] = useState(initial.invitation);
@@ -796,6 +878,7 @@ function App() {
           youtubeDashboardResult,
           facebookDashboardResult,
           instagramDashboardResult,
+          googleAnalyticsDashboardResult,
           contentResult,
           syncResult,
           catalogResult
@@ -810,6 +893,9 @@ function App() {
           api<MetaDashboardData>(
             `/api/workspaces/${workspace.id}/providers/instagram/dashboard?${dashboardParams.toString()}`
           ),
+          api<GoogleAnalyticsDashboardData>(
+            `/api/workspaces/${workspace.id}/providers/google_analytics_4/dashboard?${dashboardParams.toString()}`
+          ),
           api<ContentData>(`/api/workspaces/${workspace.id}/content?${contentParams.toString()}`),
           api<SyncData>(`/api/workspaces/${workspace.id}/sync-runs?${syncParams.toString()}`),
           api<{ providers: ProviderCatalogItem[] }>(`/api/workspaces/${workspace.id}/provider-catalog`)
@@ -818,6 +904,7 @@ function App() {
         setYouTubeDashboard(youtubeDashboardResult);
         setFacebookDashboard(facebookDashboardResult);
         setInstagramDashboard(instagramDashboardResult);
+        setGoogleAnalyticsDashboard(googleAnalyticsDashboardResult);
         setContent(contentResult);
         setSyncData(syncResult);
         setProviderCatalog(catalogResult.providers);
@@ -861,6 +948,22 @@ function App() {
     setToast(outcomes[initial.youtubeOutcome] || 'YouTube authorization returned.');
     setView('connections');
   }, [initial.youtubeOutcome]);
+
+  useEffect(() => {
+    if (!initial.analyticsOutcome) return;
+    const outcomes: Record<string, string> = {
+      selection_required: 'Website Analytics authorized. Select a GA4 property to finish connecting.',
+      no_properties: 'Website Analytics authorized, but no selectable GA4 properties were returned.',
+      reconnected: 'Website Analytics authorization restored for the selected property.',
+      denied: 'Website Analytics authorization was cancelled. No connection was created.',
+      missing_scopes: 'Google did not grant the exact read-only Analytics permission.',
+      configuration_error: 'Website Analytics authorization is temporarily unavailable. Contact support.',
+      provider_error: 'Google Analytics could not complete authorization. Try again after Google recovers.',
+      failed: 'Website Analytics authorization did not complete.'
+    };
+    setToast(outcomes[initial.analyticsOutcome] || 'Website Analytics authorization returned.');
+    setView('connections');
+  }, [initial.analyticsOutcome]);
 
   useEffect(() => {
     const providerOutcome = initial.facebookOutcome
@@ -1133,6 +1236,75 @@ function App() {
     }
   }
 
+  async function startGoogleAnalyticsConnection(connectionId?: string) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ authorization_url: string }>(
+        `/api/workspaces/${activeWorkspace.id}/connections/google-analytics/start`,
+        {
+          method: 'POST',
+          headers: { 'x-csrf-token': csrf },
+          body: JSON.stringify({
+            return_path: `/?workspace=${activeWorkspace.id}&view=connections&provider=google_analytics_4`,
+            connection_id: connectionId || null
+          })
+        }
+      );
+      window.location.href = result.authorization_url;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'ga4_connection_failed');
+      setBusy(false);
+    }
+  }
+
+  async function selectGoogleAnalyticsResource(resourceId: string) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      await api(`/api/workspaces/${activeWorkspace.id}/connections/google-analytics/select`, {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({ resource_id: resourceId })
+      });
+      setToast('GA4 property connected. Its first read-only sync is queued.');
+      await loadWorkspaceData(activeWorkspace);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'ga4_property_selection_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function manualGoogleAnalyticsSync(connectionId?: string) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ status?: string; error?: { message?: string; category?: string } }>(
+        `/api/workspaces/${activeWorkspace.id}/providers/google_analytics_4/sync-runs`,
+        {
+          method: 'POST',
+          headers: { 'x-csrf-token': csrf },
+          body: JSON.stringify({ connection_id: connectionId || null })
+        }
+      );
+      await loadWorkspaceData(activeWorkspace);
+      if (result.status === 'failed' || result.status === 'disabled') {
+        setMessage(result.error?.message || result.error?.category || 'ga4_sync_failed');
+      } else {
+        setToast(result.status === 'queued' ? 'Website Analytics sync scheduled.' : 'Website Analytics sync updated.');
+      }
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'ga4_sync_failed';
+      setMessage(code === 'manual_sync_cooldown' ? 'Manual sync is cooling down. Try again later.' : code);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function startMetaConnection(provider: 'facebook' | 'instagram', connectionId?: string) {
     if (!activeWorkspace) return;
     setBusy(true);
@@ -1219,6 +1391,12 @@ function App() {
           result.provider_revoke?.success
             ? 'Google access revoked and locally stored YouTube data deleted.'
             : 'Locally stored YouTube data deleted. Google revocation did not complete; review Google Account connections.'
+        );
+      } else if (disconnectTarget.provider === 'google-analytics') {
+        setToast(
+          result.provider_revoke?.success
+            ? 'Google Analytics access revoked and locally stored property data deleted.'
+            : 'Locally stored GA4 data deleted. Google revocation did not complete; review Google Account connections.'
         );
       } else if (disconnectTarget.provider === 'facebook' || disconnectTarget.provider === 'instagram') {
         setToast(
@@ -1640,7 +1818,9 @@ function App() {
           connection={
             view === 'overview' && overviewProvider === 'youtube'
               ? youtubeDashboard?.connection || null
-              : dashboard?.connection || null
+              : view === 'overview' && overviewProvider === 'google_analytics_4'
+                ? googleAnalyticsDashboard?.connection || null
+                : dashboard?.connection || null
           }
           busy={busy}
           accountOpen={accountOpen}
@@ -1653,7 +1833,9 @@ function App() {
           onManualSync={
             view === 'overview' && overviewProvider === 'youtube'
               ? () => manualYouTubeSync(youtubeDashboard?.connection.id)
-              : manualSync
+              : view === 'overview' && overviewProvider === 'google_analytics_4'
+                ? () => manualGoogleAnalyticsSync(googleAnalyticsDashboard?.connection.id)
+                : manualSync
           }
           onSignOut={signOut}
         />
@@ -1729,7 +1911,12 @@ function App() {
                           state !== 'loading' &&
                           state !== 'error'
                         ? resolveMetaLoadState(instagramDashboard)
-                        : state
+                        : view === 'overview' &&
+                            overviewProvider === 'google_analytics_4' &&
+                            state !== 'loading' &&
+                            state !== 'error'
+                          ? resolveGoogleAnalyticsLoadState(googleAnalyticsDashboard)
+                          : state
                 }
               />
             )}
@@ -1739,6 +1926,7 @@ function App() {
                 youtubeDashboard={youtubeDashboard}
                 facebookDashboard={facebookDashboard}
                 instagramDashboard={instagramDashboard}
+                googleAnalyticsDashboard={googleAnalyticsDashboard}
                 provider={overviewProvider}
                 range={range}
                 customFrom={customFrom}
@@ -1763,6 +1951,7 @@ function App() {
                     provider === 'facebook_pages' ? facebookDashboard?.connection.id : instagramDashboard?.connection.id
                   )
                 }
+                onGoogleAnalyticsSync={() => manualGoogleAnalyticsSync(googleAnalyticsDashboard?.connection.id)}
               />
             )}
             {view === 'content' && contentDetailId ? (
@@ -1805,6 +1994,9 @@ function App() {
                 onYouTubeConnect={startYouTubeConnection}
                 onYouTubeSelect={selectYouTubeResource}
                 onYouTubeSync={manualYouTubeSync}
+                onGoogleAnalyticsConnect={startGoogleAnalyticsConnection}
+                onGoogleAnalyticsSelect={selectGoogleAnalyticsResource}
+                onGoogleAnalyticsSync={manualGoogleAnalyticsSync}
                 onMetaConnect={startMetaConnection}
                 onMetaSelect={selectMetaResource}
                 onMetaSync={manualMetaSync}
@@ -2033,6 +2225,7 @@ function Overview({
   youtubeDashboard,
   facebookDashboard,
   instagramDashboard,
+  googleAnalyticsDashboard,
   provider,
   range,
   customFrom,
@@ -2051,12 +2244,14 @@ function Overview({
   onTrendMetricChange,
   onTopSortChange,
   onYouTubeSync,
-  onMetaSync
+  onMetaSync,
+  onGoogleAnalyticsSync
 }: {
   dashboard: DashboardData | null;
   youtubeDashboard: YouTubeDashboardData | null;
   facebookDashboard: MetaDashboardData | null;
   instagramDashboard: MetaDashboardData | null;
+  googleAnalyticsDashboard: GoogleAnalyticsDashboardData | null;
   provider: OverviewProvider;
   range: RangeKey;
   customFrom: string;
@@ -2076,6 +2271,7 @@ function Overview({
   onTopSortChange: (value: ContentSort) => void;
   onYouTubeSync: () => void;
   onMetaSync: (provider: 'facebook_pages' | 'instagram') => void;
+  onGoogleAnalyticsSync: () => void;
 }) {
   const metrics =
     dashboard?.metrics ||
@@ -2130,6 +2326,14 @@ function Overview({
             onClick={() => onProviderChange('instagram')}
           >
             <Instagram size={17} aria-hidden /> Instagram
+          </button>
+          <button
+            type="button"
+            className={provider === 'google_analytics_4' ? 'active' : ''}
+            aria-pressed={provider === 'google_analytics_4'}
+            onClick={() => onProviderChange('google_analytics_4')}
+          >
+            <BarChart3 size={17} aria-hidden /> Website
           </button>
         </div>
       </section>
@@ -2188,6 +2392,14 @@ function Overview({
           busy={busy}
           canSync={canSync}
           onSync={onYouTubeSync}
+        />
+      ) : provider === 'google_analytics_4' ? (
+        <GoogleAnalyticsOverview
+          dashboard={googleAnalyticsDashboard}
+          compare={compare}
+          busy={busy}
+          canSync={canSync}
+          onSync={onGoogleAnalyticsSync}
         />
       ) : provider === 'facebook_pages' || provider === 'instagram' ? (
         <MetaOverview
@@ -2325,6 +2537,246 @@ function Overview({
           </section>
         </>
       )}
+    </>
+  );
+}
+
+function formatGoogleAnalyticsValue(metric: Pick<GoogleAnalyticsMetric, 'key' | 'unit' | 'value'>) {
+  if (metric.value === null || metric.value === undefined) return 'N/A';
+  if (metric.unit === 'seconds') return formatSeconds(metric.value);
+  if (metric.unit === 'ratio') {
+    if (metric.key === 'ga4.engagement_rate' || metric.key === 'ga4.bounce_rate') {
+      return `${(metric.value * 100).toFixed(1)}%`;
+    }
+    return metric.value.toFixed(2);
+  }
+  return formatNumber(metric.value);
+}
+
+function formatGoogleAnalyticsBreakdownValue(key: string, value: number | null) {
+  if (value === null) return 'N/A';
+  if (key === 'ga4.engagement_rate' || key === 'ga4.bounce_rate') return `${(value * 100).toFixed(1)}%`;
+  if (key === 'ga4.average_session_duration') return formatSeconds(value);
+  if (key.endsWith('_per_user')) return value.toFixed(2);
+  return formatNumber(value);
+}
+
+function googleAnalyticsMetricLabel(key: string) {
+  const labels: Record<string, string> = {
+    'ga4.active_users': 'Active users',
+    'ga4.new_users': 'New users',
+    'ga4.sessions': 'Sessions',
+    'ga4.screen_page_views': 'Views',
+    'ga4.engagement_rate': 'Engagement rate',
+    'ga4.bounce_rate': 'Bounce rate',
+    'ga4.average_session_duration': 'Avg. session duration',
+    'ga4.sessions_per_user': 'Sessions per user',
+    'ga4.screen_page_views_per_user': 'Views per user'
+  };
+  return labels[key] || key.replace('ga4.', '').replaceAll('_', ' ');
+}
+
+function GoogleAnalyticsMetricCard({ metric, compare }: { metric: GoogleAnalyticsMetric; compare: boolean }) {
+  const direction = !metric.available
+    ? 'unavailable'
+    : metric.delta === null
+      ? 'neutral'
+      : metric.delta > 0
+        ? 'positive'
+        : metric.delta < 0
+          ? 'negative'
+          : 'neutral';
+  return (
+    <article className={`metric-card ${direction}`} title={metric.definition}>
+      <span>{metric.label}</span>
+      <strong>{formatGoogleAnalyticsValue(metric)}</strong>
+      <small>
+        {!metric.available
+          ? (metric.availability_reason || 'Unavailable from GA4').replaceAll('_', ' ')
+          : !compare
+            ? 'Comparison hidden'
+            : metric.delta === null
+              ? 'Previous period unavailable'
+              : `${metric.delta >= 0 ? '+' : ''}${metric.percent_change === null ? 'Change available; percent N/A' : `${metric.percent_change.toFixed(1)}%`}`}
+      </small>
+    </article>
+  );
+}
+
+function GoogleAnalyticsOverview({
+  dashboard,
+  compare,
+  busy,
+  canSync,
+  onSync
+}: {
+  dashboard: GoogleAnalyticsDashboardData | null;
+  compare: boolean;
+  busy: boolean;
+  canSync: boolean;
+  onSync: () => void;
+}) {
+  const connected = dashboard?.connection.status === 'active';
+  const trend = (dashboard?.trend || []).map((point) => ({
+    ...point,
+    label: formatDate(point.date, { month: 'short', day: 'numeric' })
+  }));
+  const availabilityMessage =
+    dashboard?.availability.state === 'thresholded'
+      ? 'Google privacy thresholding applies to at least one breakdown. Summary metrics remain as reported; withheld rows are not estimated.'
+      : dashboard?.availability.state === 'delayed'
+        ? `GA4 data is currently available through ${formatDate(dashboard.availability.data_through_date, { dateStyle: 'medium' })}.`
+        : dashboard?.availability.state === 'partial'
+          ? 'Some GA4 metrics or breakdowns are unavailable for this property and range. Missing values remain N/A.'
+          : null;
+
+  return (
+    <>
+      <section className="panel youtube-channel" aria-labelledby="ga4-property-title">
+        <div className="channel-identity">
+          <span className="channel-placeholder" aria-hidden>
+            <BarChart3 size={24} />
+          </span>
+          <div>
+            <p className="eyebrow">Google Analytics 4 property</p>
+            <h2 id="ga4-property-title">{dashboard?.property?.display_name || 'No property connected'}</h2>
+            <p className="muted">
+              {connected
+                ? `Last synced ${formatDate(dashboard?.connection.last_successful_sync_at)}`
+                : 'Authorize Google Analytics and explicitly select a property in Connections.'}
+            </p>
+            {dashboard?.property && (
+              <p className="muted">
+                {dashboard.property.account_name || dashboard.property.id} · {dashboard.property.timezone}
+                {dashboard.property.currency ? ` · ${dashboard.property.currency}` : ''}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="button-row">
+          <StatusBadge status={dashboard?.connection.status || 'disconnected'} />
+          <button type="button" onClick={onSync} disabled={!connected || !canSync || busy}>
+            <RefreshCw className={busy ? 'spin' : ''} size={18} aria-hidden /> Sync now
+          </button>
+        </div>
+      </section>
+
+      {availabilityMessage && <p className="notice">{availabilityMessage}</p>}
+
+      <section className="metric-grid youtube-metrics" aria-label="Website Analytics summary metrics">
+        {(dashboard?.metrics || []).map((metric) => (
+          <GoogleAnalyticsMetricCard key={metric.key} metric={metric} compare={compare} />
+        ))}
+        {!dashboard?.metrics.length && (
+          <article className="metric-card unavailable">
+            <span>Website Analytics</span>
+            <strong>N/A</strong>
+            <small>No stored GA4 report is available</small>
+          </article>
+        )}
+      </section>
+
+      <section className="panel chart-panel" aria-labelledby="ga4-traffic-title">
+        <div className="panel-title between">
+          <div>
+            <h2 id="ga4-traffic-title">Daily traffic</h2>
+            <p>Sessions, views, and active users in the property timezone.</p>
+          </div>
+          <span className="muted">
+            Data through {formatDate(dashboard?.availability.data_through_date, { dateStyle: 'medium' })}
+          </span>
+        </div>
+        {trend.length > 0 ? (
+          <div className="chart-box" role="img" aria-label="Line chart of daily GA4 sessions, views, and active users">
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={trend} margin={{ top: 12, right: 24, bottom: 12, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="label" minTickGap={24} />
+                <YAxis tickFormatter={formatCompact} />
+                <Tooltip formatter={formatTooltipNumber} />
+                <Legend />
+                <Line
+                  type="monotone"
+                  dataKey="sessions"
+                  name="Sessions"
+                  stroke="var(--chart-a)"
+                  strokeWidth={2.5}
+                  dot={false}
+                  connectNulls
+                />
+                <Line
+                  type="monotone"
+                  dataKey="screen_page_views"
+                  name="Views"
+                  stroke="var(--chart-b)"
+                  strokeWidth={2.5}
+                  dot={false}
+                  connectNulls
+                />
+                <Line
+                  type="monotone"
+                  dataKey="active_users"
+                  name="Active users"
+                  stroke="var(--chart-c)"
+                  strokeWidth={2.5}
+                  dot={false}
+                  connectNulls
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="chart-empty">No daily GA4 rows are stored for this range.</div>
+        )}
+      </section>
+
+      <section className="panel" aria-labelledby="ga4-breakdowns-title">
+        <div className="panel-title">
+          <div>
+            <h2 id="ga4-breakdowns-title">Traffic breakdowns</h2>
+            <p>Top provider-reported rows. “(not set)” and privacy-threshold states are preserved.</p>
+          </div>
+        </div>
+        {dashboard?.breakdowns.length ? (
+          <div className="ga4-breakdown-grid">
+            {dashboard.breakdowns.map((breakdown) => (
+              <section key={breakdown.key} className="ga4-breakdown" aria-labelledby={`${breakdown.key}-title`}>
+                <div className="between">
+                  <h3 id={`${breakdown.key}-title`}>{breakdown.label}</h3>
+                  {breakdown.subject_to_thresholding && <StatusBadge status="thresholded" />}
+                </div>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">Value</th>
+                        <th scope="col">Metrics</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {breakdown.rows.slice(0, 10).map((row, index) => (
+                        <tr key={`${breakdown.key}-${Object.values(row.dimensions).join('-')}-${index}`}>
+                          <td data-label="Value">{Object.values(row.dimensions).join(' · ') || '(not set)'}</td>
+                          <td data-label="Metrics">
+                            {Object.entries(row.metrics)
+                              .map(
+                                ([key, value]) =>
+                                  `${googleAnalyticsMetricLabel(key)}: ${formatGoogleAnalyticsBreakdownValue(key, value)}`
+                              )
+                              .join(' · ')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            ))}
+          </div>
+        ) : (
+          <div className="table-empty">No compatible GA4 breakdown rows are stored for this range.</div>
+        )}
+      </section>
     </>
   );
 }
@@ -3075,6 +3527,9 @@ function Connections({
   onYouTubeConnect,
   onYouTubeSelect,
   onYouTubeSync,
+  onGoogleAnalyticsConnect,
+  onGoogleAnalyticsSelect,
+  onGoogleAnalyticsSync,
   onMetaConnect,
   onMetaSelect,
   onMetaSync,
@@ -3091,6 +3546,9 @@ function Connections({
   onYouTubeConnect: (connectionId?: string) => void;
   onYouTubeSelect: (resourceId: string) => void;
   onYouTubeSync: (connectionId?: string) => void;
+  onGoogleAnalyticsConnect: (connectionId?: string) => void;
+  onGoogleAnalyticsSelect: (resourceId: string) => void;
+  onGoogleAnalyticsSync: (connectionId?: string) => void;
   onMetaConnect: (provider: 'facebook' | 'instagram', connectionId?: string) => void;
   onMetaSelect: (provider: 'facebook' | 'instagram', resourceId: string) => void;
   onMetaSync: (provider: 'facebook_pages' | 'instagram', connectionId?: string) => void;
@@ -3122,17 +3580,21 @@ function Connections({
           const isFacebook = provider.id === 'facebook_pages';
           const isInstagram = provider.id === 'instagram';
           const isMeta = isFacebook || isInstagram;
+          const isGoogleAnalytics = provider.id === 'google_analytics_4';
           const metaPath = isFacebook ? 'facebook' : 'instagram';
           const canConnect = allowed && provider.connectable;
           const canDisconnect = allowed && (isTikTok || isMeta) && provider.connection?.status !== 'disconnected';
           const youtubeConnections = provider.connections || [];
           const metaConnections = isMeta ? provider.connections || [] : [];
+          const googleAnalyticsConnections = isGoogleAnalytics ? provider.connections || [] : [];
           const unselectedResources = (provider.resources || []).filter((resource) => !resource.selected);
           const grantedScopes = (provider.authorization?.scopes || [])
             .filter((scope) => scope.status === 'granted')
             .map((scope) => scope.scope);
           const canStartYouTube =
             isYouTube && canConnect && (!provider.authorization || (provider.resources || []).length === 0);
+          const canStartGoogleAnalytics =
+            isGoogleAnalytics && canConnect && (!provider.authorization || (provider.resources || []).length === 0);
           const canStartMeta = isMeta && canConnect && provider.status !== 'authorizing';
           return (
             <article key={provider.id} className="provider-row">
@@ -3154,7 +3616,7 @@ function Connections({
                   <p className="notice error">This connection needs attention before syncing can continue.</p>
                 )}
                 {!provider.implemented && <p className="muted">This analytics source is not available yet.</p>}
-                {(isYouTube || isMeta) &&
+                {(isYouTube || isMeta || isGoogleAnalytics) &&
                   provider.configuration?.warnings.map((warning) => (
                     <p key={warning} className="notice error">
                       This connection is temporarily unavailable because its setup is incomplete. Contact support if you
@@ -3175,6 +3637,20 @@ function Connections({
                 )}
                 {isYouTube && provider.status === 'provider_error' && (
                   <p className="notice error">The latest authorization attempt failed at Google or YouTube.</p>
+                )}
+                {isGoogleAnalytics && provider.status === 'no_properties' && (
+                  <p className="notice">Google returned no GA4 properties with usable timezone and currency details.</p>
+                )}
+                {isGoogleAnalytics && provider.status === 'authorization_denied' && (
+                  <p className="notice">Authorization was cancelled. No Google Analytics data was accessed.</p>
+                )}
+                {isGoogleAnalytics && provider.status === 'missing_scopes' && (
+                  <p className="notice error">
+                    Google did not grant the exact analytics.readonly permission. Authorize again to continue.
+                  </p>
+                )}
+                {isGoogleAnalytics && provider.status === 'provider_error' && (
+                  <p className="notice error">The latest Google Analytics authorization attempt failed.</p>
                 )}
                 {isMeta && provider.status === 'no_resources' && (
                   <p className="notice">No eligible Pages or professional accounts were available to select.</p>
@@ -3200,7 +3676,7 @@ function Connections({
                     <span key={label}>Read: {label}</span>
                   ))}
                 </div>
-                {(isYouTube || isMeta) && provider.authorization && grantedScopes.length === 0 && (
+                {(isYouTube || isMeta || isGoogleAnalytics) && provider.authorization && grantedScopes.length === 0 && (
                   <p className="muted">Analytics access has not been granted.</p>
                 )}
 
@@ -3297,6 +3773,118 @@ function Connections({
                             onClick={() => onYouTubeConnect(connection.id)}
                           >
                             <ExternalLink size={17} aria-hidden /> Reauthorize
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {isGoogleAnalytics && unselectedResources.length > 0 && (
+                  <div className="resource-list" aria-label="GA4 properties available to connect">
+                    <h3>Available properties</h3>
+                    {unselectedResources.map((resource) => (
+                      <div key={resource.id} className="resource-row">
+                        <div className="channel-identity compact">
+                          <span className="channel-placeholder" aria-hidden>
+                            <BarChart3 size={18} />
+                          </span>
+                          <div>
+                            <strong>{resource.display_name}</strong>
+                            <small>{resource.account_name || resource.provider_resource_id}</small>
+                            <small>
+                              {resource.timezone || 'Timezone unavailable'} ·{' '}
+                              {resource.currency || 'Currency unavailable'}
+                            </small>
+                            {resource.available === false && (
+                              <small className="notice error">
+                                Unavailable:{' '}
+                                {(resource.unavailable_reason || 'property_details_unavailable').replaceAll('_', ' ')}
+                              </small>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onGoogleAnalyticsSelect(resource.id)}
+                          disabled={!allowed || busy || resource.available === false}
+                        >
+                          <Link2 size={17} aria-hidden /> Select
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {isGoogleAnalytics && googleAnalyticsConnections.length > 0 && (
+                  <div className="resource-list" aria-label="Connected GA4 properties">
+                    <h3>Connected properties</h3>
+                    {googleAnalyticsConnections.map((connection) => (
+                      <div key={connection.id || connection.account?.id} className="resource-row connection-resource">
+                        <div className="channel-identity compact">
+                          <span className="channel-placeholder" aria-hidden>
+                            <BarChart3 size={18} />
+                          </span>
+                          <div>
+                            <strong>
+                              {connection.account?.display_name || connection.account?.id || 'GA4 property'}
+                            </strong>
+                            <small>
+                              {connection.account?.account_name || connection.account?.id} ·{' '}
+                              {connection.account?.timezone || 'Timezone unavailable'} ·{' '}
+                              {connection.account?.currency || 'Currency unavailable'}
+                            </small>
+                            <small>
+                              Last sync {formatDate(connection.last_successful_sync_at)}; data through{' '}
+                              {formatDate(connection.data_through_at, { dateStyle: 'medium' })}
+                            </small>
+                            {connection.reconnect_reason && (
+                              <small className="notice error">
+                                Authorize this property again before synchronization can resume.
+                              </small>
+                            )}
+                            <div className="capability-list" aria-label="Property capabilities">
+                              {(connection.capabilities || []).map((capability) => (
+                                <span
+                                  key={capability.key}
+                                  className={capability.status === 'available' ? '' : 'delayed'}
+                                >
+                                  {capability.key.replaceAll('_', ' ')}: {capability.status}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="button-row">
+                          <StatusBadge status={connection.status} />
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            disabled={!roleCanSync(role) || connection.status !== 'active' || busy}
+                            onClick={() => onGoogleAnalyticsSync(connection.id)}
+                          >
+                            <RefreshCw size={17} aria-hidden /> Sync
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!canConnect || busy}
+                            onClick={() => onGoogleAnalyticsConnect(connection.id)}
+                          >
+                            <ExternalLink size={17} aria-hidden /> Reauthorize
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            disabled={!allowed || busy}
+                            onClick={() =>
+                              onDisconnectRequest({
+                                provider: 'google-analytics',
+                                connectionId: connection.id,
+                                label: connection.account?.display_name || 'GA4 property'
+                              })
+                            }
+                          >
+                            <Unplug size={17} aria-hidden /> Disconnect
                           </button>
                         </div>
                       </div>
@@ -3459,6 +4047,34 @@ function Connections({
                       <Unplug size={18} aria-hidden /> Disconnect
                     </button>
                   </>
+                ) : isGoogleAnalytics ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={!canStartGoogleAnalytics || busy}
+                      onClick={() => onGoogleAnalyticsConnect()}
+                    >
+                      <ExternalLink size={18} aria-hidden />{' '}
+                      {provider.status === 'missing_scopes' ||
+                      provider.status === 'authorization_denied' ||
+                      provider.status === 'provider_error'
+                        ? 'Authorize again'
+                        : provider.status === 'authorizing'
+                          ? 'Restart authorization'
+                          : provider.authorization
+                            ? 'Refresh discovery'
+                            : 'Connect Website Analytics'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        !allowed || !provider.authorization || provider.authorization.status === 'revoked' || busy
+                      }
+                      onClick={() => onDisconnectRequest({ provider: 'google-analytics', label: 'Website Analytics' })}
+                    >
+                      <Unplug size={18} aria-hidden /> Disconnect all
+                    </button>
+                  </>
                 ) : isMeta ? (
                   <>
                     <button type="button" disabled={!canStartMeta || busy} onClick={() => onMetaConnect(metaPath)}>
@@ -3502,6 +4118,11 @@ function Connections({
               <p>
                 Social Insights Studio will ask Google to revoke access, then remove this YouTube connection and its
                 stored analytics data from the workspace.
+              </p>
+            ) : disconnectTarget.provider === 'google-analytics' ? (
+              <p>
+                Removing one of several selected properties preserves the shared read-only Google grant. Removing the
+                final property asks Google to revoke access and deletes the locally stored GA4 observations.
               </p>
             ) : disconnectTarget.provider === 'facebook' || disconnectTarget.provider === 'instagram' ? (
               <p>

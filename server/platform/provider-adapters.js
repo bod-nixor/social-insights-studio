@@ -82,7 +82,7 @@ const PROVIDER_ADAPTERS = {
   google_analytics_4: {
     provider: 'google_analytics_4',
     authorizationProvider: 'google',
-    implemented: false,
+    implemented: true,
     featureFlag: 'FEATURE_GA4_CONNECTOR',
     incrementalAuthorization: true,
     productAuthOnly: true,

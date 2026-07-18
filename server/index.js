@@ -15,6 +15,7 @@ const { validateMailConfiguration } = require('./platform/mail');
 const { getDeploymentReadinessCheck, getDeploymentVersion } = require('./platform/version');
 const { getYouTubeConfiguration } = require('./platform/youtube-config');
 const { getMetaConfiguration } = require('./platform/meta-config');
+const { getGoogleAnalyticsConfiguration } = require('./platform/google-analytics-config');
 
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -322,6 +323,7 @@ app.get('/health/ready', async (req, res) => {
   let database = 'not_configured';
   let youtubeFoundationReady = false;
   let metaFoundationReady = false;
+  let ga4FoundationReady = false;
   if (process.env.DATABASE_URL) {
     let connection;
     try {
@@ -343,6 +345,22 @@ app.get('/health/ready', async (req, res) => {
            )`
       );
       youtubeFoundationReady = Number(foundationRows[0] && foundationRows[0].count) === 8;
+      const ga4FoundationRows = await connection.query(
+        `SELECT COUNT(*) AS count FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (
+             'provider_authorizations',
+             'provider_authorization_credentials',
+             'provider_authorization_scopes',
+             'provider_resources',
+             'workspace_provider_connections',
+             'provider_resource_observations',
+             'provider_metric_observations',
+             'provider_dimension_observations',
+             'provider_request_events'
+           )`
+      );
+      ga4FoundationReady = Number(ga4FoundationRows[0] && ga4FoundationRows[0].count) === 9;
       const metaFoundationRows = await connection.query(
         `SELECT COUNT(*) AS count FROM information_schema.TABLES
          WHERE TABLE_SCHEMA = DATABASE()
@@ -391,6 +409,11 @@ app.get('/health/ready', async (req, res) => {
     foundationReady: metaFoundationReady,
     workerReady: true
   });
+  const googleAnalytics = getGoogleAnalyticsConfiguration(process.env, {
+    databaseReady: database === 'ready',
+    foundationReady: ga4FoundationReady,
+    workerReady: true
+  });
   const body = {
     status: database === 'unavailable' ? 'not_ready' : 'ready',
     checks: {
@@ -399,14 +422,16 @@ app.get('/health/ready', async (req, res) => {
       deployment_metadata: deployment.status,
       youtube: youtube.status,
       facebook_pages: facebookPages.status,
-      instagram: instagram.status
+      instagram: instagram.status,
+      google_analytics_4: googleAnalytics.status
     }
   };
   const warnings = [
     ...deployment.warnings,
     ...youtube.warnings,
     ...facebookPages.warnings,
-    ...instagram.warnings
+    ...instagram.warnings,
+    ...googleAnalytics.warnings
   ];
   if (warnings.length > 0) {
     body.warnings = [...new Set(warnings)];

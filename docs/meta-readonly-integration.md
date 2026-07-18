@@ -23,6 +23,20 @@ Meta may return the automatic `public_profile` permission. The callback accepts 
 
 The Instagram source is implemented but disabled by default. Runtime enablement requires an operator assertion containing the exact four-scope set, a Facebook Login for Business configuration, and the exact callback. This preserves the blocker until the Meta dashboard confirms that `instagram_basic` and `instagram_manage_insights` are available to the configured Facebook Login path. Meta's current Instagram insights reference also says some accounts reached through a Business Manager Page role require `ads_management` and `ads_read`; those resources are ineligible for this slice and Instagram must remain disabled if the reviewer/test path cannot work without them.
 
+### Verified Dashboard And Documentation Evidence
+
+The evidence supplied for the configured app and the first-party documentation reviewed on 2026-07-18 produce the following fail-closed decision. Permission visibility is not treated as Advanced Access, approval, or proof that a particular Login for Business configuration can grant it.
+
+| Permission | Read-only use | Configured-app evidence | Decision |
+| --- | --- | --- | --- |
+| `pages_show_list` | Discover Pages available to the authorizing user so the user can select one explicitly. | Visible in the supplied Meta dashboard evidence. | Proven for the Pages permission inventory; the dedicated configuration and live grant still require external verification. |
+| `pages_read_engagement` | Read Page metadata/engagement and support linked Instagram professional-account discovery. | Visible in the supplied Meta dashboard evidence; Meta's official Instagram API collection lists it for insights through Facebook Login. | Proven for the permission inventory; the dedicated configuration and live grant still require external verification. |
+| `read_insights` | Read Page and post insights. | Visible in the supplied Meta dashboard evidence under the Page-management capability. | Proven for the Pages permission inventory; the dedicated configuration and live grant still require external verification. |
+| `instagram_basic` | Read the selected linked professional account and its media. | Required by Meta's official Instagram API collection, but not individually shown as available in the supplied configured-app evidence. | Not proven for this app configuration; keep Instagram disabled. |
+| `instagram_manage_insights` | Read professional-account and media insights. | Required by Meta's official Instagram API collection. The supplied dashboard says insights require API setup with Facebook Login, but does not show this permission in the dedicated configuration. | Not proven for this app configuration; keep Instagram disabled. |
+
+The same official Meta insights reference notes that accounts whose Page role is derived through Business Manager can additionally require `ads_management` and `ads_read`. This product will reject that resource path rather than request those permissions. The current Graph API target remains `v25.0`; changing it requires a new compatibility review and test pass.
+
 ## Authorization And Selection
 
 Both products use Facebook Login for Business with a pinned Graph API `v25.0` login URL and separate `META_FACEBOOK_LOGIN_CONFIG_ID` and `META_INSTAGRAM_LOGIN_CONFIG_ID` user-access-token configurations. The IDs must differ when both providers are enabled, and each dashboard configuration must contain only its provider's exact approved permission set. In accordance with Meta's configuration-based login contract, the login URL uses `config_id` instead of a `scope` parameter. OAuth transactions still bind the asserted exact permission set, hashed single-use state, workspace, initiating user, server session, provider, exact redirect URI, optional reauthorization target, and a local-only return path; the callback independently verifies the permissions actually granted.
@@ -141,6 +155,7 @@ If Meta requires ads, publishing, messaging, comment-management, webhooks, demog
 
 ## Official References
 
+- [Meta's official Instagram API Postman collection — Insights](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api?entity=request-23987686-26e7999c-fc7e-44c8-8f71-ab2de8d35c32)
 - https://developers.facebook.com/documentation/pages-api
 - https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/
 - https://developers.facebook.com/documentation/pages-api/manage-pages

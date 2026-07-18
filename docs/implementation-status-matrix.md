@@ -89,8 +89,8 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | --- | --- | --- | --- |
 | TikTok | Complete for current dashboard/CSV/legacy behavior | `user.info.basic`, `user.info.profile`, `user.info.stats`, `video.list` | Production retention/legal confirmation and live deployment verification are external. No-post review fixture remains external. |
 | Facebook Pages | Implemented but disabled | `pages_show_list`, `pages_read_engagement`, `read_insights` through Facebook Login for Business | Exact production config, access level, reviewer Page, legal review, provider review, and live smoke are external. |
-| Instagram professional accounts | Implemented but disabled and externally blocked | `instagram_basic`, `instagram_manage_insights`, `pages_show_list`, `pages_read_engagement` through Facebook Login | Meta dashboard must prove the exact dedicated configuration and an eligible linked account that needs no ads permissions. |
-| YouTube channels | Implemented but disabled | `https://www.googleapis.com/auth/youtube.readonly`, `https://www.googleapis.com/auth/yt-analytics.readonly` | Google project/consent configuration, verified domain, test channel, legal review, verification, and live smoke are external. |
+| Instagram professional accounts | Implemented but disabled and externally blocked | `instagram_basic`, `instagram_manage_insights`, `pages_show_list`, `pages_read_engagement` through Facebook Login | First-party documentation re-verified 2026-07-18. Supplied dashboard evidence proves the Page permission inventory but not both Instagram permissions in the dedicated Login for Business configuration; an eligible linked account that needs no ads permissions is also required. |
+| YouTube channels | Implemented but disabled | `https://www.googleapis.com/auth/youtube.readonly`, `https://www.googleapis.com/auth/yt-analytics.readonly` | First-party documentation re-verified 2026-07-18, including the current `reports.query` requirement for both scopes. Google project/consent configuration, verified domain, test channel, legal review, verification, and live smoke are external. |
 | Google Analytics 4 | Not implemented | Candidate exact scope: `https://www.googleapis.com/auth/analytics.readonly` | Implement OAuth, discovery, Admin/Data adapters, metadata/compatibility checks, worker snapshots, dashboard, deletion, tests, and review evidence before external configuration. |
 
 ## Analytics, Navigation, And Export Requirements
@@ -145,9 +145,8 @@ This matrix is the engineering baseline for the complete multi-platform continua
 
 ## First Safe Implementation Order
 
-1. Re-verify the current official Instagram/YouTube read-only authorization boundary and retain their fail-closed gates.
-2. Implement GA4 behind a disabled-by-default exact-scope gate.
-3. Build the cross-platform overview and global provider/resource/timezone filters.
-4. Implement the protected asynchronous PDF report pipeline and deterministic render QA.
-5. Complete per-scope review packages and full operations documentation.
-6. Run the final clean-install/upgrade/idempotence, full browser/accessibility, report-render, worker, coverage, preflight, audit, and secret checks.
+1. Implement GA4 behind a disabled-by-default exact-scope gate.
+2. Build the cross-platform overview and global provider/resource/timezone filters.
+3. Implement the protected asynchronous PDF report pipeline and deterministic render QA.
+4. Complete per-scope review packages and full operations documentation.
+5. Run the final clean-install/upgrade/idempotence, full browser/accessibility, report-render, worker, coverage, preflight, audit, and secret checks.

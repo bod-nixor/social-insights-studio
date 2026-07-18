@@ -5,6 +5,7 @@ server/data/*.tmp
 server/data/report-artifacts/
 output/pdf/
 tmp/pdfs/
+.report-qa-venv/
 node_modules/
 server/node_modules/
 apps/web/node_modules/

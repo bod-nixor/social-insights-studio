@@ -109,8 +109,12 @@ Current sample paths:
 Independent QA uses pypdf plus pdfplumber and does not trust the renderer's own page counter:
 
 ```sh
-python3 server/scripts/verify-report-samples.py output/pdf
+python3 -m venv .report-qa-venv
+.report-qa-venv/bin/python -m pip install -r server/scripts/requirements-report-qa.txt
+.report-qa-venv/bin/python server/scripts/verify-report-samples.py output/pdf
 ```
+
+The QA-only Python versions are pinned separately from the production Node runtime. Poppler (`pdftoppm`/`pdftocairo`) is also required for the render-to-PNG visual pass.
 
 The verifier checks two independent page counts, A4 dimensions, nonblank pages, character bounds, final footers, file/page limits, annotations, embedded files, open actions, raw `null`/`undefined`, uncontrolled URLs, all-provider coverage, no-content and missing-metric states, and repeated headers in the long table fixture. Poppler rendering to `tmp/pdfs/` is still required for visual release QA of every page.
 

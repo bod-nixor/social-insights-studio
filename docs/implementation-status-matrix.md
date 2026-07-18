@@ -57,8 +57,8 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Invitation resend/revoke with rate limits | Complete | Resends rotate the secret, extend expiry, enforce a 60-second cooldown and five-send cap, and revocation is owner/admin controlled and audited. |
 | Member role changes/removal/last-owner protection | Complete | Server-enforced RBAC, audit logs, production wording, and last-owner coverage exist. |
 | Accessible temporary notifications | Complete for current actions | Success notifications auto-dismiss, errors use polite/alert live regions with user-facing text, and durable provider state remains in the relevant view. |
-| Provider empty/stale/partial/error states | Partially complete | TikTok, YouTube, Meta, and GA4 state distinctions exist; cross-provider overview consistency remains incomplete. |
-| Mobile navigation and no horizontal overflow | Complete for current views | Fixed mobile navigation is usable at 360 pixels; full keyboard and screen-reader QA remains. |
+| Provider empty/stale/partial/error states | Complete for current dashboard scope | The cross-platform endpoint and UI normalize stored-only sample, ready, stale, delayed, thresholded, partial, empty, pending, failed, reconnect, configuration, and disconnected states without hiding provider availability. |
+| Mobile navigation and no horizontal overflow | Complete for current views | Scrollable mobile navigation and the Overview/Sources views were inspected at 360 pixels without document-level horizontal overflow or console errors; full keyboard and screen-reader QA remains. |
 | Keyboard access, visible focus, reduced motion | Partially complete | Semantic controls and reduced-motion CSS exist in places, but complete route/control verification is outstanding. |
 | Clean URL state | Complete | Routes remain refreshable while each view writes only its own relevant filters; invitation secrets are removed after authenticated accept/dismiss. |
 | Internal implementation terminology removed | Complete for current primary screens | Cookie/CSRF, deployment, feature-gate, raw scope/configuration, worker, and provider-error codes are no longer rendered in the account, member, public, connection, or sync-history UX. |
@@ -79,7 +79,7 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Dimension/breakdown observations | Complete for GA4 | Six aggregate GA4 breakdown families use canonical dimension hashes, explicit per-metric availability, threshold flags, period semantics, and tenant constraints. |
 | Report definitions, runs, jobs, and protected artifacts | Complete as a schema foundation | Workspace definitions, relational resources, idempotent leased runs, resource/metric snapshots, private artifact metadata, expiry, and hashed one-time grants exist. Rendering/API/worker behavior remains the PDF phase. |
 | Live-compatible TikTok migration | Complete | Provider-foundation upgrade preserves ciphertext without token rewrite. |
-| Universal metrics avoided | Complete in current registry | Every advertised metric now has a versioned provider-specific definition, unit, aggregation, date semantics, and unavailable rule. GA4 active users are explicitly not summed across daily rows. |
+| Universal metrics avoided | Complete in current registry and overview | Every advertised metric has a versioned provider-specific definition, unit, aggregation, date semantics, and unavailable rule. The cross-platform contract separates every resource and provider, has no analytics total, and uses independent trend scales. GA4 active users are explicitly not summed across daily rows. |
 | Executable provider adapter contract | Complete for new integrations | A validated versioned boundary covers authorization, refresh/revocation, scope inspection, discovery/selection, synchronization, and deletion. Existing providers remain tested compatibility adapters until refactoring can occur without behavior change. |
 | Observation tenant integrity | Complete | Composite workspace/provider foreign keys reject cross-workspace authorization, resource, observation, definition, and run references in real MariaDB tests. |
 
@@ -97,10 +97,10 @@ This matrix is the engineering baseline for the complete multi-platform continua
 
 | Requirement | Status | Evidence and remaining work |
 | --- | --- | --- |
-| Cross-platform Overview | Not implemented | Current overview switches between provider pages; it does not render side-by-side health, trends, alerts, comparisons, and top content. |
-| Platforms/Sources navigation | Not implemented | Connection management exists, but no dedicated source-detail navigation model. |
+| Cross-platform Overview | Complete for current providers | A stored-only API and responsive UI render every selected resource separately with health/freshness, provider-defined metrics, independent-scale trends, top content or landing pages, alerts, comparisons, and methodology. Unlike metrics are never summed. |
+| Platforms/Sources navigation | Complete for current providers | Overview is the comparison surface; Sources preserves all five provider dashboards and carries explicit provider/resource drill-down state. |
 | Provider dashboards | Complete for all five current providers | Stored-snapshot APIs and visible provider-specific views exist, including GA4 exact-range metrics, daily traffic, property timezone/currency, compatible breakdowns, data-through state, and threshold warnings. |
-| Resource filter | Partially complete | APIs support connection/data-source targeting in newer providers, but a consistent global resource filter is absent. |
+| Resource filter | Complete for multi-resource providers | Sources exposes the selected connection for YouTube, Facebook Pages, Instagram, and GA4. Cross-platform cards load every connection by ID. TikTok retains its existing single-account contract. |
 | Date and comparison filters | Complete for current provider dashboards | 7/30/90/custom and comparison semantics exist, with provider-specific limitations. |
 | Timezone semantics | Complete for GA4 property reports | GA4 ranges use the selected property's timezone and the UI displays it. A user-selectable timezone override is deliberately rejected so provider date semantics are not relabeled. |
 | Cross-provider content and capability-aware columns | Partially complete | Normalized content/filter/detail exists, but the UI remains TikTok-shaped and lacks the full dynamic provider/resource column model. |

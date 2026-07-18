@@ -64,6 +64,7 @@ const {
   startGoogleAnalyticsConnection
 } = require('./google-analytics-connection-service');
 const { getGoogleAnalyticsDashboard } = require('./google-analytics-dashboard-service');
+const { getCrossPlatformDashboard } = require('./cross-platform-dashboard-service');
 const {
   getPublicProviderCatalog,
   listWorkspaceProviderCatalog
@@ -625,6 +626,18 @@ function createPlatformRouter() {
   router.get('/workspaces/:workspaceId/dashboard', requireSession, async (req, res) => {
     try {
       return res.json(await getDashboard(req.session.user.id, req.params.workspaceId, req.query));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/workspaces/:workspaceId/cross-platform-overview', requireSession, async (req, res) => {
+    try {
+      return res.json(await getCrossPlatformDashboard(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.query
+      ));
     } catch (error) {
       return sendError(res, error);
     }

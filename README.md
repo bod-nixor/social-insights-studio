@@ -62,8 +62,9 @@ Do not point destructive tests or reset commands at production or shared remote 
 - Meta disconnect, deauthorization, and data-deletion callbacks revoke where possible and purge local credentials, resources, jobs, content, and snapshots. Signed callbacks are HMAC-verified, time-bounded, and replay-protected.
 - Website Analytics uses a dedicated Google OAuth client with exactly `analytics.readonly`, S256 PKCE, encrypted access/refresh tokens, bounded Admin/Data API discovery, and explicit GA4 property selection. Worker-only reports store property-timezone metrics, daily traffic, compatible aggregate breakdowns, data-through dates, and privacy-threshold states.
 - GA4 disconnect preserves a shared authorization while sibling properties remain selected; removing the final property attempts Google revocation and purges local credentials, resources, observations, and jobs. Terminal external revocation performs the same local purge.
+- The cross-platform Overview reads stored snapshots only and renders each selected resource separately with source health, freshness, provider-defined metrics, small-multiple trends, top content or landing pages, and explicit availability alerts. It never sums unlike provider metrics. Full provider hierarchy and explicit resource filters remain under Sources.
 - Bounded worker syncs use MariaDB leases, refresh credentials when needed, write immutable profile/content/provider Analytics snapshots, record request/quota/retry metadata and partial/failed states, preserve last valid data, and stagger six-hour schedules.
-- Dashboard APIs read stored snapshots only; page requests do not fetch provider APIs directly.
+- Dashboard APIs, including `/api/workspaces/:workspaceId/cross-platform-overview`, read stored snapshots only; page requests do not fetch provider APIs directly. See [`docs/cross-platform-overview.md`](docs/cross-platform-overview.md).
 - CSV content exports are workspace-scoped, analyst-or-higher, formula-injection safe, and recorded in export tables.
 
 ## Required Environment

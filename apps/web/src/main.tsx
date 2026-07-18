@@ -43,7 +43,7 @@ import {
 } from 'recharts';
 import './styles.css';
 
-type View = 'overview' | 'content' | 'connections' | 'members' | 'sync' | 'account';
+type View = 'overview' | 'sources' | 'content' | 'connections' | 'members' | 'sync' | 'account';
 type LoadState = 'ready' | 'loading' | 'empty' | 'stale' | 'partial' | 'permission' | 'error' | 'reconnect';
 type RangeKey = '7d' | '30d' | '90d' | 'custom';
 type Role = 'owner' | 'admin' | 'analyst' | 'viewer';
@@ -304,7 +304,7 @@ type MetaDashboardData = {
   trend: Array<Record<string, unknown> & { date: string }>;
   content: ContentRow[];
   latest_sync: SyncRun | null;
-  availability: { state: string; note?: string | null };
+  availability: { state: string; data_through_date?: string | null; note?: string | null };
 };
 
 type GoogleAnalyticsMetric = DashboardMetric & {
@@ -372,6 +372,99 @@ type GoogleAnalyticsDashboardData = {
   };
 };
 
+type CrossPlatformMetric = DashboardMetric & {
+  family: string;
+  unit: 'count' | 'minutes' | 'ratio' | 'seconds' | string;
+  available: boolean;
+  availability_status: string;
+  availability_reason?: string | null;
+  semantics?: string | null;
+  definition?: string | null;
+  definition_version?: string | null;
+};
+
+type CrossPlatformSource = {
+  id: string;
+  provider: OverviewProvider;
+  provider_name: string;
+  status: string;
+  configuration_status?: string | null;
+  connected_resource_count: number;
+  resource: {
+    connection_id: string | null;
+    id: string;
+    display_name: string;
+    account_name?: string | null;
+    timezone?: string | null;
+  } | null;
+  range: {
+    key?: RangeKey | null;
+    from: string | null;
+    to: string | null;
+    previous_from?: string | null;
+    previous_to?: string | null;
+    timezone?: string | null;
+    provider_period_days?: number | null;
+  };
+  has_data: boolean;
+  demo_data: boolean;
+  freshness: {
+    state: string;
+    last_successful_sync_at: string | null;
+    data_through_date: string | null;
+    next_sync_at: string | null;
+  };
+  metrics: CrossPlatformMetric[];
+  trend: {
+    series: Array<{ key: string; label: string; unit: string }>;
+    points: Array<{ date: string; values: Record<string, number | null> }>;
+  };
+  top_content: Array<{
+    id: string;
+    kind: 'social_content' | 'website_path';
+    title: string;
+    published_at: string | null;
+    share_url: string | null;
+    primary_metric: { key: string; label: string; unit: string; value: number | null };
+  }>;
+  availability: {
+    state?: string | null;
+    note?: string | null;
+    subject_to_thresholding?: boolean;
+  };
+  alert: {
+    severity: 'critical' | 'warning' | 'info';
+    code: string;
+    message: string;
+  } | null;
+};
+
+type CrossPlatformDashboardData = {
+  range: {
+    key: RangeKey;
+    from: string;
+    to: string;
+    previous_from: string;
+    previous_to: string;
+    comparison: 'previous_period';
+  };
+  state: 'ready' | 'partial' | 'empty' | 'reconnect';
+  demo_data: boolean;
+  summary: {
+    connected_resources: number;
+    resources_with_data: number;
+    attention_count: number;
+  };
+  sources: CrossPlatformSource[];
+  alerts: Array<{
+    source_id: string;
+    severity: 'critical' | 'warning' | 'info';
+    code: string;
+    message: string;
+  }>;
+  methodology: string[];
+};
+
 type DisconnectTarget = {
   provider: 'tiktok' | 'youtube' | 'facebook' | 'instagram' | 'google-analytics';
   connectionId?: string;
@@ -430,10 +523,11 @@ type AccountData = {
 const views: Array<{ id: View; label: string; icon: React.ComponentType<{ size?: number; 'aria-hidden'?: boolean }> }> =
   [
     { id: 'overview', label: 'Overview', icon: BarChart3 },
+    { id: 'sources', label: 'Sources', icon: Activity },
     { id: 'content', label: 'Content', icon: Video },
     { id: 'connections', label: 'Connections', icon: Link2 },
     { id: 'members', label: 'Members', icon: Users },
-    { id: 'sync', label: 'Sync history', icon: Activity },
+    { id: 'sync', label: 'Sync history', icon: RefreshCw },
     { id: 'account', label: 'Account', icon: Settings }
   ];
 
@@ -573,6 +667,7 @@ function initialUrlState() {
     from: params.get('from') || todayInputValue(-30),
     to: params.get('to') || todayInputValue(0),
     metric: params.get('metric') || 'both',
+    resource: params.get('resource') || '',
     provider: (['youtube', 'facebook_pages', 'instagram', 'google_analytics_4'].includes(params.get('provider') || '')
       ? params.get('provider')
       : 'tiktok') as OverviewProvider,
@@ -646,6 +741,14 @@ function resolveGoogleAnalyticsLoadState(dashboard: GoogleAnalyticsDashboardData
   return dashboard.metrics.some((metric) => metric.available) ? 'ready' : 'empty';
 }
 
+function resolveCrossPlatformLoadState(dashboard: CrossPlatformDashboardData | null): LoadState {
+  if (!dashboard) return 'empty';
+  if (dashboard.state === 'reconnect') return 'reconnect';
+  if (dashboard.state === 'partial') return 'partial';
+  if (dashboard.state === 'empty') return 'empty';
+  return 'ready';
+}
+
 function roleCanManage(role?: Role) {
   return role === 'owner' || role === 'admin';
 }
@@ -684,6 +787,7 @@ function App() {
   const [compare, setCompare] = useState(initial.compare);
   const [trendMetric, setTrendMetric] = useState(initial.metric);
   const [overviewProvider, setOverviewProvider] = useState<OverviewProvider>(initial.provider);
+  const [sourceConnectionId, setSourceConnectionId] = useState(initial.resource);
   const [topSort, setTopSort] = useState<ContentSort>(initial.topSort);
   const [contentSort, setContentSort] = useState<ContentSort>(initial.contentSort);
   const [contentDir, setContentDir] = useState<SortDirection>(initial.contentDir);
@@ -696,6 +800,7 @@ function App() {
   const [facebookDashboard, setFacebookDashboard] = useState<MetaDashboardData | null>(null);
   const [instagramDashboard, setInstagramDashboard] = useState<MetaDashboardData | null>(null);
   const [googleAnalyticsDashboard, setGoogleAnalyticsDashboard] = useState<GoogleAnalyticsDashboardData | null>(null);
+  const [crossPlatformDashboard, setCrossPlatformDashboard] = useState<CrossPlatformDashboardData | null>(null);
   const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogItem[]>([]);
   const [accountData, setAccountData] = useState<AccountData | null>(null);
   const [invitationToken, setInvitationToken] = useState(initial.invitation);
@@ -716,6 +821,14 @@ function App() {
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) || workspaces[0],
     [activeWorkspaceId, workspaces]
   );
+
+  const activeSourceConnection = useMemo(() => {
+    if (overviewProvider === 'youtube') return youtubeDashboard?.connection || null;
+    if (overviewProvider === 'facebook_pages') return facebookDashboard?.connection || null;
+    if (overviewProvider === 'instagram') return instagramDashboard?.connection || null;
+    if (overviewProvider === 'google_analytics_4') return googleAnalyticsDashboard?.connection || null;
+    return dashboard?.connection || null;
+  }, [dashboard, facebookDashboard, googleAnalyticsDashboard, instagramDashboard, overviewProvider, youtubeDashboard]);
 
   const rangeQuery = useMemo(() => queryFromRange(range, customFrom, customTo), [range, customFrom, customTo]);
 
@@ -769,6 +882,7 @@ function App() {
       setCustomTo(next.to);
       setTrendMetric(next.metric);
       setOverviewProvider(next.provider);
+      setSourceConnectionId(next.resource);
       setCompare(next.compare);
       setTopSort(next.topSort);
       setContentSort(next.contentSort);
@@ -788,10 +902,15 @@ function App() {
     params.set('view', view);
     if (view === 'overview') {
       params.set('range', range);
+      params.set('compare', String(compare));
+    }
+    if (view === 'sources') {
+      params.set('range', range);
       params.set('metric', trendMetric);
       params.set('provider', overviewProvider);
       params.set('compare', String(compare));
       params.set('topSort', topSort);
+      if (sourceConnectionId) params.set('resource', sourceConnectionId);
     }
     if (view === 'content') {
       params.set('range', range);
@@ -802,7 +921,7 @@ function App() {
       if (contentSearch) params.set('search', contentSearch);
     }
     if (view === 'sync' && syncPage > 1) params.set('page', String(syncPage));
-    if ((view === 'overview' || view === 'content') && range === 'custom') {
+    if ((view === 'overview' || view === 'sources' || view === 'content') && range === 'custom') {
       params.set('from', customFrom);
       params.set('to', customTo);
     }
@@ -817,6 +936,7 @@ function App() {
     customTo,
     trendMetric,
     overviewProvider,
+    sourceConnectionId,
     compare,
     topSort,
     contentSort,
@@ -872,6 +992,16 @@ function App() {
       const syncParams = new URLSearchParams();
       syncParams.set('limit', '25');
       syncParams.set('offset', String((syncPage - 1) * 25));
+      const providerParams = (provider: OverviewProvider) => {
+        const params = new URLSearchParams(dashboardParams);
+        if (view === 'sources' && provider === overviewProvider && sourceConnectionId) {
+          params.set('connection_id', sourceConnectionId);
+        }
+        return params.toString();
+      };
+      const loadProviderDashboards = view === 'sources';
+      const loadTikTokDashboard = ['sources', 'content', 'connections'].includes(view);
+      const loadCatalog = ['sources', 'connections'].includes(view);
       try {
         const [
           dashboardResult,
@@ -879,53 +1009,107 @@ function App() {
           facebookDashboardResult,
           instagramDashboardResult,
           googleAnalyticsDashboardResult,
+          crossPlatformDashboardResult,
           contentResult,
           syncResult,
           catalogResult
         ] = await Promise.all([
-          api<DashboardData>(`/api/workspaces/${workspace.id}/dashboard?${dashboardParams.toString()}`),
-          api<YouTubeDashboardData>(
-            `/api/workspaces/${workspace.id}/providers/youtube/dashboard?${dashboardParams.toString()}`
-          ),
-          api<MetaDashboardData>(
-            `/api/workspaces/${workspace.id}/providers/facebook_pages/dashboard?${dashboardParams.toString()}`
-          ),
-          api<MetaDashboardData>(
-            `/api/workspaces/${workspace.id}/providers/instagram/dashboard?${dashboardParams.toString()}`
-          ),
-          api<GoogleAnalyticsDashboardData>(
-            `/api/workspaces/${workspace.id}/providers/google_analytics_4/dashboard?${dashboardParams.toString()}`
-          ),
-          api<ContentData>(`/api/workspaces/${workspace.id}/content?${contentParams.toString()}`),
-          api<SyncData>(`/api/workspaces/${workspace.id}/sync-runs?${syncParams.toString()}`),
-          api<{ providers: ProviderCatalogItem[] }>(`/api/workspaces/${workspace.id}/provider-catalog`)
+          loadTikTokDashboard
+            ? api<DashboardData>(`/api/workspaces/${workspace.id}/dashboard?${dashboardParams.toString()}`)
+            : Promise.resolve<DashboardData | null>(null),
+          loadProviderDashboards
+            ? api<YouTubeDashboardData>(
+                `/api/workspaces/${workspace.id}/providers/youtube/dashboard?${providerParams('youtube')}`
+              )
+            : Promise.resolve<YouTubeDashboardData | null>(null),
+          loadProviderDashboards
+            ? api<MetaDashboardData>(
+                `/api/workspaces/${workspace.id}/providers/facebook_pages/dashboard?${providerParams('facebook_pages')}`
+              )
+            : Promise.resolve<MetaDashboardData | null>(null),
+          loadProviderDashboards
+            ? api<MetaDashboardData>(
+                `/api/workspaces/${workspace.id}/providers/instagram/dashboard?${providerParams('instagram')}`
+              )
+            : Promise.resolve<MetaDashboardData | null>(null),
+          loadProviderDashboards
+            ? api<GoogleAnalyticsDashboardData>(
+                `/api/workspaces/${workspace.id}/providers/google_analytics_4/dashboard?${providerParams('google_analytics_4')}`
+              )
+            : Promise.resolve<GoogleAnalyticsDashboardData | null>(null),
+          view === 'overview'
+            ? api<CrossPlatformDashboardData>(
+                `/api/workspaces/${workspace.id}/cross-platform-overview?${dashboardParams.toString()}`
+              )
+            : Promise.resolve<CrossPlatformDashboardData | null>(null),
+          view === 'content'
+            ? api<ContentData>(`/api/workspaces/${workspace.id}/content?${contentParams.toString()}`)
+            : Promise.resolve<ContentData | null>(null),
+          view === 'sync'
+            ? api<SyncData>(`/api/workspaces/${workspace.id}/sync-runs?${syncParams.toString()}`)
+            : Promise.resolve<SyncData | null>(null),
+          loadCatalog
+            ? api<{ providers: ProviderCatalogItem[] }>(`/api/workspaces/${workspace.id}/provider-catalog`)
+            : Promise.resolve<{ providers: ProviderCatalogItem[] } | null>(null)
         ]);
-        setDashboard(dashboardResult);
-        setYouTubeDashboard(youtubeDashboardResult);
-        setFacebookDashboard(facebookDashboardResult);
-        setInstagramDashboard(instagramDashboardResult);
-        setGoogleAnalyticsDashboard(googleAnalyticsDashboardResult);
-        setContent(contentResult);
-        setSyncData(syncResult);
-        setProviderCatalog(catalogResult.providers);
-        if (roleCanManage(workspace.role)) {
+        if (dashboardResult) setDashboard(dashboardResult);
+        if (youtubeDashboardResult) setYouTubeDashboard(youtubeDashboardResult);
+        if (facebookDashboardResult) setFacebookDashboard(facebookDashboardResult);
+        if (instagramDashboardResult) setInstagramDashboard(instagramDashboardResult);
+        if (googleAnalyticsDashboardResult) setGoogleAnalyticsDashboard(googleAnalyticsDashboardResult);
+        if (crossPlatformDashboardResult) setCrossPlatformDashboard(crossPlatformDashboardResult);
+        if (contentResult) setContent(contentResult);
+        if (syncResult) setSyncData(syncResult);
+        if (catalogResult) setProviderCatalog(catalogResult.providers);
+        if (view === 'members' && roleCanManage(workspace.role)) {
           const memberResult = await api<{ members: Member[]; invitations: Invitation[] }>(
             `/api/workspaces/${workspace.id}/members`
           );
           setMembers(memberResult.members);
           setInvitations(memberResult.invitations || []);
-        } else {
+        } else if (view === 'members') {
           setMembers([]);
           setInvitations([]);
         }
-        setState(resolveLoadState(dashboardResult));
+        if (view === 'overview') {
+          setState(resolveCrossPlatformLoadState(crossPlatformDashboardResult));
+        } else if (view === 'sources') {
+          setState(
+            overviewProvider === 'youtube'
+              ? resolveYouTubeLoadState(youtubeDashboardResult)
+              : overviewProvider === 'facebook_pages'
+                ? resolveMetaLoadState(facebookDashboardResult)
+                : overviewProvider === 'instagram'
+                  ? resolveMetaLoadState(instagramDashboardResult)
+                  : overviewProvider === 'google_analytics_4'
+                    ? resolveGoogleAnalyticsLoadState(googleAnalyticsDashboardResult)
+                    : resolveLoadState(dashboardResult)
+          );
+        } else if (view === 'content') {
+          setState(resolveLoadState(dashboardResult));
+        } else {
+          setState('ready');
+        }
       } catch (error) {
         const text = error instanceof Error ? error.message : 'load_failed';
         setMessage(text);
         setState(text === 'permission_denied' ? 'permission' : 'error');
       }
     },
-    [contentDir, contentPage, contentPageSize, contentSearch, contentSort, rangeInvalid, rangeQuery, syncPage, topSort]
+    [
+      contentDir,
+      contentPage,
+      contentPageSize,
+      contentSearch,
+      contentSort,
+      overviewProvider,
+      rangeInvalid,
+      rangeQuery,
+      sourceConnectionId,
+      syncPage,
+      topSort,
+      view
+    ]
   );
 
   useEffect(() => {
@@ -1801,7 +1985,10 @@ function App() {
         <WorkspaceSelect
           workspaces={workspaces}
           activeWorkspaceId={activeWorkspace?.id || ''}
-          onChange={setActiveWorkspaceId}
+          onChange={(workspaceId) => {
+            setActiveWorkspaceId(workspaceId);
+            setSourceConnectionId('');
+          }}
         />
         <Nav
           view={view}
@@ -1815,13 +2002,7 @@ function App() {
       <section className="workspace">
         <WorkspaceHeader
           workspace={activeWorkspace}
-          connection={
-            view === 'overview' && overviewProvider === 'youtube'
-              ? youtubeDashboard?.connection || null
-              : view === 'overview' && overviewProvider === 'google_analytics_4'
-                ? googleAnalyticsDashboard?.connection || null
-                : dashboard?.connection || null
-          }
+          connection={view === 'sources' ? activeSourceConnection : null}
           busy={busy}
           accountOpen={accountOpen}
           onAccountToggle={() => setAccountOpen((open) => !open)}
@@ -1831,11 +2012,15 @@ function App() {
             setAccountOpen(false);
           }}
           onManualSync={
-            view === 'overview' && overviewProvider === 'youtube'
+            view === 'sources' && overviewProvider === 'youtube'
               ? () => manualYouTubeSync(youtubeDashboard?.connection.id)
-              : view === 'overview' && overviewProvider === 'google_analytics_4'
-                ? () => manualGoogleAnalyticsSync(googleAnalyticsDashboard?.connection.id)
-                : manualSync
+              : view === 'sources' && overviewProvider === 'facebook_pages'
+                ? () => manualMetaSync('facebook_pages', facebookDashboard?.connection.id)
+                : view === 'sources' && overviewProvider === 'instagram'
+                  ? () => manualMetaSync('instagram', instagramDashboard?.connection.id)
+                  : view === 'sources' && overviewProvider === 'google_analytics_4'
+                    ? () => manualGoogleAnalyticsSync(googleAnalyticsDashboard?.connection.id)
+                    : manualSync
           }
           onSignOut={signOut}
         />
@@ -1869,7 +2054,7 @@ function App() {
             </div>
           </section>
         )}
-        {dashboard?.demo_data && (
+        {(view === 'overview' ? crossPlatformDashboard?.demo_data : dashboard?.demo_data) && (
           <p className="notice">
             Sample data is shown for this local demonstration. It does not come from a connected provider account.
           </p>
@@ -1896,38 +2081,47 @@ function App() {
           </section>
         ) : activeWorkspace ? (
           <div className="content-flow">
-            {(view === 'overview' || view === 'content') && (
-              <StateBanner
-                state={
-                  view === 'overview' && overviewProvider === 'youtube' && state !== 'loading' && state !== 'error'
-                    ? resolveYouTubeLoadState(youtubeDashboard)
-                    : view === 'overview' &&
-                        overviewProvider === 'facebook_pages' &&
-                        state !== 'loading' &&
-                        state !== 'error'
-                      ? resolveMetaLoadState(facebookDashboard)
-                      : view === 'overview' &&
-                          overviewProvider === 'instagram' &&
-                          state !== 'loading' &&
-                          state !== 'error'
-                        ? resolveMetaLoadState(instagramDashboard)
-                        : view === 'overview' &&
-                            overviewProvider === 'google_analytics_4' &&
-                            state !== 'loading' &&
-                            state !== 'error'
-                          ? resolveGoogleAnalyticsLoadState(googleAnalyticsDashboard)
-                          : state
-                }
+            {(view === 'overview' || view === 'sources' || view === 'content') && <StateBanner state={state} />}
+            {view === 'overview' && (
+              <CrossPlatformOverview
+                dashboard={crossPlatformDashboard}
+                range={range}
+                customFrom={customFrom}
+                customTo={customTo}
+                compare={compare}
+                rangeInvalid={rangeInvalid}
+                busy={busy}
+                canSync={roleCanSync(activeWorkspace.role)}
+                onRangeChange={setRange}
+                onCustomFromChange={setCustomFrom}
+                onCustomToChange={setCustomTo}
+                onCompareChange={setCompare}
+                onOpenSource={(provider, connectionId) => {
+                  setOverviewProvider(provider);
+                  setSourceConnectionId(connectionId || '');
+                  setView('sources');
+                }}
+                onSyncSource={(source) => {
+                  const connectionId = source.resource?.connection_id || undefined;
+                  if (source.provider === 'youtube') return manualYouTubeSync(connectionId);
+                  if (source.provider === 'facebook_pages' || source.provider === 'instagram') {
+                    return manualMetaSync(source.provider, connectionId);
+                  }
+                  if (source.provider === 'google_analytics_4') return manualGoogleAnalyticsSync(connectionId);
+                  return manualSync();
+                }}
               />
             )}
-            {view === 'overview' && (
-              <Overview
+            {view === 'sources' && (
+              <ProviderOverview
                 dashboard={dashboard}
                 youtubeDashboard={youtubeDashboard}
                 facebookDashboard={facebookDashboard}
                 instagramDashboard={instagramDashboard}
                 googleAnalyticsDashboard={googleAnalyticsDashboard}
+                providers={providerCatalog}
                 provider={overviewProvider}
+                connectionId={sourceConnectionId}
                 range={range}
                 customFrom={customFrom}
                 customTo={customTo}
@@ -1937,7 +2131,11 @@ function App() {
                 rangeInvalid={rangeInvalid}
                 busy={busy}
                 canSync={roleCanSync(activeWorkspace.role)}
-                onProviderChange={setOverviewProvider}
+                onProviderChange={(provider) => {
+                  setOverviewProvider(provider);
+                  setSourceConnectionId('');
+                }}
+                onConnectionChange={setSourceConnectionId}
                 onRangeChange={(next) => setRange(next)}
                 onCustomFromChange={setCustomFrom}
                 onCustomToChange={setCustomTo}
@@ -2141,11 +2339,15 @@ function WorkspaceHeader({
         <p className="eyebrow">{workspace ? workspace.role : 'No workspace'}</p>
         <h1>{workspace ? workspace.name : 'Create your first workspace'}</h1>
       </div>
-      <div className="header-status" aria-label="Workspace status">
-        <StatusBadge status={connection?.status || 'disconnected'} />
-        <span>Last sync: {formatDate(connection?.last_successful_sync_at)}</span>
-        <span>Next: {formatDate(connection?.next_sync_at)}</span>
-      </div>
+      {connection ? (
+        <div className="header-status" aria-label="Selected source status">
+          <StatusBadge status={connection.status} />
+          <span>Last sync: {formatDate(connection.last_successful_sync_at)}</span>
+          <span>Next: {formatDate(connection.next_sync_at)}</span>
+        </div>
+      ) : (
+        <div />
+      )}
       <div className="top-actions">
         {canSync && (
           <button type="button" onClick={onManualSync} disabled={busy}>
@@ -2220,13 +2422,362 @@ function StateBanner({ state }: { state: LoadState }) {
   );
 }
 
-function Overview({
+function CrossProviderIcon({ provider }: { provider: OverviewProvider }) {
+  if (provider === 'youtube') return <Youtube size={20} aria-hidden />;
+  if (provider === 'facebook_pages') return <Facebook size={20} aria-hidden />;
+  if (provider === 'instagram') return <Instagram size={20} aria-hidden />;
+  if (provider === 'google_analytics_4') return <BarChart3 size={20} aria-hidden />;
+  return <Video size={20} aria-hidden />;
+}
+
+function formatCrossPlatformValue(metric: Pick<CrossPlatformMetric, 'unit' | 'value'>) {
+  if (metric.value === null) return 'N/A';
+  if (metric.unit === 'ratio') return `${(metric.value * 100).toFixed(1)}%`;
+  if (metric.unit === 'minutes') return formatMinutes(metric.value);
+  if (metric.unit === 'seconds') return formatSeconds(metric.value);
+  return formatNumber(metric.value);
+}
+
+function CrossPlatformMetricCard({ metric, compare }: { metric: CrossPlatformMetric; compare: boolean }) {
+  const direction = !metric.available
+    ? 'unavailable'
+    : metric.delta === null
+      ? 'neutral'
+      : metric.delta > 0
+        ? 'positive'
+        : metric.delta < 0
+          ? 'negative'
+          : 'neutral';
+  const comparison = !metric.available
+    ? (metric.availability_reason || 'Not reported by this provider').replaceAll('_', ' ')
+    : !compare
+      ? 'Comparison hidden'
+      : metric.delta === null
+        ? 'Previous period unavailable'
+        : metric.unit === 'ratio'
+          ? `${metric.delta >= 0 ? '+' : ''}${(metric.delta * 100).toFixed(1)} percentage points`
+          : metric.percent_change === null
+            ? `${metric.delta >= 0 ? '+' : ''}${formatNumber(metric.delta)}`
+            : `${metric.delta >= 0 ? '+' : ''}${metric.percent_change.toFixed(1)}%`;
+  return (
+    <article
+      className={`metric-card cross-metric ${direction}`}
+      title={metric.definition || metric.semantics || undefined}
+    >
+      <span>{metric.label}</span>
+      <strong>{formatCrossPlatformValue(metric)}</strong>
+      <small>{comparison}</small>
+    </article>
+  );
+}
+
+function CrossPlatformOverview({
+  dashboard,
+  range,
+  customFrom,
+  customTo,
+  compare,
+  rangeInvalid,
+  busy,
+  canSync,
+  onRangeChange,
+  onCustomFromChange,
+  onCustomToChange,
+  onCompareChange,
+  onOpenSource,
+  onSyncSource
+}: {
+  dashboard: CrossPlatformDashboardData | null;
+  range: RangeKey;
+  customFrom: string;
+  customTo: string;
+  compare: boolean;
+  rangeInvalid: string;
+  busy: boolean;
+  canSync: boolean;
+  onRangeChange: (range: RangeKey) => void;
+  onCustomFromChange: (value: string) => void;
+  onCustomToChange: (value: string) => void;
+  onCompareChange: (value: boolean) => void;
+  onOpenSource: (provider: OverviewProvider, connectionId: string | null) => void;
+  onSyncSource: (source: CrossPlatformSource) => void;
+}) {
+  const trendColors = ['var(--chart-a)', 'var(--chart-b)', 'var(--chart-c)'];
+  return (
+    <>
+      <section className="source-switcher" aria-labelledby="cross-platform-title">
+        <div>
+          <p className="eyebrow">Cross-platform overview</p>
+          <h2 id="cross-platform-title">Source health and performance</h2>
+        </div>
+        {dashboard && (
+          <p className="muted cross-range-summary">
+            {formatDate(dashboard.range.from, { dateStyle: 'medium' })} –{' '}
+            {formatDate(dashboard.range.to, { dateStyle: 'medium' })}
+          </p>
+        )}
+      </section>
+
+      <section className="control-bar" aria-labelledby="cross-date-controls-title">
+        <h2 id="cross-date-controls-title" className="sr-only">
+          Cross-platform date and comparison controls
+        </h2>
+        <div className="segmented" aria-label="Date range">
+          {(['7d', '30d', '90d'] as RangeKey[]).map((option) => (
+            <button
+              key={option}
+              type="button"
+              className={range === option ? 'active' : ''}
+              onClick={() => onRangeChange(option)}
+            >
+              {option.replace('d', ' days')}
+            </button>
+          ))}
+          <button type="button" className={range === 'custom' ? 'active' : ''} onClick={() => onRangeChange('custom')}>
+            Custom
+          </button>
+        </div>
+        {range === 'custom' && (
+          <div className="date-pair">
+            <label>
+              From
+              <input
+                type="date"
+                value={customFrom}
+                onChange={(event) => onCustomFromChange(event.target.value)}
+                aria-invalid={Boolean(rangeInvalid)}
+              />
+            </label>
+            <label>
+              To
+              <input
+                type="date"
+                value={customTo}
+                onChange={(event) => onCustomToChange(event.target.value)}
+                aria-invalid={Boolean(rangeInvalid)}
+              />
+            </label>
+          </div>
+        )}
+        <label className="toggle">
+          <input type="checkbox" checked={compare} onChange={(event) => onCompareChange(event.target.checked)} />
+          Previous-period comparison
+        </label>
+        {rangeInvalid && <p className="form-error">{rangeInvalid}</p>}
+      </section>
+
+      {dashboard ? (
+        <>
+          <section className="cross-health-grid" aria-label="Cross-platform source health summary">
+            <article className="panel health-summary-card">
+              <span>Active resources</span>
+              <strong>{formatNumber(dashboard.summary.connected_resources)}</strong>
+              <small>Connected resources, not an analytics total</small>
+            </article>
+            <article className="panel health-summary-card">
+              <span>Resources with data</span>
+              <strong>{formatNumber(dashboard.summary.resources_with_data)}</strong>
+              <small>Stored observations in this workspace</small>
+            </article>
+            <article className="panel health-summary-card">
+              <span>Needs attention</span>
+              <strong>{formatNumber(dashboard.summary.attention_count)}</strong>
+              <small>Freshness, setup, or availability notices</small>
+            </article>
+          </section>
+
+          {dashboard.alerts.length > 0 && (
+            <section className="panel cross-alerts" aria-labelledby="cross-alerts-title">
+              <div className="panel-title">
+                <ShieldAlert size={20} aria-hidden />
+                <div>
+                  <h2 id="cross-alerts-title">Source alerts</h2>
+                  <p>Actionable connection and data-quality states.</p>
+                </div>
+              </div>
+              <div className="cross-alert-list">
+                {dashboard.alerts.map((alert) => (
+                  <div key={`${alert.source_id}:${alert.code}`} className={`cross-alert ${alert.severity}`}>
+                    <StatusBadge status={alert.severity} />
+                    <span>{alert.message}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section className="cross-source-grid" aria-label="Provider summaries">
+            {dashboard.sources.map((source) => {
+              const trendPoints = source.trend.points.map((point) => ({
+                date: point.date,
+                label: formatDate(point.date, { month: 'short', day: 'numeric' }),
+                ...point.values
+              }));
+              return (
+                <article className="panel cross-source-card" key={source.id}>
+                  <div className="cross-source-heading">
+                    <div className="cross-source-identity">
+                      <span className="provider-mark">
+                        <CrossProviderIcon provider={source.provider} />
+                      </span>
+                      <div>
+                        <p className="eyebrow">{source.provider_name}</p>
+                        <h3>{source.resource?.display_name || 'Not connected'}</h3>
+                        {source.resource?.account_name && <small>{source.resource.account_name}</small>}
+                      </div>
+                    </div>
+                    <StatusBadge status={source.freshness.state} />
+                  </div>
+
+                  <div className="freshness-row">
+                    <span>Last sync {formatDate(source.freshness.last_successful_sync_at)}</span>
+                    <span>Data through {formatDate(source.freshness.data_through_date, { dateStyle: 'medium' })}</span>
+                    {source.resource?.timezone && <span>Timezone {source.resource.timezone}</span>}
+                  </div>
+
+                  {source.alert && <p className={`source-note ${source.alert.severity}`}>{source.alert.message}</p>}
+                  {source.availability.note && <p className="source-note">{source.availability.note}</p>}
+
+                  <div className="cross-metric-grid" aria-label={`${source.provider_name} metrics`}>
+                    {source.metrics.map((metric) => (
+                      <CrossPlatformMetricCard key={metric.key} metric={metric} compare={compare} />
+                    ))}
+                  </div>
+
+                  {(source.has_data || source.status === 'active') && (
+                    <>
+                      <div className="cross-section">
+                        <div>
+                          <h4>Provider trends</h4>
+                          <p>Each series uses its own scale and provider definition.</p>
+                        </div>
+                        {source.trend.series.length > 0 && trendPoints.length > 1 ? (
+                          <div className="cross-trend-grid">
+                            {source.trend.series.slice(0, 3).map((series, index) => (
+                              <div className="mini-trend" key={series.key}>
+                                <span>{series.label}</span>
+                                <div role="img" aria-label={`${source.provider_name} ${series.label} trend`}>
+                                  <ResponsiveContainer width="100%" height={110}>
+                                    <LineChart data={trendPoints} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                                      <XAxis dataKey="label" hide />
+                                      <YAxis domain={['auto', 'auto']} hide />
+                                      <Tooltip
+                                        formatter={series.unit === 'ratio' ? formatTooltipPercent : formatTooltipNumber}
+                                        labelFormatter={(label) => String(label)}
+                                      />
+                                      <Line
+                                        type="monotone"
+                                        dataKey={series.key}
+                                        name={series.label}
+                                        stroke={trendColors[index]}
+                                        strokeWidth={2.25}
+                                        dot={false}
+                                        connectNulls
+                                        isAnimationActive={false}
+                                      />
+                                    </LineChart>
+                                  </ResponsiveContainer>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="compact-chart-empty">
+                            {trendPoints.length === 1
+                              ? 'One stored point is available; a trend needs at least two.'
+                              : source.provider === 'instagram'
+                                ? 'Instagram account insights are stored as provider-reported period totals.'
+                                : 'No trend points are stored for this range.'}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="cross-section">
+                        <div>
+                          <h4>{source.provider === 'google_analytics_4' ? 'Top landing pages' : 'Top content'}</h4>
+                          <p>
+                            {source.provider === 'google_analytics_4'
+                              ? 'Website paths remain distinct from social posts.'
+                              : 'Provider-reported views.'}
+                          </p>
+                        </div>
+                        {source.top_content.length > 0 ? (
+                          <ol className="cross-content-list">
+                            {source.top_content.map((item) => (
+                              <li key={item.id}>
+                                <div>
+                                  {item.share_url ? (
+                                    <a href={item.share_url} target="_blank" rel="noreferrer">
+                                      {item.title} <ExternalLink size={13} aria-hidden />
+                                    </a>
+                                  ) : (
+                                    <span>{item.title}</span>
+                                  )}
+                                  {item.published_at && (
+                                    <small>{formatDate(item.published_at, { dateStyle: 'medium' })}</small>
+                                  )}
+                                </div>
+                                <strong>{formatNumber(item.primary_metric.value)}</strong>
+                                <small>{item.primary_metric.label}</small>
+                              </li>
+                            ))}
+                          </ol>
+                        ) : (
+                          <p className="compact-chart-empty">No ranked items are stored for this range.</p>
+                        )}
+                      </div>
+                    </>
+                  )}
+
+                  <div className="button-row start cross-source-actions">
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => onOpenSource(source.provider, source.resource?.connection_id || null)}
+                    >
+                      Open source
+                    </button>
+                    {canSync && source.status === 'active' && (
+                      <button type="button" disabled={busy} onClick={() => onSyncSource(source)}>
+                        {busy ? (
+                          <Loader2 className="spin" size={17} aria-hidden />
+                        ) : (
+                          <RefreshCw size={17} aria-hidden />
+                        )}
+                        Sync
+                      </button>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+
+          <details className="panel methodology-panel">
+            <summary>Metric comparison methodology</summary>
+            <ul>
+              {dashboard.methodology.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </details>
+        </>
+      ) : (
+        <section className="panel chart-empty">Source summaries will appear after workspace data loads.</section>
+      )}
+    </>
+  );
+}
+
+function ProviderOverview({
   dashboard,
   youtubeDashboard,
   facebookDashboard,
   instagramDashboard,
   googleAnalyticsDashboard,
+  providers,
   provider,
+  connectionId,
   range,
   customFrom,
   customTo,
@@ -2237,6 +2788,7 @@ function Overview({
   busy,
   canSync,
   onProviderChange,
+  onConnectionChange,
   onRangeChange,
   onCustomFromChange,
   onCustomToChange,
@@ -2252,7 +2804,9 @@ function Overview({
   facebookDashboard: MetaDashboardData | null;
   instagramDashboard: MetaDashboardData | null;
   googleAnalyticsDashboard: GoogleAnalyticsDashboardData | null;
+  providers: ProviderCatalogItem[];
   provider: OverviewProvider;
+  connectionId: string;
   range: RangeKey;
   customFrom: string;
   customTo: string;
@@ -2263,6 +2817,7 @@ function Overview({
   busy: boolean;
   canSync: boolean;
   onProviderChange: (provider: OverviewProvider) => void;
+  onConnectionChange: (connectionId: string) => void;
   onRangeChange: (range: RangeKey) => void;
   onCustomFromChange: (value: string) => void;
   onCustomToChange: (value: string) => void;
@@ -2273,6 +2828,19 @@ function Overview({
   onMetaSync: (provider: 'facebook_pages' | 'instagram') => void;
   onGoogleAnalyticsSync: () => void;
 }) {
+  const providerCatalog = providers.find((item) => item.id === provider);
+  const resourceConnections = (providerCatalog?.connections || []).filter((connection) => Boolean(connection.id));
+  const loadedConnectionId =
+    provider === 'youtube'
+      ? youtubeDashboard?.connection.id
+      : provider === 'facebook_pages'
+        ? facebookDashboard?.connection.id
+        : provider === 'instagram'
+          ? instagramDashboard?.connection.id
+          : provider === 'google_analytics_4'
+            ? googleAnalyticsDashboard?.connection.id
+            : undefined;
+  const selectedConnectionId = connectionId || loadedConnectionId || resourceConnections[0]?.id || '';
   const metrics =
     dashboard?.metrics ||
     Object.entries(metricLabels).map(([key, label]) => ({
@@ -2294,7 +2862,7 @@ function Overview({
           <p className="eyebrow">Data source</p>
           <h2 id="source-title">Channel performance</h2>
         </div>
-        <div className="segmented" aria-label="Overview provider">
+        <div className="segmented" aria-label="Source provider">
           <button
             type="button"
             className={provider === 'tiktok' ? 'active' : ''}
@@ -2337,6 +2905,26 @@ function Overview({
           </button>
         </div>
       </section>
+      {provider !== 'tiktok' && resourceConnections.length > 0 && (
+        <section className="source-resource-filter" aria-label="Connected resource filter">
+          <label>
+            Resource
+            <select value={selectedConnectionId} onChange={(event) => onConnectionChange(event.target.value)}>
+              {resourceConnections.map((connection) => (
+                <option key={connection.id} value={connection.id}>
+                  {connection.account?.display_name ||
+                    connection.account?.account_name ||
+                    connection.account?.id ||
+                    connection.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="muted">
+            {resourceConnections.length} connected {resourceConnections.length === 1 ? 'resource' : 'resources'}
+          </span>
+        </section>
+      )}
       <section className="control-bar" aria-labelledby="date-controls-title">
         <h2 id="date-controls-title" className="sr-only">
           Date and comparison controls

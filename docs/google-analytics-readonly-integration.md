@@ -118,7 +118,7 @@ Required Google Cloud APIs:
 3. Show that the Google consent screen requests only read-only Analytics access.
 4. Return through the exact callback and show that no property was selected automatically.
 5. Select one eligible non-production GA4 property explicitly and show its timezone/currency.
-6. Run the bounded worker, then open Overview > Website.
+6. Run the bounded worker, then open Sources > Website.
 7. Show 7/30/90-day metrics, exact previous-period comparisons, daily traffic, all compatible breakdowns, and a threshold/delay or `N/A` state without fabricated zeros.
 8. Reauthorize the selected property and demonstrate that a missing property is not silently replaced.
 9. Disconnect one sibling property while preserving the grant, then disconnect the final property and show local purge after the Google revocation attempt.

@@ -4275,6 +4275,41 @@ test('Facebook Pages uses explicit selection, encrypted Page tokens, worker-only
   assert.equal(dashboardBody.content[0].like_count, 9);
   assert.equal(calls.length, 15, 'dashboard API must read stored snapshots only');
 
+  const siblingSourceId = crypto.randomUUID();
+  const siblingRunId = crypto.randomUUID();
+  const siblingContentId = crypto.randomUUID();
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status)
+     VALUES (?, ?, 'facebook_pages', 'active')`,
+    [siblingSourceId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO sync_runs (id, workspace_id, data_source_id, trigger_type, status, finished_at)
+     VALUES (?, ?, ?, 'scheduled', 'success', UTC_TIMESTAMP(3))`,
+    [siblingRunId, workspace.id, siblingSourceId]
+  );
+  await db.query(
+    `INSERT INTO content_items
+      (id, workspace_id, data_source_id, provider_content_id, published_at, title)
+     VALUES (?, ?, ?, 'sibling-page-post', UTC_TIMESTAMP(3), 'Sibling Page post')`,
+    [siblingContentId, workspace.id, siblingSourceId]
+  );
+  await db.query(
+    `INSERT INTO content_metric_snapshots
+      (id, workspace_id, content_item_id, sync_run_id, observed_at, view_count)
+     VALUES (?, ?, ?, ?, UTC_TIMESTAMP(3), 999999)`,
+    [crypto.randomUUID(), workspace.id, siblingContentId, siblingRunId]
+  );
+  const resourceIsolatedDashboard = await requestApp(
+    `/api/workspaces/${workspace.id}/providers/facebook_pages/dashboard?range=7d&connection_id=${selectedConnection.id}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(resourceIsolatedDashboard.statusCode, 200);
+  assert.equal(resourceIsolatedDashboard.json().content.length, 1);
+  assert.equal(resourceIsolatedDashboard.json().content[0].title, 'A read-only Page post');
+  assert.equal(calls.length, 15, 'resource-isolated dashboard reads must remain stored-only');
+  await db.query('DELETE FROM data_sources WHERE id = ?', [siblingSourceId]);
+
   const snapshotRows = await db.query(
     `SELECT
        (SELECT COUNT(*) FROM meta_account_insight_snapshots WHERE workspace_id = ?) AS account_snapshots,
@@ -4904,7 +4939,7 @@ test('seeded fixture snapshots are exposed as clearly labeled demo data', async 
     `INSERT INTO profile_snapshots
       (id, workspace_id, data_source_id, sync_run_id, observed_at, follower_count, provider_metrics)
      VALUES
-      ('40000000-0000-4000-8000-000000000501', ?, ?, ?, UTC_TIMESTAMP(3), 1200, JSON_OBJECT('fixture', TRUE))`,
+      ('40000000-0000-4000-8000-000000000501', ?, ?, ?, DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 DAY), 1200, JSON_OBJECT('fixture', TRUE))`,
     [workspace.id, sourceId, runId]
   );
 
@@ -4913,6 +4948,23 @@ test('seeded fixture snapshots are exposed as clearly labeled demo data', async 
   });
   assert.equal(dashboard.statusCode, 200);
   assert.equal(dashboard.json().demo_data, true);
+
+  const crossPlatform = await requestApp(
+    `/api/workspaces/${workspace.id}/cross-platform-overview?range=7d`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(crossPlatform.statusCode, 200);
+  const crossPlatformBody = crossPlatform.json();
+  assert.equal(crossPlatformBody.demo_data, true);
+  assert.equal(crossPlatformBody.sources.length, 5);
+  assert.equal(crossPlatformBody.sources.find(source => source.provider === 'tiktok').freshness.state, 'sample');
+  assert.equal(
+    crossPlatformBody.sources
+      .find(source => source.provider === 'tiktok')
+      .metrics.find(metric => metric.key === 'follower_count').value,
+    1200
+  );
+  assert.ok(!Object.hasOwn(crossPlatformBody, 'total'));
 });
 
 test('analytics and CSV safety helpers preserve nulls and avoid fabricated baselines', () => {

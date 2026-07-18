@@ -171,6 +171,10 @@ async function queryContentRows(connection, workspaceId, options = {}) {
   const provider = allowedProviders.has(options.provider) ? options.provider : 'tiktok';
   const where = ['ci.workspace_id = ?', 'ds.provider = ?', 'ci.deleted_at IS NULL'];
   const params = [workspaceId, provider];
+  if (options.dataSourceId) {
+    where.push('ds.id = ?');
+    params.push(options.dataSourceId);
+  }
   if (options.from) {
     where.push('(ci.published_at IS NULL OR ci.published_at >= ?)');
     params.push(options.from);

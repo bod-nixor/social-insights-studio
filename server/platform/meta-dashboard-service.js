@@ -223,6 +223,7 @@ async function getMetaDashboard(userId, workspaceId, provider, query = {}) {
     });
     const content = await queryContentRows(connection, workspaceId, {
       provider,
+      dataSourceId: selected.data_source_id,
       from: range.from,
       to: range.to,
       sort: query.top_sort || 'views',
@@ -288,6 +289,11 @@ async function getMetaDashboard(userId, workspaceId, provider, query = {}) {
       } : null,
       availability: {
         state: currentRows.length > 0 || currentPeriod || profile ? 'available' : 'empty',
+        data_through_date: dateOnly(
+          provider === 'instagram'
+            ? currentPeriod && currentPeriod.range_end_date || profile && profile.report_date
+            : currentRows.length > 0 && currentRows[currentRows.length - 1].report_date
+        ),
         note: provider === 'instagram'
           ? rangeDays
             ? 'Instagram account metrics are provider-reported totals for the selected 7, 30, or 90-day window. Stories are excluded because this slice does not request webhooks.'

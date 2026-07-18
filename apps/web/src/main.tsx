@@ -10,11 +10,12 @@ import {
   ChevronDown,
   Download,
   ExternalLink,
-  FileText,
   Link2,
   Loader2,
   Lock,
   LogOut,
+  Mail,
+  KeyRound,
   RefreshCw,
   Search,
   Settings,
@@ -37,6 +38,10 @@ import {
   YAxis
 } from 'recharts';
 import './styles.css';
+
+declare const __APP_COMMIT_SHA__: string;
+declare const __APP_BUILD_TIME__: string;
+declare const __APP_RELEASE__: string;
 
 type View = 'overview' | 'content' | 'connections' | 'members' | 'sync' | 'account';
 type LoadState = 'ready' | 'loading' | 'empty' | 'stale' | 'partial' | 'permission' | 'error' | 'reconnect';
@@ -154,6 +159,34 @@ type SyncData = {
   offset: number;
 };
 
+type ProviderCatalogItem = {
+  id: string;
+  name: string;
+  resourceName: string;
+  enabled: boolean;
+  implemented: boolean;
+  connectable: boolean;
+  status: string;
+  capabilities: string[];
+  requestedScopes: Array<{ name: string; access: string; purpose: string }>;
+  connection?: {
+    status: string;
+    reconnect_reason?: string | null;
+    last_sync_at?: string | null;
+    last_successful_sync_at?: string | null;
+    next_sync_at?: string | null;
+    account?: { id: string; username?: string | null; display_name?: string | null } | null;
+  } | null;
+};
+
+type DeploymentVersion = {
+  commit_sha: string | null;
+  build_time: string | null;
+  release: string | null;
+  metadata_present: boolean;
+  warnings: string[];
+};
+
 type Member = {
   user_id: string;
   email: string;
@@ -198,6 +231,12 @@ const contentSortLabels: Record<ContentSort, string> = {
   comments: 'Comments',
   shares: 'Shares',
   engagement: 'Engagement'
+};
+
+const clientBuild = {
+  commitSha: __APP_COMMIT_SHA__ || null,
+  buildTime: __APP_BUILD_TIME__ || null,
+  release: __APP_RELEASE__ || null
 };
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -271,7 +310,7 @@ function todayInputValue(offsetDays = 0) {
 }
 
 function pathDetailState() {
-  const match = window.location.pathname.match(/^\/app\/workspaces\/([^/]+)\/content\/([^/]+)/);
+  const match = window.location.pathname.match(/^\/workspaces\/([^/]+)\/content\/([^/]+)/);
   return match ? { workspaceId: match[1], contentId: match[2] } : null;
 }
 
@@ -358,6 +397,8 @@ function App() {
   const [contentPageSize, setContentPageSize] = useState(initial.pageSize);
   const [syncPage, setSyncPage] = useState(1);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogItem[]>([]);
+  const [deploymentVersion, setDeploymentVersion] = useState<DeploymentVersion | null>(null);
   const [content, setContent] = useState<ContentData | null>(null);
   const [contentDetail, setContentDetail] = useState<ContentDetail | null>(null);
   const [syncData, setSyncData] = useState<SyncData>({ sync_runs: [], total: 0, limit: 25, offset: 0 });
@@ -390,6 +431,22 @@ function App() {
     }
     return '';
   }, [range, customFrom, customTo]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadVersion() {
+      try {
+        const version = await api<DeploymentVersion>('/health/version');
+        if (!cancelled) setDeploymentVersion(version);
+      } catch {
+        if (!cancelled) setDeploymentVersion(null);
+      }
+    }
+    void loadVersion();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -457,7 +514,7 @@ function App() {
       params.set('to', customTo);
     }
     if (contentSearch) params.set('search', contentSearch);
-    const path = contentDetailId ? `/app/workspaces/${activeWorkspace.id}/content/${contentDetailId}` : '/app/';
+    const path = contentDetailId ? `/workspaces/${activeWorkspace.id}/content/${contentDetailId}` : '/';
     window.history.replaceState({}, '', `${path}?${params.toString()}`);
   }, [
     user,
@@ -504,14 +561,16 @@ function App() {
       syncParams.set('limit', '25');
       syncParams.set('offset', String((syncPage - 1) * 25));
       try {
-        const [dashboardResult, contentResult, syncResult] = await Promise.all([
+        const [dashboardResult, contentResult, syncResult, catalogResult] = await Promise.all([
           api<DashboardData>(`/api/workspaces/${workspace.id}/dashboard?${dashboardParams.toString()}`),
           api<ContentData>(`/api/workspaces/${workspace.id}/content?${contentParams.toString()}`),
-          api<SyncData>(`/api/workspaces/${workspace.id}/sync-runs?${syncParams.toString()}`)
+          api<SyncData>(`/api/workspaces/${workspace.id}/sync-runs?${syncParams.toString()}`),
+          api<{ providers: ProviderCatalogItem[] }>(`/api/workspaces/${workspace.id}/provider-catalog`)
         ]);
         setDashboard(dashboardResult);
         setContent(contentResult);
         setSyncData(syncResult);
+        setProviderCatalog(catalogResult.providers);
         if (roleCanManage(workspace.role)) {
           const memberResult = await api<{ members: Member[]; invitations: Invitation[] }>(
             `/api/workspaces/${workspace.id}/members`
@@ -575,10 +634,10 @@ function App() {
         await verifyToken(result.dev_token);
         setToast('Signed in with local development authentication.');
       } else {
-        setMessage('Magic link requested. Paste the token from your email to continue.');
+        setMessage('Check your email and enter the verification code to continue.');
       }
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'request_failed');
+    } catch {
+      setMessage('We could not send a sign-in code. Try again or contact support.');
     } finally {
       setBusy(false);
     }
@@ -602,8 +661,8 @@ function App() {
     setMessage('');
     try {
       await verifyToken(token);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'verify_failed');
+    } catch {
+      setMessage('That sign-in code is invalid or expired. Request a new code and try again.');
     } finally {
       setBusy(false);
     }
@@ -699,7 +758,7 @@ function App() {
         {
           method: 'POST',
           headers: { 'x-csrf-token': csrf },
-          body: JSON.stringify({ return_path: `/app/?workspace=${activeWorkspace.id}&view=connections` })
+          body: JSON.stringify({ return_path: `/?workspace=${activeWorkspace.id}&view=connections` })
         }
       );
       window.location.href = result.authorization_url;
@@ -799,64 +858,111 @@ function App() {
 
   if (!user) {
     return (
-      <main className="public-shell">
-        <section className="product-panel" aria-labelledby="product-title">
-          <img src="/logo.png" alt="" className="brand-mark" />
-          <div>
-            <p className="eyebrow">Social Insights Studio</p>
-            <h1 id="product-title">TikTok analytics workspace</h1>
-            <p className="lede">
-              Connect accounts, sync performance history, and review content health from one secure dashboard.
-            </p>
-          </div>
-          <div className="status-row" aria-label="Platform status">
-            <span>
-              <CheckCircle2 size={16} aria-hidden /> Secure sessions
-            </span>
-            <span>
-              <Lock size={16} aria-hidden /> Server-side tokens
-            </span>
-            <span>
-              <Activity size={16} aria-hidden /> Background sync
-            </span>
-          </div>
-        </section>
+      <div className="public-page">
+        <header className="public-header">
+          <a className="public-brand" href="/" aria-label="Social Insights Studio home">
+            <img src="/logo.png" alt="Social Insights Studio logo" />
+            <strong>Social Insights Studio</strong>
+          </a>
+          <nav className="public-nav" aria-label="Public information">
+            <a href="/privacy">Privacy</a>
+            <a href="/terms">Terms</a>
+            <a href="/support">Support</a>
+          </nav>
+        </header>
 
-        <section className="auth-panel" aria-labelledby="signin-title">
-          <h2 id="signin-title">Sign in</h2>
-          <form onSubmit={requestLink} className="stack">
-            <label>
-              Email
-              <input
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                type="email"
-                autoComplete="email"
-                required
-              />
-            </label>
-            <button type="submit" disabled={busy}>
-              {busy ? <Loader2 className="spin" size={18} aria-hidden /> : <FileText size={18} aria-hidden />}
-              Request link
-            </button>
-          </form>
-          <form onSubmit={verifyLink} className="stack">
-            <label>
-              Magic link token
-              <input value={token} onChange={(event) => setToken(event.target.value)} autoComplete="one-time-code" />
-            </label>
-            <button type="submit" disabled={busy || !token}>
-              <CheckCircle2 size={18} aria-hidden />
-              Verify token
-            </button>
-          </form>
-          {message && (
-            <p className="notice" role="status">
-              {message}
+        <main className="public-shell">
+          <section className="product-panel" aria-labelledby="product-title">
+            <div>
+              <p className="eyebrow">Multiplatform analytics workspace</p>
+              <h1 id="product-title">Social Insights Studio</h1>
+              <p className="lede">
+                Connect authorized social and website analytics sources, synchronize performance data, and review
+                dashboards and exports in one workspace.
+              </p>
+            </div>
+
+            <section className="public-section" aria-labelledby="platforms-title">
+              <h2 id="platforms-title">Supported analytics sources</h2>
+              <p>
+                TikTok workspace analytics and the TikTok Looker Studio connector are implemented today. Instagram
+                professional accounts, Facebook Pages, YouTube channels, and Google Analytics 4 properties remain
+                unavailable until their integrations and provider reviews are complete.
+              </p>
+              <div className="platform-status" aria-label="Provider availability">
+                <span>
+                  <CheckCircle2 size={16} aria-hidden /> TikTok available
+                </span>
+                <span>
+                  <Activity size={16} aria-hidden /> Additional sources planned
+                </span>
+              </div>
+            </section>
+
+            <section className="public-disclosure" aria-labelledby="data-use-title">
+              <h2 id="data-use-title">How provider data is used</h2>
+              <p>
+                Authorized account, content, and analytics data is used only to operate requested connections, workspace
+                dashboards, synchronization, and exports. Social Insights Studio does not sell provider data. You can
+                disconnect a provider and request deletion of stored data.
+              </p>
+            </section>
+          </section>
+
+          <section className="auth-panel" aria-labelledby="signin-title">
+            <div className="auth-heading">
+              <p className="eyebrow">Workspace access</p>
+              <h2 id="signin-title">Sign in</h2>
+              <p>Use the email address associated with your Social Insights Studio workspace.</p>
+            </div>
+            <form onSubmit={requestLink} className="stack">
+              <label>
+                Email address
+                <input
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  type="email"
+                  autoComplete="email"
+                  required
+                />
+              </label>
+              <button type="submit" disabled={busy}>
+                {busy ? <Loader2 className="spin" size={18} aria-hidden /> : <Mail size={18} aria-hidden />}
+                Send sign-in code
+              </button>
+            </form>
+            <form onSubmit={verifyLink} className="stack">
+              <label>
+                Verification code
+                <input value={token} onChange={(event) => setToken(event.target.value)} autoComplete="one-time-code" />
+              </label>
+              <button type="submit" disabled={busy || !token}>
+                <KeyRound size={18} aria-hidden />
+                Sign in
+              </button>
+            </form>
+            {message && (
+              <p className="notice" role="status">
+                {message}
+              </p>
+            )}
+            <p className="auth-help">
+              Need help? <a href="/support">Contact support</a>.
             </p>
-          )}
-        </section>
-      </main>
+          </section>
+        </main>
+
+        <footer className="public-footer">
+          <span>&copy; 2026 Social Insights Studio</span>
+          <nav aria-label="Legal and support">
+            <a href="/privacy">Privacy Policy</a>
+            <a href="/terms">Terms of Service</a>
+            <a href="/support">Support</a>
+            <a href="/data-deletion">Data Deletion</a>
+            <a href="/status">Status</a>
+          </nav>
+        </footer>
+      </div>
     );
   }
 
@@ -977,6 +1083,7 @@ function App() {
               <Connections
                 role={activeWorkspace.role}
                 dashboard={dashboard}
+                providers={providerCatalog}
                 busy={busy}
                 disconnectOpen={disconnectOpen}
                 onConnect={startConnection}
@@ -1006,6 +1113,7 @@ function App() {
               />
             )}
             {view === 'account' && <Account user={user} onSignOut={signOut} />}
+            {view === 'account' && <DeploymentMetadata server={deploymentVersion} client={clientBuild} />}
           </div>
         ) : null}
       </section>
@@ -1725,6 +1833,7 @@ function ContentDetailView({ detail, onBack }: { detail: ContentDetail | null; o
 function Connections({
   role,
   dashboard,
+  providers,
   busy,
   disconnectOpen,
   onConnect,
@@ -1734,6 +1843,7 @@ function Connections({
 }: {
   role: Role;
   dashboard: DashboardData | null;
+  providers: ProviderCatalogItem[];
   busy: boolean;
   disconnectOpen: boolean;
   onConnect: () => void;
@@ -1744,41 +1854,74 @@ function Connections({
   const allowed = roleCanManage(role);
   const status = dashboard?.connection.status || 'disconnected';
   const latestError = dashboard?.latest_sync?.error_category;
+  const catalog = providers.length > 0 ? providers : [];
   return (
     <section className="panel" aria-labelledby="connection-title">
       <div className="panel-title between">
         <div>
-          <h2 id="connection-title">TikTok connection</h2>
+          <h2 id="connection-title">Provider connections</h2>
           <p>Provider credentials are stored only on the server and are never shown here.</p>
         </div>
         <StatusBadge status={status} />
       </div>
-      <div className="connection-states">
-        {['disconnected', 'connecting', 'active', 'missing scopes', 'reconnect_required', 'revoking', 'revoked'].map(
-          (item) => (
-            <span
-              key={item}
-              className={
-                status === item || (item === 'missing scopes' && latestError === 'scope')
-                  ? 'state-chip active'
-                  : 'state-chip'
-              }
-            >
-              {item.replace(/_/g, ' ')}
-            </span>
-          )
-        )}
-      </div>
-      {dashboard?.connection.reconnect_reason && (
-        <p className="notice error">{dashboard.connection.reconnect_reason}</p>
-      )}
-      <div className="toolbar">
-        <button type="button" disabled={!allowed || busy} onClick={onConnect}>
-          <ExternalLink size={18} aria-hidden /> Connect or reconnect
-        </button>
-        <button type="button" disabled={!allowed || busy || status === 'disconnected'} onClick={onDisconnectRequest}>
-          <Lock size={18} aria-hidden /> Disconnect
-        </button>
+      <div className="provider-list">
+        {catalog.map((provider) => {
+          const providerStatus = provider.connection?.status || provider.status;
+          const isTikTok = provider.id === 'tiktok';
+          const canConnect = allowed && provider.connectable && isTikTok;
+          const canDisconnect = allowed && isTikTok && provider.connection?.status !== 'disconnected';
+          return (
+            <article key={provider.id} className="provider-row">
+              <div>
+                <div className="provider-heading">
+                  <strong>{provider.name}</strong>
+                  <StatusBadge status={providerStatus} />
+                </div>
+                <p className="muted">{provider.resourceName}</p>
+                {provider.connection?.account && (
+                  <p className="muted">
+                    Connected resource:{' '}
+                    {provider.connection.account.display_name ||
+                      provider.connection.account.username ||
+                      provider.connection.account.id}
+                  </p>
+                )}
+                {provider.connection?.reconnect_reason && (
+                  <p className="notice error">{provider.connection.reconnect_reason}</p>
+                )}
+                {!provider.implemented && (
+                  <p className="muted">Feature-flagged until the complete provider slice and review evidence exist.</p>
+                )}
+                {isTikTok && latestError === 'scope' && (
+                  <p className="notice error">The latest sync reported a missing provider scope.</p>
+                )}
+                <div className="scope-list" aria-label={`${provider.name} requested scopes`}>
+                  {provider.requestedScopes.map((scope) => (
+                    <span key={scope.name}>{scope.name}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="button-row">
+                {isTikTok ? (
+                  <>
+                    <button type="button" disabled={!canConnect || busy} onClick={onConnect}>
+                      <ExternalLink size={18} aria-hidden />{' '}
+                      {provider.connection?.status === 'disconnected' ? 'Connect' : 'Reconnect'}
+                    </button>
+                    <button type="button" disabled={!canDisconnect || busy} onClick={onDisconnectRequest}>
+                      <Lock size={18} aria-hidden /> Disconnect
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" disabled>
+                    <Lock size={18} aria-hidden /> Not enabled
+                  </button>
+                )}
+              </div>
+            </article>
+          );
+        })}
+        {catalog.length === 0 && <div className="table-empty">Provider catalog unavailable.</div>}
       </div>
       {!allowed && <p className="muted">Connection management requires owner or admin access.</p>}
       {disconnectOpen && (
@@ -2040,6 +2183,30 @@ function Account({ user, onSignOut }: { user: User; onSignOut: () => void }) {
       <button type="button" onClick={onSignOut}>
         <LogOut size={18} aria-hidden /> Sign out
       </button>
+    </section>
+  );
+}
+
+function DeploymentMetadata({
+  server,
+  client
+}: {
+  server: DeploymentVersion | null;
+  client: { commitSha: string | null; buildTime: string | null; release: string | null };
+}) {
+  return (
+    <section className="panel" aria-labelledby="deployment-title">
+      <div className="panel-title">
+        <Activity size={18} aria-hidden />
+        <h2 id="deployment-title">Deployment</h2>
+      </div>
+      <div className="settings-list">
+        <span>Server commit: {server?.commit_sha || 'not provided'}</span>
+        <span>Server release: {server?.release || 'not provided'}</span>
+        <span>Server build: {server?.build_time || 'not provided'}</span>
+        <span>Client commit: {client.commitSha || 'not provided'}</span>
+        <span>Client release: {client.release || 'not provided'}</span>
+      </div>
     </section>
   );
 }

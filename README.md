@@ -4,14 +4,20 @@ Social Insights Studio is now a workspace-based TikTok analytics application wit
 
 The production domain assumption remains `https://lstc.nixorcorporate.com`. Production deployment is cPanel/Passenger-compatible: the web process serves the API and compiled Vite app, migrations run as an explicit release command, and cron runs the bounded worker.
 
+Production alignment is currently an evidence-backed assumption: local `phase-3-dashboard` commit `cc8a30818a96f2fbf11018580033942c31f0e622` matched the deployed frontend asset hashes and runtime health endpoints during read-only checks, but that does not prove deployed commit identity. Future releases should inject `APP_COMMIT_SHA` so `/health/version` can report the exact source revision.
+
 ## Current Architecture
 
 - `server/index.js` keeps the legacy connector routes and mounts the new application API under `/api`.
 - `server/platform/` contains auth, sessions, RBAC, TikTok connection lifecycle, sync, dashboard, and export services.
 - `server/migrations/` contains explicit MariaDB migrations. Migrations never run from normal web requests.
 - `server/worker.js` runs bounded cron-safe jobs such as due TikTok syncs.
-- `apps/web/` contains the React/Vite dashboard shell served by Express under `/app` after `npm run web:build`.
+- `apps/web/` contains the React/Vite application shell served by Express at `/` after `npm run web:build`.
 - `Code.gs` remains the legacy Apps Script connector. Do not delete the encrypted file store until a production migration/retirement plan is approved.
+- `server/platform/provider-registry.js` records the current provider catalog. TikTok is implemented; Instagram, Facebook Pages, YouTube, and Website Analytics remain feature-flagged and non-connectable until their complete vertical slices are implemented and reviewed.
+- Express serves hashed frontend files only from `/assets/`, serves the logo and standalone compliance pages from an explicit allowlist, and returns JSON for unknown `/api/*` routes.
+- `/privacy`, `/terms`, `/support`, `/data-deletion`, and `/status` remain public without a session. Their `.html` aliases remain available for provider-console compatibility.
+- Legacy `/app`, `/app/`, and `/app/*` URLs redirect permanently to the equivalent canonical-root path while preserving query parameters. `BASE_URL` remains the site origin with no path suffix.
 
 ## Local MariaDB
 
@@ -74,8 +80,21 @@ Important variables:
 - `MANUAL_SYNC_COOLDOWN_SECONDS`
 - `WORKER_TIME_BUDGET_SECONDS`
 - `TRUST_PROXY`
+- `APP_COMMIT_SHA`
+- `APP_BUILD_TIME` or `APP_RELEASE`
+- provider feature gates such as `FEATURE_TIKTOK_CONNECTOR`, `FEATURE_YOUTUBE_CONNECTOR`, and `FEATURE_GA4_CONNECTOR`
 
 Google OIDC currently fails closed unless configured and completed; magic links are available with a development-only mail adapter boundary.
+
+## Deployment Provenance
+
+The backend exposes `GET /health/version` with sanitized deployment metadata:
+
+- `APP_COMMIT_SHA`: exact git SHA for the deployed source state.
+- `APP_BUILD_TIME`: optional build timestamp.
+- `APP_RELEASE` or `APP_RELEASE_ID`: optional human release identifier.
+
+`/health/ready` warns when production commit metadata is missing, but readiness does not fail solely because build time or release labels are absent. Do not expose host paths, full environment dumps, dependency inventories, or secret values in provenance output. The Vite build also accepts the same metadata at build time for the dashboard account screen.
 
 ## Production Deployment Notes
 
@@ -84,18 +103,20 @@ For a controlled cPanel staging deployment and TikTok Sandbox verification, use
 
 1. Install dependencies for `server/` and `apps/web/`.
 2. Build the web app with `npm run web:build`.
-3. Set Passenger to run `server/index.js`.
-4. Configure production MariaDB and set `DATABASE_URL`.
-5. Run migrations explicitly with `node server/scripts/migrate.js up --database dev` or the production-equivalent target command.
-6. Add a cron entry similar to:
+3. Export `APP_COMMIT_SHA=$(git rev-parse HEAD)` in the cPanel/Passenger environment for the deployed source revision.
+4. Set Passenger to run `server/index.js`.
+5. Ensure the cPanel domain document root does not contain a separately served `index.html`; Express/Passenger must own `/`.
+6. Configure production MariaDB and set `DATABASE_URL`.
+7. Run migrations explicitly with `node server/scripts/migrate.js up --database dev` or the production-equivalent target command.
+8. Add a cron entry similar to:
 
    ```bash
    cd /path/to/social && npm run worker -- sync-due --time-budget-seconds 240
    ```
 
-7. Keep private token/state file-store paths configured for the legacy connector until retirement is approved.
-8. Set `LOOKER_REDIRECT_URIS` to the exact Apps Script callback URI for the retained connector.
-9. Use a precise `TRUST_PROXY` hop count for Passenger/Cloudflare.
+9. Keep private token/state file-store paths configured for the legacy connector until retirement is approved.
+10. Set `LOOKER_REDIRECT_URIS` to the exact Apps Script callback URI for the retained connector.
+11. Use a precise `TRUST_PROXY` hop count for Passenger/Cloudflare.
 
 Backups, restore testing, legal retention approvals, final Google OIDC verification, mail delivery, and production TikTok review are external release gates.
 

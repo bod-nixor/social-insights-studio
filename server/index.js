@@ -12,6 +12,7 @@ const { FileStateStore, FileTokenStore } = require('./store');
 const { getConnection } = require('./database');
 const { createPlatformRouter } = require('./platform/routes');
 const { validateMailConfiguration } = require('./platform/mail');
+const { getDeploymentReadinessCheck, getDeploymentVersion } = require('./platform/version');
 
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -191,7 +192,19 @@ const REQUIRED_SCOPES = [
 ].join(',');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const WEB_DIST_DIR = path.join(__dirname, '..', 'apps', 'web', 'dist');
+const WEB_DIST_DIR = process.env.WEB_DIST_DIR
+  ? path.resolve(process.env.WEB_DIST_DIR)
+  : path.join(__dirname, '..', 'apps', 'web', 'dist');
+const WEB_INDEX_FILE = path.join(WEB_DIST_DIR, 'index.html');
+const WEB_ASSETS_DIR = path.join(WEB_DIST_DIR, 'assets');
+const PUBLIC_PAGE_FILES = new Map([
+  ['privacy', 'privacy.html'],
+  ['terms', 'terms.html'],
+  ['support', 'support.html'],
+  ['data-deletion', 'data-deletion.html'],
+  ['status', 'status.html']
+]);
+const CLIENT_ROUTE_PATTERN = /^\/workspaces\/[0-9a-f-]{36}\/content\/[0-9a-f-]{36}\/?$/i;
 
 function ensureStoreOutsidePublic(storePath, envName) {
   const resolvedStore = path.resolve(storePath);
@@ -288,13 +301,6 @@ const apiLimiter = rateLimit({
   handler: (req, res) => res.status(429).json({ error: 'rate_limited' })
 });
 
-app.use(express.static(PUBLIC_DIR));
-if (fs.existsSync(WEB_DIST_DIR)) {
-  app.use('/app', express.static(WEB_DIST_DIR));
-  app.get(['/app', '/app/*'], (req, res) => {
-    res.sendFile(path.join(WEB_DIST_DIR, 'index.html'));
-  });
-}
 app.use(express.urlencoded({ extended: false, limit: DEFAULT_BODY_LIMIT }));
 app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
 
@@ -304,6 +310,10 @@ app.use('/api', corsMiddleware, apiLimiter);
 
 app.get('/health/live', (req, res) => {
   res.json({ status: 'live' });
+});
+
+app.get('/health/version', (req, res) => {
+  res.json(getDeploymentVersion());
 });
 
 app.get('/health/ready', async (req, res) => {
@@ -320,29 +330,22 @@ app.get('/health/ready', async (req, res) => {
       if (connection) await connection.release();
     }
   }
-  res.status(database === 'unavailable' ? 503 : 200).json({
+  const deployment = getDeploymentReadinessCheck();
+  const body = {
     status: database === 'unavailable' ? 'not_ready' : 'ready',
     checks: {
       database,
-      legacy_file_store: 'configured'
+      legacy_file_store: 'configured',
+      deployment_metadata: deployment.status
     }
-  });
+  };
+  if (deployment.warnings.length > 0) {
+    body.warnings = deployment.warnings;
+  }
+  res.status(database === 'unavailable' ? 503 : 200).json(body);
 });
 
 app.use('/api', createPlatformRouter());
-
-app.use((err, req, res, next) => {
-  if (err && err.type === 'entity.too.large') {
-    return res.status(413).json({ error: 'payload_too_large' });
-  }
-  if (err && err.message === 'CORS origin not allowed') {
-    return res.status(403).json({ error: 'cors_not_allowed' });
-  }
-  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
-    return res.status(400).json({ error: 'invalid_json' });
-  }
-  return next(err);
-});
 
 const LOOKER_CLIENT_ID = process.env.LOOKER_CLIENT_ID || 'looker-studio-connector';
 const LOOKER_CLIENT_SECRET = process.env.LOOKER_CLIENT_SECRET || null;
@@ -1197,6 +1200,110 @@ app.post('/api/connector/revoke', async (req, res) => {
   } catch (error) {
     return res.status(500).json({ error: 'server_error' });
   }
+});
+
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'not_found' });
+});
+
+app.use('/health', (req, res) => {
+  res.status(404).json({ error: 'not_found' });
+});
+
+function originalQuery(req) {
+  const queryIndex = req.originalUrl.indexOf('?');
+  return queryIndex === -1 ? '' : req.originalUrl.slice(queryIndex);
+}
+
+function legacyAppDestination(req) {
+  const queryIndex = req.originalUrl.indexOf('?');
+  const requestPath = queryIndex === -1 ? req.originalUrl : req.originalUrl.slice(0, queryIndex);
+  const suffix = requestPath.slice('/app'.length);
+  const destinationPath = CLIENT_ROUTE_PATTERN.test(suffix) ? suffix : '/';
+  return `${destinationPath}${originalQuery(req)}`;
+}
+
+function sendWebIndex(req, res) {
+  if (!fs.existsSync(WEB_INDEX_FILE)) {
+    return res.status(503).type('text/plain').send('Application build unavailable.');
+  }
+  res.set('cache-control', 'no-cache');
+  return res.sendFile(WEB_INDEX_FILE);
+}
+
+app.get(['/app', '/app/*'], (req, res) => {
+  res.redirect(308, legacyAppDestination(req));
+});
+
+app.get('/index.html', (req, res) => {
+  res.redirect(308, `/${originalQuery(req)}`);
+});
+
+for (const [slug, filename] of PUBLIC_PAGE_FILES) {
+  app.get([`/${slug}`, `/${slug}/`, `/${filename}`], (req, res) => {
+    res.set('cache-control', 'no-cache');
+    res.sendFile(path.join(PUBLIC_DIR, filename));
+  });
+}
+
+app.get(['/logo.png', '/favicon.ico'], (req, res) => {
+  res.set('cache-control', 'public, max-age=86400');
+  res.sendFile(path.join(PUBLIC_DIR, 'logo.png'));
+});
+
+const WELL_KNOWN_DIR = path.join(PUBLIC_DIR, '.well-known');
+if (fs.existsSync(WELL_KNOWN_DIR)) {
+  app.use('/.well-known', express.static(WELL_KNOWN_DIR, {
+    dotfiles: 'deny',
+    fallthrough: false,
+    index: false
+  }));
+}
+
+if (fs.existsSync(WEB_ASSETS_DIR)) {
+  app.use('/assets', express.static(WEB_ASSETS_DIR, {
+    dotfiles: 'deny',
+    fallthrough: false,
+    immutable: true,
+    index: false,
+    maxAge: '1y'
+  }));
+}
+
+app.get('/', sendWebIndex);
+app.get(CLIENT_ROUTE_PATTERN, sendWebIndex);
+
+app.use((req, res) => {
+  res.status(404).type('text/plain').send('Not found.');
+});
+
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'payload_too_large' });
+  }
+  if (err && err.message === 'CORS origin not allowed') {
+    return res.status(403).json({ error: 'cors_not_allowed' });
+  }
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'invalid_json' });
+  }
+
+  const status = Number.isInteger(err && err.status) ? err.status : 500;
+  if (status >= 500) {
+    logEvent('error', 'request_failed', {
+      correlation_id: req.correlationId,
+      method: req.method,
+      path: req.path,
+      status
+    });
+  }
+  if (req.path.startsWith('/api/') || req.path.startsWith('/health/')) {
+    return res.status(status).json({ error: status === 404 ? 'not_found' : 'server_error' });
+  }
+  if (res.headersSent) {
+    return next(err);
+  }
+  return res.status(status).type('text/plain').send(status === 404 ? 'Not found.' : 'Request failed.');
 });
 
 function getListenTarget() {

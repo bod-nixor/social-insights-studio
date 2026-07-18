@@ -1,6 +1,7 @@
 const { after, before, test } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fs = require('node:fs/promises');
 const http = require('node:http');
 const path = require('node:path');
 const dotenv = require('dotenv');
@@ -65,6 +66,28 @@ async function clearDatabase() {
     await db.query(`DELETE FROM \`${row.table_name}\``);
   }
   await db.query('SET FOREIGN_KEY_CHECKS = 1');
+}
+
+function splitSqlStatements(sql) {
+  return sql
+    .split(/;\s*(?:\r?\n|$)/)
+    .map(statement => statement.trim())
+    .filter(Boolean);
+}
+
+async function applyMigrationFile(connection, fileName) {
+  const sql = await fs.readFile(path.resolve(__dirname, '..', 'migrations', fileName), 'utf8');
+  for (const statement of splitSqlStatements(sql)) {
+    await connection.query(statement);
+  }
+}
+
+function databaseUrlFor(databaseUrl, databaseName, credentials = {}) {
+  const parsed = new URL(databaseUrl);
+  parsed.pathname = `/${databaseName}`;
+  if (credentials.username) parsed.username = credentials.username;
+  if (credentials.password !== undefined) parsed.password = credentials.password;
+  return parsed.toString();
 }
 
 function requestApp(pathname, options = {}) {
@@ -341,7 +364,7 @@ test('TikTok connection start rolls back and releases the connection when a writ
     delete require.cache[connectionServicePath];
     const isolatedConnectionService = require('../platform/connection-service');
     await assert.rejects(
-      () => isolatedConnectionService.startTikTokConnection('user-id', 'workspace-id', '/app'),
+      () => isolatedConnectionService.startTikTokConnection('user-id', 'workspace-id', '/'),
       /insert_failed/
     );
     assert.ok(calls.includes('begin'));
@@ -425,13 +448,133 @@ test('TikTok disconnect rolls back and releases the connection when local revoca
 
 test('migrations are applied to the real MariaDB test database', async () => {
   const rows = await db.query('SELECT version FROM schema_migrations ORDER BY version');
-  assert.deepEqual(rows.map(row => row.version), ['001_phase1_foundation', '002_session_csrf']);
+  assert.deepEqual(rows.map(row => row.version), [
+    '001_phase1_foundation',
+    '002_session_csrf',
+    '003_provider_authorization_resources'
+  ]);
 
   const tableRows = await db.query(
     `SELECT TABLE_NAME AS table_name FROM information_schema.TABLES
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('users', 'workspaces', 'oauth_credentials', 'profile_snapshots')`
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (
+       'users',
+       'workspaces',
+       'oauth_credentials',
+       'profile_snapshots',
+       'provider_authorizations',
+       'provider_authorization_credentials',
+       'provider_resources',
+       'workspace_provider_connections'
+     )`
   );
-  assert.equal(tableRows.length, 4);
+  assert.equal(tableRows.length, 8);
+});
+
+test('provider foundation migration preserves existing TikTok credentials without token rewrite', async () => {
+  const databaseName = `sis_migration_${process.pid}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
+  const rootPassword = process.env.MARIADB_ROOT_PASSWORD;
+  const appUser = process.env.MARIADB_USER || new URL(process.env.DATABASE_TEST_URL).username;
+  assert.ok(rootPassword, 'MARIADB_ROOT_PASSWORD is required for the migration preservation test');
+  assert.match(appUser, /^[A-Za-z0-9_]+$/);
+
+  const root = await mariadb.createConnection(databaseUrlFor(process.env.DATABASE_TEST_URL, 'mysql', {
+    username: 'root',
+    password: rootPassword
+  }));
+  let shadow;
+  try {
+    await root.query(`CREATE DATABASE \`${databaseName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+    await root.query(`GRANT ALL PRIVILEGES ON \`${databaseName}\`.* TO '${appUser}'@'%'`);
+    shadow = await mariadb.createConnection(databaseUrlFor(process.env.DATABASE_TEST_URL, databaseName));
+
+    await applyMigrationFile(shadow, '001_phase1_foundation.sql');
+    await applyMigrationFile(shadow, '002_session_csrf.sql');
+    await shadow.query(
+      `INSERT INTO users (id, email) VALUES
+       ('01000000-0000-4000-8000-000000000001', 'migration-owner@example.com')`
+    );
+    await shadow.query(
+      `INSERT INTO workspaces (id, name, slug, created_by) VALUES
+       ('11000000-0000-4000-8000-000000000001', 'Migration Workspace', 'migration-workspace', '01000000-0000-4000-8000-000000000001')`
+    );
+    await shadow.query(
+      `INSERT INTO data_sources
+        (id, workspace_id, provider, status, last_sync_at, last_successful_sync_at, next_sync_at)
+       VALUES
+        ('21000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000001', 'tiktok', 'active',
+         '2026-07-17 01:02:03.000', '2026-07-17 01:02:03.000', '2026-07-17 07:02:03.000')`
+    );
+    await shadow.query(
+      `INSERT INTO provider_accounts
+        (id, workspace_id, data_source_id, provider, provider_account_id, username, display_name)
+       VALUES
+        ('22000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000001',
+         '21000000-0000-4000-8000-000000000001', 'tiktok', 'legacy-open-id', 'legacyuser', 'Legacy User')`
+    );
+    await shadow.query(
+      `INSERT INTO oauth_credentials
+        (id, data_source_id, access_token_ciphertext, access_token_iv, access_token_tag,
+         refresh_token_ciphertext, refresh_token_iv, refresh_token_tag, key_version,
+         token_type, access_expires_at, refresh_expires_at)
+       VALUES
+        ('23000000-0000-4000-8000-000000000001', '21000000-0000-4000-8000-000000000001',
+         'legacy-access-ciphertext', 'legacy-access-iv', 'legacy-access-tag',
+         'legacy-refresh-ciphertext', 'legacy-refresh-iv', 'legacy-refresh-tag',
+         'legacy-key-v3', 'Bearer', '2026-07-17 02:02:03.000', '2026-07-18 01:02:03.000')`
+    );
+    await shadow.query(
+      `INSERT INTO provider_scopes (data_source_id, scope, status, granted_at, last_confirmed_at)
+       VALUES
+        ('21000000-0000-4000-8000-000000000001', 'user.info.basic', 'granted', '2026-07-17 01:02:03.000', '2026-07-17 01:02:03.000'),
+        ('21000000-0000-4000-8000-000000000001', 'video.list', 'granted', '2026-07-17 01:02:03.000', '2026-07-17 01:02:03.000')`
+    );
+    await shadow.query(
+      `INSERT INTO sync_jobs (id, data_source_id, run_after, status)
+       VALUES ('24000000-0000-4000-8000-000000000001', '21000000-0000-4000-8000-000000000001', '2026-07-17 07:02:03.000', 'due')`
+    );
+
+    await applyMigrationFile(shadow, '003_provider_authorization_resources.sql');
+
+    const rows = await shadow.query(
+      `SELECT pauth.source_data_source_id,
+              pauth.provider_subject,
+              pac.access_token_ciphertext,
+              pac.refresh_token_ciphertext,
+              pac.key_version,
+              pr.provider_resource_id,
+              wpc.data_source_id,
+              wpc.status
+       FROM provider_authorizations pauth
+       JOIN provider_authorization_credentials pac ON pac.provider_authorization_id = pauth.id
+       JOIN provider_resources pr ON pr.provider_authorization_id = pauth.id
+       JOIN workspace_provider_connections wpc ON wpc.provider_resource_id = pr.id
+       WHERE pauth.source_data_source_id = '21000000-0000-4000-8000-000000000001'`
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].provider_subject, 'legacy-open-id');
+    assert.equal(rows[0].access_token_ciphertext, 'legacy-access-ciphertext');
+    assert.equal(rows[0].refresh_token_ciphertext, 'legacy-refresh-ciphertext');
+    assert.equal(rows[0].key_version, 'legacy-key-v3');
+    assert.equal(rows[0].provider_resource_id, 'legacy-open-id');
+    assert.equal(rows[0].data_source_id, '21000000-0000-4000-8000-000000000001');
+    assert.equal(rows[0].status, 'active');
+
+    const scopeRows = await shadow.query(
+      `SELECT scope, status FROM provider_authorization_scopes ORDER BY scope`
+    );
+    assert.deepEqual(scopeRows.map(row => `${row.scope}:${row.status}`), [
+      'user.info.basic:granted',
+      'video.list:granted'
+    ]);
+    const capabilityRows = await shadow.query('SELECT COUNT(*) AS count FROM provider_capabilities');
+    const syncRows = await shadow.query('SELECT COUNT(*) AS count FROM provider_sync_states');
+    assert.equal(Number(capabilityRows[0].count), 5);
+    assert.equal(Number(syncRows[0].count), 1);
+  } finally {
+    if (shadow) await shadow.end();
+    await root.query(`DROP DATABASE IF EXISTS \`${databaseName}\``);
+    await root.end();
+  }
 });
 
 test('schema constraints and nullable metrics behave on MariaDB', async () => {
@@ -808,6 +951,8 @@ test('production-only safety guards refuse development paths', async () => {
     assert.equal(sentMessages[0].options.secure, true);
     assert.equal(sentMessages[0].message.to, 'prod-smtp@example.com');
     assert.equal(sentMessages[0].message.text.includes('one-time sign-in code'), true);
+    assert.match(sentMessages[0].message.text, /Open http:\/\/localhost:3001\/ and paste the code/);
+    assert.doesNotMatch(sentMessages[0].message.text, /\/app\//);
   } finally {
     setMailTransportFactory(null);
     for (const [name, value] of Object.entries(previous)) {
@@ -1022,7 +1167,7 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
   assert.equal(openReturn.statusCode, 400);
   assert.equal(openReturn.json().error, 'invalid_return_path');
 
-  const nonAppReturn = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok/start`, {
+  const nonCanonicalReturn = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok/start`, {
     method: 'POST',
     headers: {
       cookie: cookieHeader(owner.cookies),
@@ -1030,8 +1175,8 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
     },
     body: { return_path: '/settings' }
   });
-  assert.equal(nonAppReturn.statusCode, 400);
-  assert.equal(nonAppReturn.json().error, 'invalid_return_path');
+  assert.equal(nonCanonicalReturn.statusCode, 400);
+  assert.equal(nonCanonicalReturn.json().error, 'invalid_return_path');
 
   const outsiderStart = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok/start`, {
     method: 'POST',
@@ -1039,7 +1184,7 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
       cookie: cookieHeader(outsider.cookies),
       'x-csrf-token': outsider.csrf
     },
-    body: { return_path: '/app' }
+    body: { return_path: '/' }
   });
   assert.equal(outsiderStart.statusCode, 404);
   assert.equal(outsiderStart.json().error, 'workspace_not_found');
@@ -1061,7 +1206,7 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
       cookie: cookieHeader(viewer.cookies),
       'x-csrf-token': viewer.csrf
     },
-    body: { return_path: '/app' }
+    body: { return_path: '/' }
   });
   assert.equal(viewerStart.statusCode, 403);
 
@@ -1120,7 +1265,7 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
       cookie: cookieHeader(owner.cookies),
       'x-csrf-token': owner.csrf
     },
-    body: { return_path: '/app?tab=connections' }
+    body: { return_path: '/app/?view=connections' }
   });
   assert.equal(start.statusCode, 200);
   const authorizationUrl = new URL(start.json().authorization_url);
@@ -1130,16 +1275,17 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
   const transactionRows = await db.query('SELECT state_hash, return_path FROM oauth_transactions WHERE workspace_id = ?', [workspace.id]);
   assert.equal(transactionRows.length, 1);
   assert.notEqual(transactionRows[0].state_hash, state);
-  assert.equal(transactionRows[0].return_path, '/app?tab=connections');
+  assert.equal(transactionRows[0].return_path, '/?view=connections');
 
   const callback = await requestApp(`/api/integrations/tiktok/callback?code=valid-code&state=${encodeURIComponent(state)}`);
   assert.equal(callback.statusCode, 200);
+  assert.match(callback.body, /window\.location\.href="\/\?view=connections"/);
 
   const replay = await requestApp(`/api/integrations/tiktok/callback?code=valid-code&state=${encodeURIComponent(state)}`);
   assert.equal(replay.statusCode, 400);
 
   const credentialRows = await db.query(
-    `SELECT oc.access_token_ciphertext, oc.revoked_at, ds.status
+    `SELECT ds.id AS data_source_id, oc.access_token_ciphertext, oc.revoked_at, ds.status
      FROM oauth_credentials oc
      JOIN data_sources ds ON ds.id = oc.data_source_id
      WHERE ds.workspace_id = ?`,
@@ -1149,6 +1295,50 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
   assert.notEqual(credentialRows[0].access_token_ciphertext, 'access-token-one');
   assert.equal(credentialRows[0].status, 'active');
   assert.equal(credentialRows[0].revoked_at, null);
+
+  const providerCatalog = await requestApp(`/api/workspaces/${workspace.id}/provider-catalog`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(providerCatalog.statusCode, 200);
+  const providerRows = providerCatalog.json().providers;
+  const tiktokProvider = providerRows.find(provider => provider.id === 'tiktok');
+  const youtubeProvider = providerRows.find(provider => provider.id === 'youtube');
+  assert.equal(tiktokProvider.connection.status, 'active');
+  assert.equal(tiktokProvider.connectable, true);
+  assert.equal(youtubeProvider.connectable, false);
+
+  const foundationRows = await db.query(
+    `SELECT pauth.source_data_source_id,
+            pauth.provider_subject,
+            pac.access_token_ciphertext,
+            pac.key_version,
+            pr.resource_type,
+            wpc.status
+     FROM provider_authorizations pauth
+     JOIN provider_authorization_credentials pac ON pac.provider_authorization_id = pauth.id
+     JOIN provider_resources pr ON pr.provider_authorization_id = pauth.id
+     JOIN workspace_provider_connections wpc ON wpc.provider_resource_id = pr.id
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'tiktok'`,
+    [workspace.id]
+  );
+  assert.equal(foundationRows.length, 1);
+  assert.equal(foundationRows[0].source_data_source_id, credentialRows[0].data_source_id);
+  assert.equal(foundationRows[0].provider_subject, 'open-123');
+  assert.equal(foundationRows[0].access_token_ciphertext, credentialRows[0].access_token_ciphertext);
+  assert.equal(foundationRows[0].key_version, process.env.ENCRYPTION_KEY_VERSION || 'local-v1');
+  assert.equal(foundationRows[0].resource_type, 'tiktok_account');
+  assert.equal(foundationRows[0].status, 'active');
+
+  const capabilityRows = await db.query(
+    `SELECT pc.capability_key, pc.status
+     FROM provider_capabilities pc
+     JOIN workspace_provider_connections wpc ON wpc.id = pc.workspace_provider_connection_id
+     WHERE wpc.workspace_id = ? AND wpc.provider = 'tiktok'
+     ORDER BY pc.capability_key`,
+    [workspace.id]
+  );
+  assert.equal(capabilityRows.length, 5);
+  assert.equal(capabilityRows.every(row => row.status === 'available'), true);
 
   const otherAccounts = await db.query('SELECT * FROM provider_accounts WHERE workspace_id = ?', [otherWorkspace.id]);
   assert.equal(otherAccounts.length, 0);
@@ -1175,6 +1365,18 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
   assert.ok(disconnectedRows[0].revoked_at);
   assert.equal(disconnectedRows[0].status, 'disconnected');
   assert.equal(disconnectedRows[0].job_status, 'disabled');
+  const disconnectedFoundationRows = await db.query(
+    `SELECT pauth.status AS auth_status, wpc.status AS connection_status, COUNT(pre.id) AS revocation_count
+     FROM provider_authorizations pauth
+     JOIN workspace_provider_connections wpc ON wpc.data_source_id = pauth.source_data_source_id
+     LEFT JOIN provider_revocation_events pre ON pre.provider_authorization_id = pauth.id
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'tiktok'
+     GROUP BY pauth.status, wpc.status`,
+    [workspace.id]
+  );
+  assert.equal(disconnectedFoundationRows[0].auth_status, 'disconnected');
+  assert.equal(disconnectedFoundationRows[0].connection_status, 'disconnected');
+  assert.equal(Number(disconnectedFoundationRows[0].revocation_count) >= 1, true);
 
   const missingStart = await requestApp(`/api/workspaces/${workspace.id}/connections/tiktok/start`, {
     method: 'POST',
@@ -1182,7 +1384,7 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
       cookie: cookieHeader(owner.cookies),
       'x-csrf-token': owner.csrf
     },
-    body: { return_path: '/app' }
+    body: { return_path: '/' }
   });
   assert.equal(missingStart.statusCode, 200);
   const missingState = new URL(missingStart.json().authorization_url).searchParams.get('state');
@@ -1234,7 +1436,7 @@ test('TikTok disconnect records provider revoke failure but still disables the l
       cookie: cookieHeader(owner.cookies),
       'x-csrf-token': owner.csrf
     },
-    body: { return_path: '/app' }
+    body: { return_path: '/' }
   });
   assert.equal(start.statusCode, 200);
   const state = new URL(start.json().authorization_url).searchParams.get('state');
@@ -1309,7 +1511,7 @@ test('TikTok callback failures and disconnected edge states fail closed without 
       cookie: cookieHeader(owner.cookies),
       'x-csrf-token': owner.csrf
     },
-    body: { return_path: '/app' }
+    body: { return_path: '/' }
   });
   const tokenState = new URL(tokenStart.json().authorization_url).searchParams.get('state');
   const tokenCallback = await requestApp(`/api/integrations/tiktok/callback?code=bad-code&state=${encodeURIComponent(tokenState)}`);
@@ -1346,7 +1548,7 @@ test('TikTok callback failures and disconnected edge states fail closed without 
       cookie: cookieHeader(owner.cookies),
       'x-csrf-token': owner.csrf
     },
-    body: { return_path: '/app' }
+    body: { return_path: '/' }
   });
   const profileState = new URL(profileStart.json().authorization_url).searchParams.get('state');
   const profileCallback = await requestApp(`/api/integrations/tiktok/callback?code=profile-code&state=${encodeURIComponent(profileState)}`);
@@ -1444,7 +1646,7 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
       cookie: cookieHeader(owner.cookies),
       'x-csrf-token': owner.csrf
     },
-    body: { return_path: '/app' }
+    body: { return_path: '/' }
   });
   const state = new URL(start.json().authorization_url).searchParams.get('state');
   const callback = await requestApp(`/api/integrations/tiktok/callback?code=connect&state=${encodeURIComponent(state)}`);

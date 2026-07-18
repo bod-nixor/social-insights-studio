@@ -30,6 +30,10 @@ const {
   getSyncHistory
 } = require('./dashboard-service');
 const { createContentCsvExport } = require('./export-service');
+const {
+  getPublicProviderCatalog,
+  listWorkspaceProviderCatalog
+} = require('./provider-registry');
 const { requestManualSync } = require('./sync-service');
 const { hashSecret: hashValue, parseCookies, randomToken, serializeCookie } = require('./security');
 
@@ -128,6 +132,10 @@ function requireCsrf(req, res, next) {
 
 function createPlatformRouter() {
   const router = express.Router();
+
+  router.get('/providers/catalog', async (req, res) => {
+    return res.json({ providers: getPublicProviderCatalog() });
+  });
 
   router.post('/auth/magic-link/request', async (req, res) => {
     try {
@@ -286,7 +294,7 @@ function createPlatformRouter() {
       return res.json(await startTikTokConnection(
         req.session.user.id,
         req.params.workspaceId,
-        req.body.return_path || '/app'
+        req.body.return_path || '/'
       ));
     } catch (error) {
       return sendError(res, error);
@@ -304,6 +312,16 @@ function createPlatformRouter() {
   router.get('/workspaces/:workspaceId/dashboard', requireSession, async (req, res) => {
     try {
       return res.json(await getDashboard(req.session.user.id, req.params.workspaceId, req.query));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/workspaces/:workspaceId/provider-catalog', requireSession, async (req, res) => {
+    try {
+      return res.json({
+        providers: await listWorkspaceProviderCatalog(req.session.user.id, req.params.workspaceId)
+      });
     } catch (error) {
       return sendError(res, error);
     }
@@ -362,7 +380,7 @@ function createPlatformRouter() {
         code: req.query.code,
         state: req.query.state
       });
-      return res.status(200).send(`<!doctype html><title>TikTok connected</title><p>TikTok connected. Return to Social Insights Studio.</p><script>window.location.href=${JSON.stringify(result.return_path || '/app')};</script>`);
+      return res.status(200).send(`<!doctype html><title>TikTok connected</title><p>TikTok connected. Return to Social Insights Studio.</p><script>window.location.href=${JSON.stringify(result.return_path || '/')};</script>`);
     } catch (error) {
       return res.status(error.status || 500).send('<!doctype html><title>Connection failed</title><p>TikTok connection failed. Return to Social Insights Studio and try again.</p>');
     }

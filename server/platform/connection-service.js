@@ -1,6 +1,10 @@
 const { getConnection } = require('../database');
 const tiktok = require('../integrations/tiktok');
 const { assertCapability } = require('./rbac');
+const {
+  markTikTokProviderFoundationDisconnected,
+  upsertTikTokProviderFoundation
+} = require('./provider-foundation');
 const { decryptSecret, encryptSecret } = require('./secret-envelope');
 const { createId, hashSecret, randomToken } = require('./security');
 
@@ -45,15 +49,26 @@ async function requireWorkspaceRole(connection, workspaceId, userId, capability)
 }
 
 function normalizeReturnPath(returnPath) {
-  const value = returnPath || '/app';
+  const value = returnPath || '/';
   if (typeof value !== 'string' || value.length > 512 || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) {
     throw createHttpError(400, 'invalid_return_path');
   }
   const parsed = new URL(value, 'https://social-insights.local');
-  if (parsed.origin !== 'https://social-insights.local' || !parsed.pathname.startsWith('/app')) {
+  if (parsed.origin !== 'https://social-insights.local') {
     throw createHttpError(400, 'invalid_return_path');
   }
-  return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  const legacySuffix = parsed.pathname === '/app'
+    ? '/'
+    : parsed.pathname.startsWith('/app/')
+      ? parsed.pathname.slice('/app'.length)
+      : null;
+  const pathname = legacySuffix || parsed.pathname;
+  const isRoot = pathname === '/';
+  const isContentDetail = /^\/workspaces\/[0-9a-f-]{36}\/content\/[0-9a-f-]{36}\/?$/i.test(pathname);
+  if (!isRoot && !isContentDetail) {
+    throw createHttpError(400, 'invalid_return_path');
+  }
+  return `${pathname}${parsed.search}${parsed.hash}`;
 }
 
 async function writeAuditLog(connection, { workspaceId, actorUserId = null, action, targetType = null, targetId = null, metadata = null }) {
@@ -90,7 +105,7 @@ async function findOrCreateTikTokSource(connection, workspaceId) {
   return { id, workspace_id: workspaceId, provider: 'tiktok', status: 'connecting' };
 }
 
-async function startTikTokConnection(userId, workspaceId, returnPath = '/app') {
+async function startTikTokConnection(userId, workspaceId, returnPath = '/') {
   return withConnection(async connection => {
     const safeReturnPath = normalizeReturnPath(returnPath);
     await requireWorkspaceRole(connection, workspaceId, userId, 'manageConnection');
@@ -328,6 +343,14 @@ async function completeTikTokConnection({ code, state }) {
         );
       }
 
+      await upsertTikTokProviderFoundation(connection, {
+        workspaceId: transaction.workspace_id,
+        actorUserId: transaction.initiated_by,
+        dataSourceId: dataSource.id,
+        profile: profileResult.user,
+        status
+      });
+
       await writeAuditLog(connection, {
         workspaceId: transaction.workspace_id,
         actorUserId: transaction.initiated_by,
@@ -398,6 +421,11 @@ async function disconnectTikTok(userId, workspaceId) {
         [record.data_source_id]
       );
       await connection.query('DELETE FROM provider_scopes WHERE data_source_id = ?', [record.data_source_id]);
+      await markTikTokProviderFoundationDisconnected(connection, {
+        dataSourceId: record.data_source_id,
+        actorUserId: userId,
+        providerRevoke
+      });
       await writeAuditLog(connection, {
         workspaceId,
         actorUserId: userId,

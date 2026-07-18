@@ -91,7 +91,7 @@ function escapeHtml(value) {
 
 function loginUrl(env = process.env) {
   const baseUrl = String(env.BASE_URL || '').replace(/\/+$/, '');
-  return baseUrl ? `${baseUrl}/app/` : '/app/';
+  return baseUrl ? `${baseUrl}/` : '/';
 }
 
 async function sendMagicLinkEmail({ email, token }, env = process.env) {

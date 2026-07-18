@@ -31,6 +31,13 @@ const {
 } = require('./dashboard-service');
 const { createContentCsvExport } = require('./export-service');
 const {
+  completeYouTubeConnection,
+  disconnectYouTube,
+  selectYouTubeResource,
+  startYouTubeConnection
+} = require('./youtube-connection-service');
+const { getYouTubeDashboard } = require('./youtube-dashboard-service');
+const {
   getPublicProviderCatalog,
   listWorkspaceProviderCatalog
 } = require('./provider-registry');
@@ -99,6 +106,24 @@ function sendError(res, error) {
   return res.status(status).json({
     error: error.code || (status === 500 ? 'server_error' : error.message)
   });
+}
+
+function youtubeCallbackOutcome(error) {
+  const code = error && (error.code || error.message);
+  if (code === 'youtube_authorization_denied') return 'denied';
+  if (code === 'youtube_required_scopes_missing') return 'missing_scopes';
+  if (code === 'youtube_oauth_redirect_mismatch' || code === 'youtube_not_configured') {
+    return 'configuration_error';
+  }
+  if (
+    code === 'youtube_authorization_failed' ||
+    code === 'youtube_token_exchange_failed' ||
+    code === 'youtube_channel_discovery_failed' ||
+    code === 'youtube_channels_response_malformed'
+  ) {
+    return 'provider_error';
+  }
+  return 'failed';
 }
 
 async function requireSession(req, res, next) {
@@ -309,9 +334,55 @@ function createPlatformRouter() {
     }
   });
 
+  router.post('/workspaces/:workspaceId/connections/youtube/start', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await startYouTubeConnection({
+        userId: req.session.user.id,
+        sessionId: req.session.id,
+        workspaceId: req.params.workspaceId,
+        returnPath: (req.body && req.body.return_path) || '/',
+        targetConnectionId: (req.body && req.body.connection_id) || null
+      }));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/workspaces/:workspaceId/connections/youtube/select', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.status(201).json(await selectYouTubeResource(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.body && req.body.resource_id
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.delete('/workspaces/:workspaceId/connections/youtube', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await disconnectYouTube(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.body && req.body.connection_id ? req.body.connection_id : null
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
   router.get('/workspaces/:workspaceId/dashboard', requireSession, async (req, res) => {
     try {
       return res.json(await getDashboard(req.session.user.id, req.params.workspaceId, req.query));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/workspaces/:workspaceId/providers/youtube/dashboard', requireSession, async (req, res) => {
+    try {
+      return res.json(await getYouTubeDashboard(req.session.user.id, req.params.workspaceId, req.query));
     } catch (error) {
       return sendError(res, error);
     }
@@ -363,6 +434,17 @@ function createPlatformRouter() {
     }
   });
 
+  router.post('/workspaces/:workspaceId/providers/youtube/sync-runs', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.status(202).json(await requestManualSync(req.session.user.id, req.params.workspaceId, {
+        provider: 'youtube',
+        connectionId: (req.body && req.body.connection_id) || null
+      }));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
   router.get('/workspaces/:workspaceId/exports/content.csv', requireSession, async (req, res) => {
     try {
       const result = await createContentCsvExport(req.session.user.id, req.params.workspaceId, req.query);
@@ -383,6 +465,26 @@ function createPlatformRouter() {
       return res.status(200).send(`<!doctype html><title>TikTok connected</title><p>TikTok connected. Return to Social Insights Studio.</p><script>window.location.href=${JSON.stringify(result.return_path || '/')};</script>`);
     } catch (error) {
       return res.status(error.status || 500).send('<!doctype html><title>Connection failed</title><p>TikTok connection failed. Return to Social Insights Studio and try again.</p>');
+    }
+  });
+
+  router.get('/integrations/youtube/callback', async (req, res) => {
+    try {
+      const cookies = parseCookies(req.get('cookie'));
+      const session = await authenticate(cookies[SESSION_COOKIE]);
+      if (!session) return res.redirect(303, '/?view=connections&youtube=failed');
+      const result = await completeYouTubeConnection({
+        code: req.query.code,
+        state: req.query.state,
+        providerError: req.query.error,
+        sessionId: session.id,
+        userId: session.user.id
+      });
+      const destination = new URL(result.return_path || '/', 'https://social-insights.local');
+      destination.searchParams.set('youtube', result.outcome);
+      return res.redirect(303, `${destination.pathname}${destination.search}${destination.hash}`);
+    } catch (error) {
+      return res.redirect(303, `/?view=connections&youtube=${youtubeCallbackOutcome(error)}`);
     }
   });
 

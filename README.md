@@ -1,6 +1,6 @@
 # Social Insights Studio
 
-Social Insights Studio is now a workspace-based TikTok analytics application with the legacy Looker Studio connector preserved beside it. The standalone dashboard uses Express, React/Vite, MariaDB, server-side sessions, database-backed TikTok OAuth credentials, one-shot worker syncs, stored snapshots, and CSV exports.
+Social Insights Studio is a workspace-based, multiplatform analytics application with read-only TikTok and gated YouTube verticals and the legacy TikTok Looker Studio connector preserved beside them. The standalone dashboard uses Express, React/Vite, MariaDB, server-side sessions, encrypted provider credentials, bounded one-shot worker syncs, stored snapshots, and CSV exports.
 
 The production domain assumption remains `https://lstc.nixorcorporate.com`. Production deployment is cPanel/Passenger-compatible: the web process serves the API and compiled Vite app, migrations run as an explicit release command, and cron runs the bounded worker.
 
@@ -9,12 +9,12 @@ Production alignment is currently an evidence-backed assumption: local `phase-3-
 ## Current Architecture
 
 - `server/index.js` keeps the legacy connector routes and mounts the new application API under `/api`.
-- `server/platform/` contains auth, sessions, RBAC, TikTok connection lifecycle, sync, dashboard, and export services.
+- `server/platform/` contains auth, sessions, RBAC, provider connection lifecycles, sync, dashboard, and export services.
 - `server/migrations/` contains explicit MariaDB migrations. Migrations never run from normal web requests.
-- `server/worker.js` runs bounded cron-safe jobs such as due TikTok syncs.
+- `server/worker.js` runs bounded cron-safe jobs for due TikTok and enabled YouTube connections.
 - `apps/web/` contains the React/Vite application shell served by Express at `/` after `npm run web:build`.
 - `Code.gs` remains the legacy Apps Script connector. Do not delete the encrypted file store until a production migration/retirement plan is approved.
-- `server/platform/provider-registry.js` records the current provider catalog. TikTok is implemented; Instagram, Facebook Pages, YouTube, and Website Analytics remain feature-flagged and non-connectable until their complete vertical slices are implemented and reviewed.
+- `server/platform/provider-registry.js` records the current provider catalog. TikTok and YouTube are implemented; YouTube is disabled by default until its Google OAuth configuration and verification evidence are ready. Instagram, Facebook Pages, and Website Analytics remain non-connectable.
 - Express serves hashed frontend files only from `/assets/`, serves the logo and standalone compliance pages from an explicit allowlist, and returns JSON for unknown `/api/*` routes.
 - `/privacy`, `/terms`, `/support`, `/data-deletion`, and `/status` remain public without a session. Their `.html` aliases remain available for provider-console compatibility.
 - Legacy `/app`, `/app/`, and `/app/*` URLs redirect permanently to the equivalent canonical-root path while preserving query parameters. `BASE_URL` remains the site origin with no path suffix.
@@ -55,8 +55,10 @@ Do not point destructive tests or reset commands at production or shared remote 
 - Workspaces, owner/admin/analyst/viewer memberships, invitations, last-owner protection, and centralized server-enforced RBAC.
 - Workspace-bound TikTok OAuth start/callback flow with hashed state, relative-only internal return paths, encrypted AES-256-GCM credentials, scope state, reconnect-required handling, and audit events.
 - TikTok disconnect attempts provider revoke before local credential disabling and stops future sync jobs.
-- Bounded worker syncs use MariaDB leases, refresh credentials when needed, write immutable profile/content snapshots, record partial/failed states, preserve last valid data, and stagger six-hour schedules.
-- Dashboard APIs read stored snapshots only; page requests do not fetch TikTok directly.
+- Workspace/session/user/scope/redirect-bound YouTube OAuth uses hashed state, S256 PKCE, offline incremental authorization, exact read-only scopes, encrypted access/refresh tokens, and explicit discovered-channel selection.
+- YouTube disconnect attempts Google revocation and immediately purges local credentials, resources, connections, and snapshots. Terminal external revocation (`invalid_grant`) causes the same local purge on detection.
+- Bounded worker syncs use MariaDB leases, refresh credentials when needed, write immutable profile/content/YouTube Analytics snapshots, record request/quota/retry metadata and partial/failed states, preserve last valid data, and stagger six-hour schedules.
+- Dashboard APIs read stored snapshots only; page requests do not fetch provider APIs directly.
 - CSV content exports are workspace-scoped, analyst-or-higher, formula-injection safe, and recorded in export tables.
 
 ## Required Environment
@@ -73,6 +75,10 @@ Important variables:
 - `TIKTOK_CLIENT_KEY`
 - `TIKTOK_CLIENT_SECRET`
 - `TIKTOK_REDIRECT_URI`
+- `YOUTUBE_ENABLED` (defaults to disabled)
+- `YOUTUBE_CLIENT_ID`
+- `YOUTUBE_CLIENT_SECRET`
+- `YOUTUBE_REDIRECT_URI`
 - `GOOGLE_OIDC_CLIENT_ID` and mail settings when production auth providers are enabled
 - `LOOKER_CLIENT_ID`
 - `LOOKER_REDIRECT_URIS`
@@ -82,7 +88,7 @@ Important variables:
 - `TRUST_PROXY`
 - `APP_COMMIT_SHA`
 - `APP_BUILD_TIME` or `APP_RELEASE`
-- provider feature gates such as `FEATURE_TIKTOK_CONNECTOR`, `FEATURE_YOUTUBE_CONNECTOR`, and `FEATURE_GA4_CONNECTOR`
+- provider feature gates such as `FEATURE_TIKTOK_CONNECTOR`, `YOUTUBE_ENABLED`, and `FEATURE_GA4_CONNECTOR`
 
 Google OIDC currently fails closed unless configured and completed; magic links are available with a development-only mail adapter boundary.
 
@@ -118,7 +124,7 @@ For a controlled cPanel staging deployment and TikTok Sandbox verification, use
 10. Set `LOOKER_REDIRECT_URIS` to the exact Apps Script callback URI for the retained connector.
 11. Use a precise `TRUST_PROXY` hop count for Passenger/Cloudflare.
 
-Backups, restore testing, legal retention approvals, final Google OIDC verification, mail delivery, and production TikTok review are external release gates.
+Backups, restore testing, legal retention approvals, Google OAuth/YouTube verification, mail delivery, and production provider reviews are external release gates. The YouTube source and reviewer checklist are documented in [`docs/youtube-readonly-integration.md`](docs/youtube-readonly-integration.md).
 
 ## Legacy Looker Connector
 
@@ -143,3 +149,12 @@ Only these scopes are requested for the standalone dashboard:
 - `video.list`
 
 TikTok cover-image URLs are treated as ephemeral and are not stored as durable media assets.
+
+## YouTube Read-Only Integration
+
+YouTube is gated by `YOUTUBE_ENABLED=false` by default and requests exactly:
+
+- `https://www.googleapis.com/auth/youtube.readonly`
+- `https://www.googleapis.com/auth/yt-analytics.readonly`
+
+The worker reads owned/managed channel identity, uploads/video metadata, lifetime channel/video counters, and non-monetary YouTube Analytics metrics. A default run uses at most five upload-playlist pages and five 50-video batches, for an estimated maximum of 11 YouTube Data API quota units plus bounded Analytics requests. The dashboard exposes provider data-through dates and leaves unavailable metrics as `N/A`; it does not infer engagement or revenue.

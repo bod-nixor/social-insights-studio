@@ -21,9 +21,11 @@ import {
   Settings,
   ShieldAlert,
   Trash2,
+  Unplug,
   UserPlus,
   Users,
-  Video
+  Video,
+  Youtube
 } from 'lucide-react';
 import {
   Bar,
@@ -49,6 +51,7 @@ type RangeKey = '7d' | '30d' | '90d' | 'custom';
 type Role = 'owner' | 'admin' | 'analyst' | 'viewer';
 type SortDirection = 'asc' | 'desc';
 type ContentSort = 'published_at' | 'views' | 'likes' | 'comments' | 'shares' | 'engagement';
+type OverviewProvider = 'tiktok' | 'youtube';
 
 type User = {
   id: string;
@@ -159,6 +162,23 @@ type SyncData = {
   offset: number;
 };
 
+type ProviderConnection = {
+  id?: string;
+  status: string;
+  reconnect_reason?: string | null;
+  last_sync_at?: string | null;
+  last_successful_sync_at?: string | null;
+  next_sync_at?: string | null;
+  data_through_at?: string | null;
+  account?: {
+    id: string;
+    username?: string | null;
+    display_name?: string | null;
+    thumbnail_url?: string | null;
+  } | null;
+  capabilities?: Array<{ key: string; status: string; reason?: string | null }>;
+};
+
 type ProviderCatalogItem = {
   id: string;
   name: string;
@@ -169,14 +189,102 @@ type ProviderCatalogItem = {
   status: string;
   capabilities: string[];
   requestedScopes: Array<{ name: string; access: string; purpose: string }>;
-  connection?: {
+  connection?: ProviderConnection | null;
+  configuration?: { status: string; warnings: string[] };
+  authorization?: {
+    id: string;
+    status: string;
+    granted_at?: string | null;
+    last_validated_at?: string | null;
+    failure_category?: string | null;
+    missing_scopes?: string[];
+    scopes: Array<{ scope: string; status: string }>;
+  } | null;
+  resources?: Array<{
+    id: string;
+    provider_resource_id: string;
+    display_name: string;
+    thumbnail_url?: string | null;
+    subscriber_count_hidden?: boolean;
+    attached_elsewhere_count?: number;
+    selected: boolean;
+  }>;
+  connections?: ProviderConnection[];
+};
+
+type YouTubeMetric = DashboardMetric & {
+  semantics: string;
+  available: boolean;
+};
+
+type YouTubeContentRow = {
+  id: string;
+  provider_content_id: string;
+  title: string | null;
+  thumbnail_url: string | null;
+  published_at: string | null;
+  share_url: string | null;
+  period: { key: string; from: string; to: string };
+  data_through_date: string | null;
+  views: number | null;
+  watch_time_minutes: number | null;
+  average_view_duration_seconds: number | null;
+  average_view_percentage: number | null;
+  likes: number | null;
+  comments: number | null;
+  shares: number | null;
+  availability: Record<string, string>;
+};
+
+type YouTubeDashboardData = {
+  provider: 'youtube';
+  range: {
+    key: RangeKey;
+    from: string;
+    to: string;
+    previousFrom: string;
+    previousTo: string;
+    videoPeriodKey: string | null;
+  };
+  connection: {
+    id?: string;
     status: string;
     reconnect_reason?: string | null;
     last_sync_at?: string | null;
     last_successful_sync_at?: string | null;
     next_sync_at?: string | null;
-    account?: { id: string; username?: string | null; display_name?: string | null } | null;
+  };
+  channel: {
+    id: string;
+    display_name: string;
+    thumbnail_url: string | null;
+    subscriber_count_hidden: boolean;
+    availability: Record<string, string>;
   } | null;
+  metrics: YouTubeMetric[];
+  trend: Array<{
+    date: string;
+    views: number | null;
+    watch_time_minutes: number | null;
+    subscribers_gained: number | null;
+    subscribers_lost: number | null;
+    net_subscribers: number | null;
+    availability: Record<string, string>;
+  }>;
+  content: YouTubeContentRow[];
+  availability: {
+    state: string;
+    data_through_date: string | null;
+    requested_through_date: string;
+    video_period_supported?: boolean;
+    note?: string | null;
+  };
+};
+
+type DisconnectTarget = {
+  provider: 'tiktok' | 'youtube';
+  connectionId?: string;
+  label: string;
 };
 
 type DeploymentVersion = {
@@ -295,6 +403,19 @@ function formatPercent(value?: number | null) {
   return `${value.toFixed(2)}%`;
 }
 
+function formatMinutes(value?: number | null) {
+  if (value === null || value === undefined) return 'N/A';
+  return `${formatNumber(value)} min`;
+}
+
+function formatSeconds(value?: number | null) {
+  if (value === null || value === undefined) return 'N/A';
+  const wholeSeconds = Math.max(0, Math.round(value));
+  const minutes = Math.floor(wholeSeconds / 60);
+  const seconds = String(wholeSeconds % 60).padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
+
 function formatTooltipNumber(value: unknown) {
   return typeof value === 'number' ? formatNumber(value) : 'N/A';
 }
@@ -325,6 +446,8 @@ function initialUrlState() {
     from: params.get('from') || todayInputValue(-30),
     to: params.get('to') || todayInputValue(0),
     metric: params.get('metric') || 'both',
+    provider: (params.get('provider') === 'youtube' ? 'youtube' : 'tiktok') as OverviewProvider,
+    youtubeOutcome: params.get('youtube') || '',
     compare: params.get('compare') !== 'false',
     topSort: (params.get('topSort') as ContentSort) || 'views',
     contentSort: (params.get('sort') as ContentSort) || 'views',
@@ -363,6 +486,16 @@ function resolveLoadState(dashboard: DashboardData | null): LoadState {
   return dashboard.trend.length > 0 ? 'ready' : 'empty';
 }
 
+function resolveYouTubeLoadState(dashboard: YouTubeDashboardData | null): LoadState {
+  if (!dashboard || dashboard.connection.status === 'disconnected') return 'empty';
+  if (dashboard.connection.status === 'reconnect_required') return 'reconnect';
+  const hasStoredData = dashboard.trend.length > 0 || dashboard.metrics.some((metric) => metric.available);
+  if (dashboard.connection.status === 'active' && hasStoredData) {
+    return dashboard.availability.state === 'delayed' ? 'partial' : 'ready';
+  }
+  return dashboard.connection.status === 'active' ? 'empty' : 'partial';
+}
+
 function roleCanManage(role?: Role) {
   return role === 'owner' || role === 'admin';
 }
@@ -389,6 +522,7 @@ function App() {
   const [customTo, setCustomTo] = useState(initial.to);
   const [compare, setCompare] = useState(initial.compare);
   const [trendMetric, setTrendMetric] = useState(initial.metric);
+  const [overviewProvider, setOverviewProvider] = useState<OverviewProvider>(initial.provider);
   const [topSort, setTopSort] = useState<ContentSort>(initial.topSort);
   const [contentSort, setContentSort] = useState<ContentSort>(initial.contentSort);
   const [contentDir, setContentDir] = useState<SortDirection>(initial.contentDir);
@@ -397,6 +531,7 @@ function App() {
   const [contentPageSize, setContentPageSize] = useState(initial.pageSize);
   const [syncPage, setSyncPage] = useState(1);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [youtubeDashboard, setYouTubeDashboard] = useState<YouTubeDashboardData | null>(null);
   const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogItem[]>([]);
   const [deploymentVersion, setDeploymentVersion] = useState<DeploymentVersion | null>(null);
   const [content, setContent] = useState<ContentData | null>(null);
@@ -409,7 +544,7 @@ function App() {
   const [message, setMessage] = useState('');
   const [toast, setToast] = useState('');
   const [accountOpen, setAccountOpen] = useState(false);
-  const [disconnectOpen, setDisconnectOpen] = useState(false);
+  const [disconnectTarget, setDisconnectTarget] = useState<DisconnectTarget | null>(null);
   const [expandedRun, setExpandedRun] = useState<string>('');
 
   const activeWorkspace = useMemo(
@@ -484,6 +619,7 @@ function App() {
       setCustomFrom(next.from);
       setCustomTo(next.to);
       setTrendMetric(next.metric);
+      setOverviewProvider(next.provider);
       setCompare(next.compare);
       setTopSort(next.topSort);
       setContentSort(next.contentSort);
@@ -503,6 +639,7 @@ function App() {
     params.set('view', view);
     params.set('range', range);
     params.set('metric', trendMetric);
+    params.set('provider', overviewProvider);
     params.set('compare', String(compare));
     params.set('topSort', topSort);
     params.set('sort', contentSort);
@@ -524,6 +661,7 @@ function App() {
     customFrom,
     customTo,
     trendMetric,
+    overviewProvider,
     compare,
     topSort,
     contentSort,
@@ -561,13 +699,17 @@ function App() {
       syncParams.set('limit', '25');
       syncParams.set('offset', String((syncPage - 1) * 25));
       try {
-        const [dashboardResult, contentResult, syncResult, catalogResult] = await Promise.all([
+        const [dashboardResult, youtubeDashboardResult, contentResult, syncResult, catalogResult] = await Promise.all([
           api<DashboardData>(`/api/workspaces/${workspace.id}/dashboard?${dashboardParams.toString()}`),
+          api<YouTubeDashboardData>(
+            `/api/workspaces/${workspace.id}/providers/youtube/dashboard?${dashboardParams.toString()}`
+          ),
           api<ContentData>(`/api/workspaces/${workspace.id}/content?${contentParams.toString()}`),
           api<SyncData>(`/api/workspaces/${workspace.id}/sync-runs?${syncParams.toString()}`),
           api<{ providers: ProviderCatalogItem[] }>(`/api/workspaces/${workspace.id}/provider-catalog`)
         ]);
         setDashboard(dashboardResult);
+        setYouTubeDashboard(youtubeDashboardResult);
         setContent(contentResult);
         setSyncData(syncResult);
         setProviderCatalog(catalogResult.providers);
@@ -595,6 +737,22 @@ function App() {
     if (!user || !activeWorkspace) return;
     void loadWorkspaceData(activeWorkspace);
   }, [user, activeWorkspace, loadWorkspaceData]);
+
+  useEffect(() => {
+    if (!initial.youtubeOutcome) return;
+    const outcomes: Record<string, string> = {
+      selection_required: 'YouTube authorized. Select a channel to finish connecting.',
+      no_channels: 'YouTube authorized, but no accessible channels were returned.',
+      reconnected: 'YouTube authorization restored.',
+      denied: 'You cancelled YouTube authorization. No connection was created.',
+      missing_scopes: 'YouTube did not grant both required read-only permissions. Authorize again to continue.',
+      configuration_error: 'YouTube authorization could not continue because its server configuration changed.',
+      provider_error: 'Google or YouTube could not complete authorization. Try again after the provider recovers.',
+      failed: 'YouTube authorization did not complete.'
+    };
+    setToast(outcomes[initial.youtubeOutcome] || 'YouTube authorization returned.');
+    setView('connections');
+  }, [initial.youtubeOutcome]);
 
   const detailWorkspaceId = activeWorkspace?.id || '';
 
@@ -748,6 +906,39 @@ function App() {
     }
   }
 
+  async function manualYouTubeSync(connectionId?: string) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ status?: string; error?: { message?: string; category?: string } }>(
+        `/api/workspaces/${activeWorkspace.id}/providers/youtube/sync-runs`,
+        {
+          method: 'POST',
+          headers: { 'x-csrf-token': csrf },
+          body: JSON.stringify({ connection_id: connectionId || null })
+        }
+      );
+      await loadWorkspaceData(activeWorkspace);
+      if (result.status === 'failed' || result.status === 'disabled') {
+        setMessage(result.error?.message || result.error?.category || 'youtube_sync_failed');
+      } else if (result.status === 'partial') {
+        setToast('YouTube sync completed with partial data.');
+      } else if (result.status === 'queued') {
+        setToast('YouTube sync queued for the worker.');
+      } else {
+        setToast('YouTube sync completed.');
+      }
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'youtube_sync_failed';
+      setMessage(
+        code === 'manual_sync_cooldown' ? 'Manual sync is cooling down. Try again after the 15-minute window.' : code
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function startConnection() {
     if (!activeWorkspace) return;
     setBusy(true);
@@ -768,18 +959,70 @@ function App() {
     }
   }
 
-  async function disconnectConnection() {
+  async function startYouTubeConnection(connectionId?: string) {
     if (!activeWorkspace) return;
     setBusy(true);
     setMessage('');
     try {
-      await api(`/api/workspaces/${activeWorkspace.id}/connections/tiktok`, {
+      const result = await api<{ authorization_url: string }>(
+        `/api/workspaces/${activeWorkspace.id}/connections/youtube/start`,
+        {
+          method: 'POST',
+          headers: { 'x-csrf-token': csrf },
+          body: JSON.stringify({
+            return_path: `/?workspace=${activeWorkspace.id}&view=connections&provider=youtube`,
+            connection_id: connectionId || null
+          })
+        }
+      );
+      window.location.href = result.authorization_url;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'youtube_connection_failed');
+      setBusy(false);
+    }
+  }
+
+  async function selectYouTubeResource(resourceId: string) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      await api(`/api/workspaces/${activeWorkspace.id}/connections/youtube/select`, {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({ resource_id: resourceId })
+      });
+      setToast('YouTube channel connected. Its first sync is queued.');
+      await loadWorkspaceData(activeWorkspace);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'youtube_channel_selection_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectConnection() {
+    if (!activeWorkspace || !disconnectTarget) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{
+        provider_revoke?: { attempted?: boolean; success?: boolean; outcome_category?: string };
+      }>(`/api/workspaces/${activeWorkspace.id}/connections/${disconnectTarget.provider}`, {
         method: 'DELETE',
         headers: { 'x-csrf-token': csrf },
-        body: JSON.stringify({})
+        body: JSON.stringify({ connection_id: disconnectTarget.connectionId || null })
       });
-      setToast('TikTok connection disabled locally. Provider revocation was attempted first.');
-      setDisconnectOpen(false);
+      if (disconnectTarget.provider === 'youtube') {
+        setToast(
+          result.provider_revoke?.success
+            ? 'Google access revoked and locally stored YouTube data deleted.'
+            : 'Locally stored YouTube data deleted. Google revocation did not complete; review Google Account connections.'
+        );
+      } else {
+        setToast('TikTok connection disabled locally. Provider revocation was attempted first.');
+      }
+      setDisconnectTarget(null);
       await loadWorkspaceData(activeWorkspace);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'disconnect_failed');
@@ -885,13 +1128,16 @@ function App() {
             <section className="public-section" aria-labelledby="platforms-title">
               <h2 id="platforms-title">Supported analytics sources</h2>
               <p>
-                TikTok workspace analytics and the TikTok Looker Studio connector are implemented today. Instagram
-                professional accounts, Facebook Pages, YouTube channels, and Google Analytics 4 properties remain
-                unavailable until their integrations and provider reviews are complete.
+                TikTok workspace analytics, the TikTok Looker Studio connector, and gated read-only YouTube channel
+                analytics are implemented today. Instagram professional accounts, Facebook Pages, and Google Analytics 4
+                properties remain unavailable until their integrations and provider reviews are complete.
               </p>
               <div className="platform-status" aria-label="Provider availability">
                 <span>
                   <CheckCircle2 size={16} aria-hidden /> TikTok available
+                </span>
+                <span>
+                  <CheckCircle2 size={16} aria-hidden /> YouTube gated
                 </span>
                 <span>
                   <Activity size={16} aria-hidden /> Additional sources planned
@@ -990,11 +1236,19 @@ function App() {
       <section className="workspace">
         <WorkspaceHeader
           workspace={activeWorkspace}
-          dashboard={dashboard}
+          connection={
+            view === 'overview' && overviewProvider === 'youtube'
+              ? youtubeDashboard?.connection || null
+              : dashboard?.connection || null
+          }
           busy={busy}
           accountOpen={accountOpen}
           onAccountToggle={() => setAccountOpen((open) => !open)}
-          onManualSync={manualSync}
+          onManualSync={
+            view === 'overview' && overviewProvider === 'youtube'
+              ? () => manualYouTubeSync(youtubeDashboard?.connection.id)
+              : manualSync
+          }
           onSignOut={signOut}
         />
 
@@ -1031,10 +1285,20 @@ function App() {
           </section>
         ) : activeWorkspace ? (
           <div className="content-flow">
-            <StateBanner state={state} />
+            {(view === 'overview' || view === 'content') && (
+              <StateBanner
+                state={
+                  view === 'overview' && overviewProvider === 'youtube' && state !== 'loading' && state !== 'error'
+                    ? resolveYouTubeLoadState(youtubeDashboard)
+                    : state
+                }
+              />
+            )}
             {view === 'overview' && (
               <Overview
                 dashboard={dashboard}
+                youtubeDashboard={youtubeDashboard}
+                provider={overviewProvider}
                 range={range}
                 customFrom={customFrom}
                 customTo={customTo}
@@ -1042,12 +1306,16 @@ function App() {
                 trendMetric={trendMetric}
                 topSort={topSort}
                 rangeInvalid={rangeInvalid}
+                busy={busy}
+                canSync={roleCanSync(activeWorkspace.role)}
+                onProviderChange={setOverviewProvider}
                 onRangeChange={(next) => setRange(next)}
                 onCustomFromChange={setCustomFrom}
                 onCustomToChange={setCustomTo}
                 onCompareChange={setCompare}
                 onTrendMetricChange={setTrendMetric}
                 onTopSortChange={setTopSort}
+                onYouTubeSync={() => manualYouTubeSync(youtubeDashboard?.connection.id)}
               />
             )}
             {view === 'content' && contentDetailId ? (
@@ -1085,10 +1353,13 @@ function App() {
                 dashboard={dashboard}
                 providers={providerCatalog}
                 busy={busy}
-                disconnectOpen={disconnectOpen}
-                onConnect={startConnection}
-                onDisconnectRequest={() => setDisconnectOpen(true)}
-                onDisconnectCancel={() => setDisconnectOpen(false)}
+                disconnectTarget={disconnectTarget}
+                onTikTokConnect={startConnection}
+                onYouTubeConnect={startYouTubeConnection}
+                onYouTubeSelect={selectYouTubeResource}
+                onYouTubeSync={manualYouTubeSync}
+                onDisconnectRequest={setDisconnectTarget}
+                onDisconnectCancel={() => setDisconnectTarget(null)}
                 onDisconnectConfirm={disconnectConnection}
               />
             )}
@@ -1189,7 +1460,7 @@ function Nav({ view, onChange }: { view: View; onChange: (view: View) => void })
 
 function WorkspaceHeader({
   workspace,
-  dashboard,
+  connection,
   busy,
   accountOpen,
   onAccountToggle,
@@ -1197,14 +1468,13 @@ function WorkspaceHeader({
   onSignOut
 }: {
   workspace?: Workspace;
-  dashboard: DashboardData | null;
+  connection: ProviderConnection | DashboardData['connection'] | null;
   busy: boolean;
   accountOpen: boolean;
   onAccountToggle: () => void;
   onManualSync: () => void;
   onSignOut: () => void;
 }) {
-  const connection = dashboard?.connection;
   const canSync = workspace && roleCanSync(workspace.role) && connection?.status === 'active';
   return (
     <header className="topbar">
@@ -1259,7 +1529,7 @@ function StateBanner({ state }: { state: LoadState }) {
     empty: {
       icon: AlertCircle,
       title: 'No provider data',
-      text: 'Connect TikTok or use labeled local demo data to populate this workspace.'
+      text: 'Connect a supported provider or use labeled local demo data to populate this workspace.'
     },
     stale: { icon: CalendarDays, title: 'Stale data', text: 'Last successful sync is outside the freshness window.' },
     partial: {
@@ -1290,6 +1560,8 @@ function StateBanner({ state }: { state: LoadState }) {
 
 function Overview({
   dashboard,
+  youtubeDashboard,
+  provider,
   range,
   customFrom,
   customTo,
@@ -1297,14 +1569,20 @@ function Overview({
   trendMetric,
   topSort,
   rangeInvalid,
+  busy,
+  canSync,
+  onProviderChange,
   onRangeChange,
   onCustomFromChange,
   onCustomToChange,
   onCompareChange,
   onTrendMetricChange,
-  onTopSortChange
+  onTopSortChange,
+  onYouTubeSync
 }: {
   dashboard: DashboardData | null;
+  youtubeDashboard: YouTubeDashboardData | null;
+  provider: OverviewProvider;
   range: RangeKey;
   customFrom: string;
   customTo: string;
@@ -1312,12 +1590,16 @@ function Overview({
   trendMetric: string;
   topSort: ContentSort;
   rangeInvalid: string;
+  busy: boolean;
+  canSync: boolean;
+  onProviderChange: (provider: OverviewProvider) => void;
   onRangeChange: (range: RangeKey) => void;
   onCustomFromChange: (value: string) => void;
   onCustomToChange: (value: string) => void;
   onCompareChange: (value: boolean) => void;
   onTrendMetricChange: (value: string) => void;
   onTopSortChange: (value: ContentSort) => void;
+  onYouTubeSync: () => void;
 }) {
   const metrics =
     dashboard?.metrics ||
@@ -1335,6 +1617,30 @@ function Overview({
   }));
   return (
     <>
+      <section className="source-switcher" aria-labelledby="source-title">
+        <div>
+          <p className="eyebrow">Data source</p>
+          <h2 id="source-title">Channel performance</h2>
+        </div>
+        <div className="segmented" aria-label="Overview provider">
+          <button
+            type="button"
+            className={provider === 'tiktok' ? 'active' : ''}
+            aria-pressed={provider === 'tiktok'}
+            onClick={() => onProviderChange('tiktok')}
+          >
+            <Video size={17} aria-hidden /> TikTok
+          </button>
+          <button
+            type="button"
+            className={provider === 'youtube' ? 'active' : ''}
+            aria-pressed={provider === 'youtube'}
+            onClick={() => onProviderChange('youtube')}
+          >
+            <Youtube size={17} aria-hidden /> YouTube
+          </button>
+        </div>
+      </section>
       <section className="control-bar" aria-labelledby="date-controls-title">
         <h2 id="date-controls-title" className="sr-only">
           Date and comparison controls
@@ -1383,126 +1689,390 @@ function Overview({
         {rangeInvalid && <p className="form-error">{rangeInvalid}</p>}
       </section>
 
-      <section className="metric-grid" aria-label="Summary metrics">
-        {metrics.map((metric) => (
-          <MetricCard key={metric.key} metric={metric} compare={compare} />
-        ))}
+      {provider === 'youtube' ? (
+        <YouTubeOverview
+          dashboard={youtubeDashboard}
+          compare={compare}
+          busy={busy}
+          canSync={canSync}
+          onSync={onYouTubeSync}
+        />
+      ) : (
+        <>
+          <section className="metric-grid" aria-label="Summary metrics">
+            {metrics.map((metric) => (
+              <MetricCard key={metric.key} metric={metric} compare={compare} />
+            ))}
+          </section>
+
+          <section className="panel chart-panel" aria-labelledby="trend-title">
+            <div className="panel-title between">
+              <div>
+                <h2 id="trend-title">Trend</h2>
+                <p>Followers and total likes over the selected range.</p>
+              </div>
+              <select
+                aria-label="Trend metric"
+                value={trendMetric}
+                onChange={(event) => onTrendMetricChange(event.target.value)}
+              >
+                <option value="both">Followers and likes</option>
+                <option value="followers">Followers</option>
+                <option value="likes">Total likes</option>
+              </select>
+            </div>
+            {trendData.length > 1 ? (
+              <>
+                <div className="chart-box" role="img" aria-label="Line chart of followers and total likes over time">
+                  <ResponsiveContainer width="100%" height={300}>
+                    <LineChart data={trendData} margin={{ top: 12, right: 24, bottom: 12, left: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="label" minTickGap={24} />
+                      <YAxis yAxisId="followers" tickFormatter={formatCompact} />
+                      <YAxis yAxisId="likes" orientation="right" tickFormatter={formatCompact} />
+                      <Tooltip formatter={formatTooltipNumber} labelFormatter={(label) => `Observed ${label}`} />
+                      <Legend />
+                      {(trendMetric === 'both' || trendMetric === 'followers') && (
+                        <Line
+                          yAxisId="followers"
+                          type="monotone"
+                          dataKey="follower_count"
+                          name="Followers"
+                          stroke="var(--chart-a)"
+                          strokeWidth={2.5}
+                          dot={false}
+                          connectNulls
+                        />
+                      )}
+                      {(trendMetric === 'both' || trendMetric === 'likes') && (
+                        <Line
+                          yAxisId="likes"
+                          type="monotone"
+                          dataKey="likes_count"
+                          name="Total likes"
+                          stroke="var(--chart-b)"
+                          strokeWidth={2.5}
+                          dot={false}
+                          connectNulls
+                        />
+                      )}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <ChartSummary trend={dashboard?.trend || []} />
+              </>
+            ) : (
+              <div className="chart-empty">
+                {trendData.length === 1
+                  ? 'One snapshot is available. More points are needed for a trend line.'
+                  : 'No profile snapshots stored for the selected range.'}
+              </div>
+            )}
+          </section>
+
+          <section className="panel chart-panel" aria-labelledby="top-content-title">
+            <div className="panel-title between">
+              <div>
+                <h2 id="top-content-title">Top content</h2>
+                <p>Ranked by selected metric. Missing metrics remain visibly unavailable.</p>
+              </div>
+              <select
+                aria-label="Top content metric"
+                value={topSort}
+                onChange={(event) => onTopSortChange(event.target.value as ContentSort)}
+              >
+                <option value="views">Views</option>
+                <option value="likes">Likes</option>
+                <option value="comments">Comments</option>
+                <option value="shares">Shares</option>
+                <option value="engagement">Engagement rate</option>
+              </select>
+            </div>
+            {dashboard?.top_content.length ? (
+              <div
+                className="chart-box"
+                role="img"
+                aria-label={`Bar chart of top content by ${contentSortLabels[topSort]}`}
+              >
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart
+                    data={dashboard.top_content.map((row) => ({
+                      name: contentLabel(row),
+                      value: topSort === 'engagement' ? row.engagement_rate : metricForSort(row, topSort)
+                    }))}
+                    layout="vertical"
+                    margin={{ top: 8, right: 24, bottom: 8, left: 24 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis
+                      type="number"
+                      tickFormatter={topSort === 'engagement' ? (value) => `${value}%` : formatCompact}
+                    />
+                    <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 12 }} />
+                    <Tooltip formatter={topSort === 'engagement' ? formatTooltipPercent : formatTooltipNumber} />
+                    <Bar
+                      dataKey="value"
+                      name={contentSortLabels[topSort]}
+                      fill="var(--chart-c)"
+                      radius={[0, 4, 4, 0]}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="chart-empty">No content matches this range.</div>
+            )}
+          </section>
+        </>
+      )}
+    </>
+  );
+}
+
+function YouTubeOverview({
+  dashboard,
+  compare,
+  busy,
+  canSync,
+  onSync
+}: {
+  dashboard: YouTubeDashboardData | null;
+  compare: boolean;
+  busy: boolean;
+  canSync: boolean;
+  onSync: () => void;
+}) {
+  const trend = (dashboard?.trend || []).map((point) => ({
+    ...point,
+    label: formatDate(point.date, { month: 'short', day: 'numeric' })
+  }));
+  const connected = dashboard?.connection.status === 'active';
+  const delayed = dashboard?.availability.state === 'delayed';
+
+  return (
+    <>
+      <section className="panel youtube-channel" aria-labelledby="youtube-channel-title">
+        <div className="channel-identity">
+          {dashboard?.channel?.thumbnail_url ? (
+            <img src={dashboard.channel.thumbnail_url} alt="" referrerPolicy="no-referrer" />
+          ) : (
+            <span className="channel-placeholder" aria-hidden>
+              <Youtube size={24} />
+            </span>
+          )}
+          <div>
+            <p className="eyebrow">YouTube channel</p>
+            <h2 id="youtube-channel-title">{dashboard?.channel?.display_name || 'No channel connected'}</h2>
+            <p className="muted">
+              {connected
+                ? `Last synced ${formatDate(dashboard?.connection.last_successful_sync_at)}`
+                : 'Choose an authorized channel in Connections to begin syncing.'}
+            </p>
+          </div>
+        </div>
+        <div className="button-row">
+          <StatusBadge status={dashboard?.connection.status || 'disconnected'} />
+          <button type="button" onClick={onSync} disabled={!connected || !canSync || busy}>
+            <RefreshCw className={busy ? 'spin' : ''} size={18} aria-hidden /> Sync now
+          </button>
+        </div>
       </section>
 
-      <section className="panel chart-panel" aria-labelledby="trend-title">
+      {delayed && (
+        <p className="notice" role="status">
+          YouTube reporting is available through{' '}
+          {dashboard?.availability.data_through_date
+            ? formatDate(dashboard.availability.data_through_date, { dateStyle: 'medium' })
+            : 'an earlier date'}
+          . The requested range ends{' '}
+          {formatDate(dashboard?.availability.requested_through_date, { dateStyle: 'medium' })}.
+        </p>
+      )}
+
+      <section className="metric-grid youtube-metrics" aria-label="YouTube summary metrics">
+        {(dashboard?.metrics || []).map((metric) => (
+          <YouTubeMetricCard key={metric.key} metric={metric} compare={compare} />
+        ))}
+        {!dashboard?.metrics.length &&
+          ['Subscribers', 'Channel views', 'Videos', 'Views', 'Watch time', 'Net subscribers'].map((label) => (
+            <article key={label} className="metric-card unavailable">
+              <span>{label}</span>
+              <strong>N/A</strong>
+              <small>No stored snapshot</small>
+            </article>
+          ))}
+      </section>
+
+      <section className="panel chart-panel" aria-labelledby="youtube-performance-title">
         <div className="panel-title between">
           <div>
-            <h2 id="trend-title">Trend</h2>
-            <p>Followers and total likes over the selected range.</p>
+            <h2 id="youtube-performance-title">Views and watch time</h2>
+            <p>Daily values reported by YouTube Analytics for the selected range.</p>
           </div>
-          <select
-            aria-label="Trend metric"
-            value={trendMetric}
-            onChange={(event) => onTrendMetricChange(event.target.value)}
-          >
-            <option value="both">Followers and likes</option>
-            <option value="followers">Followers</option>
-            <option value="likes">Total likes</option>
-          </select>
+          <span className="muted">
+            Data through {formatDate(dashboard?.availability.data_through_date, { dateStyle: 'medium' })}
+          </span>
         </div>
-        {trendData.length > 1 ? (
-          <>
-            <div className="chart-box" role="img" aria-label="Line chart of followers and total likes over time">
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={trendData} margin={{ top: 12, right: 24, bottom: 12, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="label" minTickGap={24} />
-                  <YAxis yAxisId="followers" tickFormatter={formatCompact} />
-                  <YAxis yAxisId="likes" orientation="right" tickFormatter={formatCompact} />
-                  <Tooltip formatter={formatTooltipNumber} labelFormatter={(label) => `Observed ${label}`} />
-                  <Legend />
-                  {(trendMetric === 'both' || trendMetric === 'followers') && (
-                    <Line
-                      yAxisId="followers"
-                      type="monotone"
-                      dataKey="follower_count"
-                      name="Followers"
-                      stroke="var(--chart-a)"
-                      strokeWidth={2.5}
-                      dot={false}
-                      connectNulls
-                    />
-                  )}
-                  {(trendMetric === 'both' || trendMetric === 'likes') && (
-                    <Line
-                      yAxisId="likes"
-                      type="monotone"
-                      dataKey="likes_count"
-                      name="Total likes"
-                      stroke="var(--chart-b)"
-                      strokeWidth={2.5}
-                      dot={false}
-                      connectNulls
-                    />
-                  )}
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-            <ChartSummary trend={dashboard?.trend || []} />
-          </>
-        ) : (
-          <div className="chart-empty">
-            {trendData.length === 1
-              ? 'One snapshot is available. More points are needed for a trend line.'
-              : 'No profile snapshots stored for the selected range.'}
+        {trend.length > 0 ? (
+          <div className="chart-box" role="img" aria-label="Line chart of daily YouTube views and watch time">
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={trend} margin={{ top: 12, right: 24, bottom: 12, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="label" minTickGap={24} />
+                <YAxis yAxisId="views" tickFormatter={formatCompact} />
+                <YAxis yAxisId="watch" orientation="right" tickFormatter={formatCompact} />
+                <Tooltip formatter={formatTooltipNumber} />
+                <Legend />
+                <Line
+                  yAxisId="views"
+                  type="monotone"
+                  dataKey="views"
+                  name="Views"
+                  stroke="var(--chart-a)"
+                  strokeWidth={2.5}
+                  dot={false}
+                  connectNulls
+                />
+                <Line
+                  yAxisId="watch"
+                  type="monotone"
+                  dataKey="watch_time_minutes"
+                  name="Watch time (minutes)"
+                  stroke="var(--chart-b)"
+                  strokeWidth={2.5}
+                  dot={false}
+                  connectNulls
+                />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
+        ) : (
+          <div className="chart-empty">No daily YouTube Analytics rows are stored for this range.</div>
         )}
       </section>
 
-      <section className="panel chart-panel" aria-labelledby="top-content-title">
-        <div className="panel-title between">
+      <section className="panel chart-panel" aria-labelledby="youtube-subscribers-title">
+        <div className="panel-title">
           <div>
-            <h2 id="top-content-title">Top content</h2>
-            <p>Ranked by selected metric. Missing metrics remain visibly unavailable.</p>
+            <h2 id="youtube-subscribers-title">Subscriber movement</h2>
+            <p>Daily subscribers gained, lost, and net change.</p>
           </div>
-          <select
-            aria-label="Top content metric"
-            value={topSort}
-            onChange={(event) => onTopSortChange(event.target.value as ContentSort)}
-          >
-            <option value="views">Views</option>
-            <option value="likes">Likes</option>
-            <option value="comments">Comments</option>
-            <option value="shares">Shares</option>
-            <option value="engagement">Engagement rate</option>
-          </select>
         </div>
-        {dashboard?.top_content.length ? (
-          <div
-            className="chart-box"
-            role="img"
-            aria-label={`Bar chart of top content by ${contentSortLabels[topSort]}`}
-          >
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart
-                data={dashboard.top_content.map((row) => ({
-                  name: contentLabel(row),
-                  value: topSort === 'engagement' ? row.engagement_rate : metricForSort(row, topSort)
-                }))}
-                layout="vertical"
-                margin={{ top: 8, right: 24, bottom: 8, left: 24 }}
-              >
+        {trend.length > 0 ? (
+          <div className="chart-box" role="img" aria-label="Bar chart of daily YouTube subscriber movement">
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart data={trend} margin={{ top: 12, right: 24, bottom: 12, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" />
-                <XAxis
-                  type="number"
-                  tickFormatter={topSort === 'engagement' ? (value) => `${value}%` : formatCompact}
-                />
-                <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 12 }} />
-                <Tooltip formatter={topSort === 'engagement' ? formatTooltipPercent : formatTooltipNumber} />
-                <Bar dataKey="value" name={contentSortLabels[topSort]} fill="var(--chart-c)" radius={[0, 4, 4, 0]} />
+                <XAxis dataKey="label" minTickGap={24} />
+                <YAxis tickFormatter={formatCompact} />
+                <Tooltip formatter={formatTooltipNumber} />
+                <Legend />
+                <Bar dataKey="subscribers_gained" name="Gained" fill="var(--chart-a)" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="subscribers_lost" name="Lost" fill="var(--red)" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="net_subscribers" name="Net" fill="var(--chart-c)" radius={[3, 3, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
         ) : (
-          <div className="chart-empty">No content matches this range.</div>
+          <div className="chart-empty">No subscriber movement is available for this range.</div>
+        )}
+      </section>
+
+      <section className="panel" aria-labelledby="youtube-content-title">
+        <div className="panel-title between">
+          <div>
+            <h2 id="youtube-content-title">Video performance</h2>
+            <p>Period metrics from YouTube Analytics. Missing values remain N/A.</p>
+          </div>
+          {dashboard?.range.videoPeriodKey && <StatusBadge status={dashboard.range.videoPeriodKey} />}
+        </div>
+        {!dashboard?.availability.video_period_supported ? (
+          <div className="table-empty">Video-level breakdowns are available for the 7, 30, and 90 day ranges.</div>
+        ) : dashboard.content.length > 0 ? (
+          <div className="table-wrap youtube-content-table">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Video</th>
+                  <th scope="col">Views</th>
+                  <th scope="col">Watch time</th>
+                  <th scope="col">Avg. duration</th>
+                  <th scope="col">Avg. viewed</th>
+                  <th scope="col">Likes</th>
+                  <th scope="col">Comments</th>
+                  <th scope="col">Shares</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dashboard.content.map((row) => (
+                  <tr key={row.id}>
+                    <td data-label="Video">
+                      <div className="youtube-video-cell">
+                        {row.thumbnail_url ? (
+                          <img src={row.thumbnail_url} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                        ) : null}
+                        <div>
+                          {row.share_url ? (
+                            <a href={row.share_url} target="_blank" rel="noreferrer">
+                              {row.title || row.provider_content_id} <ExternalLink size={14} aria-hidden />
+                            </a>
+                          ) : (
+                            <strong>{row.title || row.provider_content_id}</strong>
+                          )}
+                          <small>{formatDate(row.published_at, { dateStyle: 'medium' })}</small>
+                        </div>
+                      </div>
+                    </td>
+                    <td data-label="Views">{formatNumber(row.views)}</td>
+                    <td data-label="Watch time">{formatMinutes(row.watch_time_minutes)}</td>
+                    <td data-label="Avg. duration">{formatSeconds(row.average_view_duration_seconds)}</td>
+                    <td data-label="Avg. viewed">{formatPercent(row.average_view_percentage)}</td>
+                    <td data-label="Likes">{formatNumber(row.likes)}</td>
+                    <td data-label="Comments">{formatNumber(row.comments)}</td>
+                    <td data-label="Shares">{formatNumber(row.shares)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="table-empty">No video Analytics rows are stored for this period.</div>
         )}
       </section>
     </>
+  );
+}
+
+function YouTubeMetricCard({ metric, compare }: { metric: YouTubeMetric; compare: boolean }) {
+  const hasPeriodComparison = metric.semantics.startsWith('selected_period');
+  const direction = !metric.available
+    ? 'unavailable'
+    : hasPeriodComparison && metric.delta !== null
+      ? metric.delta > 0
+        ? 'positive'
+        : metric.delta < 0
+          ? 'negative'
+          : 'neutral'
+      : 'neutral';
+  const value = metric.key === 'watch_time_period' ? formatMinutes(metric.value) : formatNumber(metric.value);
+  return (
+    <article className={`metric-card ${direction}`}>
+      <span>{metric.label}</span>
+      <strong>{value}</strong>
+      <small>
+        {!metric.available
+          ? 'Unavailable from YouTube'
+          : !compare
+            ? 'Comparison hidden'
+            : !hasPeriodComparison
+              ? metric.semantics === 'lifetime'
+                ? 'Lifetime total'
+                : 'Current snapshot'
+              : metric.delta === null
+                ? 'Previous period unavailable'
+                : `${metric.delta >= 0 ? '+' : ''}${metric.key === 'watch_time_period' ? formatMinutes(metric.delta) : formatNumber(metric.delta)}${metric.percent_change === null ? ' (percent N/A)' : ` (${metric.percent_change.toFixed(1)}%)`}`}
+      </small>
+    </article>
   );
 }
 
@@ -1835,8 +2405,11 @@ function Connections({
   dashboard,
   providers,
   busy,
-  disconnectOpen,
-  onConnect,
+  disconnectTarget,
+  onTikTokConnect,
+  onYouTubeConnect,
+  onYouTubeSelect,
+  onYouTubeSync,
   onDisconnectRequest,
   onDisconnectCancel,
   onDisconnectConfirm
@@ -1845,34 +2418,43 @@ function Connections({
   dashboard: DashboardData | null;
   providers: ProviderCatalogItem[];
   busy: boolean;
-  disconnectOpen: boolean;
-  onConnect: () => void;
-  onDisconnectRequest: () => void;
+  disconnectTarget: DisconnectTarget | null;
+  onTikTokConnect: () => void;
+  onYouTubeConnect: (connectionId?: string) => void;
+  onYouTubeSelect: (resourceId: string) => void;
+  onYouTubeSync: (connectionId?: string) => void;
+  onDisconnectRequest: (target: DisconnectTarget) => void;
   onDisconnectCancel: () => void;
   onDisconnectConfirm: () => void;
 }) {
   const allowed = roleCanManage(role);
-  const status = dashboard?.connection.status || 'disconnected';
   const latestError = dashboard?.latest_sync?.error_category;
   const catalog = providers.length > 0 ? providers : [];
   return (
     <section className="panel" aria-labelledby="connection-title">
-      <div className="panel-title between">
+      <div className="panel-title">
         <div>
           <h2 id="connection-title">Provider connections</h2>
           <p>Provider credentials are stored only on the server and are never shown here.</p>
         </div>
-        <StatusBadge status={status} />
       </div>
       <div className="provider-list">
         {catalog.map((provider) => {
           const providerStatus = provider.connection?.status || provider.status;
           const isTikTok = provider.id === 'tiktok';
-          const canConnect = allowed && provider.connectable && isTikTok;
+          const isYouTube = provider.id === 'youtube';
+          const canConnect = allowed && provider.connectable;
           const canDisconnect = allowed && isTikTok && provider.connection?.status !== 'disconnected';
+          const youtubeConnections = provider.connections || [];
+          const unselectedResources = (provider.resources || []).filter((resource) => !resource.selected);
+          const grantedScopes = (provider.authorization?.scopes || [])
+            .filter((scope) => scope.status === 'granted')
+            .map((scope) => scope.scope);
+          const canStartYouTube =
+            isYouTube && canConnect && (!provider.authorization || (provider.resources || []).length === 0);
           return (
             <article key={provider.id} className="provider-row">
-              <div>
+              <div className="provider-main">
                 <div className="provider-heading">
                   <strong>{provider.name}</strong>
                   <StatusBadge status={providerStatus} />
@@ -1886,30 +2468,185 @@ function Connections({
                       provider.connection.account.id}
                   </p>
                 )}
-                {provider.connection?.reconnect_reason && (
+                {provider.connection?.reconnect_reason && !isYouTube && (
                   <p className="notice error">{provider.connection.reconnect_reason}</p>
                 )}
                 {!provider.implemented && (
                   <p className="muted">Feature-flagged until the complete provider slice and review evidence exist.</p>
                 )}
+                {isYouTube &&
+                  provider.configuration?.warnings.map((warning) => (
+                    <p key={warning} className="notice error">
+                      Configuration: {warning.replaceAll('_', ' ')}
+                    </p>
+                  ))}
+                {isYouTube && provider.status === 'no_channels' && (
+                  <p className="notice">Google returned no channels accessible to this authorization.</p>
+                )}
+                {isYouTube && provider.status === 'authorization_denied' && (
+                  <p className="notice">Authorization was cancelled. No YouTube data was accessed.</p>
+                )}
+                {isYouTube && provider.status === 'missing_scopes' && (
+                  <p className="notice error">
+                    Google did not return the exact approved YouTube read-only permission set.
+                    {(provider.authorization?.missing_scopes || []).length > 0 && (
+                      <> Missing: {(provider.authorization?.missing_scopes || []).join(', ')}</>
+                    )}
+                  </p>
+                )}
+                {isYouTube && provider.status === 'provider_error' && (
+                  <p className="notice error">The latest authorization attempt failed at Google or YouTube.</p>
+                )}
                 {isTikTok && latestError === 'scope' && (
                   <p className="notice error">The latest sync reported a missing provider scope.</p>
                 )}
                 <div className="scope-list" aria-label={`${provider.name} requested scopes`}>
-                  {provider.requestedScopes.map((scope) => (
-                    <span key={scope.name}>{scope.name}</span>
+                  {(isYouTube && provider.authorization
+                    ? grantedScopes
+                    : provider.requestedScopes.map((scope) => scope.name)
+                  ).map((scope) => (
+                    <span key={scope}>{isYouTube && provider.authorization ? `Granted: ${scope}` : scope}</span>
                   ))}
                 </div>
+                {isYouTube && provider.authorization && grantedScopes.length === 0 && (
+                  <p className="muted">No YouTube product scope is currently granted.</p>
+                )}
+
+                {isYouTube && unselectedResources.length > 0 && (
+                  <div className="resource-list" aria-label="YouTube channels available to connect">
+                    <h3>Available channels</h3>
+                    {unselectedResources.map((resource) => (
+                      <div key={resource.id} className="resource-row">
+                        <div className="channel-identity compact">
+                          {resource.thumbnail_url ? (
+                            <img src={resource.thumbnail_url} alt="" referrerPolicy="no-referrer" />
+                          ) : (
+                            <span className="channel-placeholder" aria-hidden>
+                              <Youtube size={18} />
+                            </span>
+                          )}
+                          <div>
+                            <strong>{resource.display_name}</strong>
+                            <small>{resource.provider_resource_id}</small>
+                            {Boolean(resource.attached_elsewhere_count) && (
+                              <small>
+                                Also connected in {resource.attached_elsewhere_count}{' '}
+                                {resource.attached_elsewhere_count === 1 ? 'workspace' : 'workspaces'} you can access
+                              </small>
+                            )}
+                          </div>
+                        </div>
+                        <button type="button" onClick={() => onYouTubeSelect(resource.id)} disabled={!allowed || busy}>
+                          <Link2 size={17} aria-hidden /> Select
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {isYouTube && youtubeConnections.length > 0 && (
+                  <div className="resource-list" aria-label="Connected YouTube channels">
+                    <h3>Connected channels</h3>
+                    {youtubeConnections.map((connection) => (
+                      <div key={connection.id || connection.account?.id} className="resource-row connection-resource">
+                        <div className="channel-identity compact">
+                          {connection.account?.thumbnail_url ? (
+                            <img src={connection.account.thumbnail_url} alt="" referrerPolicy="no-referrer" />
+                          ) : (
+                            <span className="channel-placeholder" aria-hidden>
+                              <Youtube size={18} />
+                            </span>
+                          )}
+                          <div>
+                            <strong>
+                              {connection.account?.display_name || connection.account?.id || 'YouTube channel'}
+                            </strong>
+                            <small>
+                              Last sync {formatDate(connection.last_successful_sync_at)}; data through{' '}
+                              {formatDate(connection.data_through_at, { dateStyle: 'medium' })}
+                            </small>
+                            {connection.reconnect_reason && (
+                              <small className="notice error">
+                                {connection.reconnect_reason.startsWith('quota:')
+                                  ? 'YouTube quota is currently exhausted; the stored dashboard remains available.'
+                                  : connection.reconnect_reason.startsWith('provider:') ||
+                                      connection.reconnect_reason.startsWith('timeout:') ||
+                                      connection.reconnect_reason.startsWith('network:')
+                                    ? 'YouTube is delayed; synchronization will retry within its bounded schedule.'
+                                    : 'This channel needs YouTube authorization before synchronization can resume.'}
+                              </small>
+                            )}
+                            <div className="capability-list" aria-label="Channel capabilities">
+                              {(connection.capabilities || []).map((capability) => (
+                                <span
+                                  key={capability.key}
+                                  className={capability.status === 'available' ? '' : 'delayed'}
+                                >
+                                  {capability.key.replaceAll('_', ' ')}: {capability.status}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="button-row">
+                          <StatusBadge status={connection.status} />
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            disabled={!roleCanSync(role) || connection.status !== 'active' || busy}
+                            onClick={() => onYouTubeSync(connection.id)}
+                            title="Sync this YouTube channel"
+                          >
+                            <RefreshCw size={17} aria-hidden /> Sync
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!canConnect || busy}
+                            onClick={() => onYouTubeConnect(connection.id)}
+                          >
+                            <ExternalLink size={17} aria-hidden /> Reauthorize
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="button-row">
                 {isTikTok ? (
                   <>
-                    <button type="button" disabled={!canConnect || busy} onClick={onConnect}>
+                    <button type="button" disabled={!canConnect || busy} onClick={onTikTokConnect}>
                       <ExternalLink size={18} aria-hidden />{' '}
                       {provider.connection?.status === 'disconnected' ? 'Connect' : 'Reconnect'}
                     </button>
-                    <button type="button" disabled={!canDisconnect || busy} onClick={onDisconnectRequest}>
-                      <Lock size={18} aria-hidden /> Disconnect
+                    <button
+                      type="button"
+                      disabled={!canDisconnect || busy}
+                      onClick={() => onDisconnectRequest({ provider: 'tiktok', label: 'TikTok' })}
+                    >
+                      <Unplug size={18} aria-hidden /> Disconnect
+                    </button>
+                  </>
+                ) : isYouTube ? (
+                  <>
+                    <button type="button" disabled={!canStartYouTube || busy} onClick={() => onYouTubeConnect()}>
+                      <ExternalLink size={18} aria-hidden />{' '}
+                      {provider.status === 'missing_scopes' ||
+                      provider.status === 'authorization_denied' ||
+                      provider.status === 'provider_error'
+                        ? 'Authorize again'
+                        : provider.status === 'authorizing'
+                          ? 'Restart authorization'
+                          : 'Connect YouTube'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        !allowed || !provider.authorization || provider.authorization.status === 'revoked' || busy
+                      }
+                      onClick={() => onDisconnectRequest({ provider: 'youtube', label: 'YouTube' })}
+                    >
+                      <Unplug size={18} aria-hidden /> Disconnect
                     </button>
                   </>
                 ) : (
@@ -1924,14 +2661,21 @@ function Connections({
         {catalog.length === 0 && <div className="table-empty">Provider catalog unavailable.</div>}
       </div>
       {!allowed && <p className="muted">Connection management requires owner or admin access.</p>}
-      {disconnectOpen && (
+      {disconnectTarget && (
         <div className="dialog-backdrop" role="presentation">
           <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="disconnect-title">
-            <h3 id="disconnect-title">Disconnect TikTok?</h3>
-            <p>
-              This attempts provider revocation first, then disables local credentials. Existing snapshots remain in the
-              workspace.
-            </p>
+            <h3 id="disconnect-title">Disconnect {disconnectTarget.label}?</h3>
+            {disconnectTarget.provider === 'youtube' ? (
+              <p>
+                This attempts Google revocation first, then immediately deletes stored credentials, discovered channels,
+                and all YouTube snapshots tied to the authorization from this workspace even if revocation fails.
+              </p>
+            ) : (
+              <p>
+                This attempts provider revocation first, then disables local credentials. Existing snapshots remain in
+                the workspace.
+              </p>
+            )}
             <div className="dialog-actions">
               <button type="button" onClick={onDisconnectCancel}>
                 Cancel

@@ -453,5 +453,6 @@ async function disconnectTikTok(userId, workspaceId) {
 module.exports = {
   completeTikTokConnection,
   disconnectTikTok,
+  normalizeReturnPath,
   startTikTokConnection
 };

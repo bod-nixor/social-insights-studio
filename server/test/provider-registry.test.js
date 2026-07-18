@@ -28,13 +28,13 @@ test('provider catalog covers the requested production providers', () => {
   ]);
 });
 
-test('future providers stay non-connectable until their vertical slices are complete', () => {
+test('implemented providers remain gated until their runtime configuration is complete', () => {
   const providers = getPublicProviderCatalog({
     TIKTOK_CLIENT_KEY: 'key',
     TIKTOK_CLIENT_SECRET: 'secret',
     FEATURE_INSTAGRAM_CONNECTOR: '1',
     FEATURE_FACEBOOK_PAGES_CONNECTOR: '1',
-    FEATURE_YOUTUBE_CONNECTOR: '1',
+    YOUTUBE_ENABLED: '1',
     FEATURE_GA4_CONNECTOR: '1'
   });
   const byId = Object.fromEntries(providers.map(provider => [provider.id, provider]));
@@ -42,9 +42,22 @@ test('future providers stay non-connectable until their vertical slices are comp
   assert.equal(byId.tiktok.implemented, true);
   assert.equal(byId.instagram.implemented, false);
   assert.equal(byId.facebook_pages.implemented, false);
-  assert.equal(byId.youtube.implemented, false);
+  assert.equal(byId.youtube.implemented, true);
+  assert.equal(byId.youtube.status, 'configuration_required');
   assert.equal(byId.google_analytics_4.implemented, false);
   assert.equal(providers.every(provider => provider.connectable === false), true);
+});
+
+test('YouTube uses only the approved read-only scope pair and is disabled by default', () => {
+  const disabled = getPublicProviderCatalog({}).find(provider => provider.id === 'youtube');
+  const enabled = getProviderCatalog({ YOUTUBE_ENABLED: 'true' }).find(provider => provider.id === 'youtube');
+
+  assert.equal(disabled.enabled, false);
+  assert.equal(disabled.status, 'disabled');
+  assert.deepEqual(enabled.requestedScopes.map(scope => scope.name), [
+    'https://www.googleapis.com/auth/youtube.readonly',
+    'https://www.googleapis.com/auth/yt-analytics.readonly'
+  ]);
 });
 
 test('provider catalog does not include write, ads, upload, messaging, or monetary scopes', () => {
@@ -64,7 +77,7 @@ test('provider catalog does not include write, ads, upload, messaging, or moneta
   const publicCatalog = getPublicProviderCatalog({
     FEATURE_INSTAGRAM_CONNECTOR: '1',
     FEATURE_FACEBOOK_PAGES_CONNECTOR: '1',
-    FEATURE_YOUTUBE_CONNECTOR: '1',
+    YOUTUBE_ENABLED: '1',
     FEATURE_GA4_CONNECTOR: '1'
   });
 

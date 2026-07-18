@@ -104,11 +104,12 @@ async function getDashboard(userId, workspaceId, query = {}) {
       [workspaceId, range.from, range.to]
     );
     const syncRows = await connection.query(
-      `SELECT id, trigger_type, status, started_at, finished_at, duration_ms,
-              profile_count, content_seen_count, content_snapshot_count
-       FROM sync_runs
-       WHERE workspace_id = ?
-       ORDER BY started_at DESC LIMIT 1`,
+      `SELECT sr.id, sr.trigger_type, sr.status, sr.started_at, sr.finished_at, sr.duration_ms,
+              sr.profile_count, sr.content_seen_count, sr.content_snapshot_count
+       FROM sync_runs sr
+       JOIN data_sources ds ON ds.id = sr.data_source_id
+       WHERE sr.workspace_id = ? AND ds.provider = 'tiktok'
+       ORDER BY sr.started_at DESC LIMIT 1`,
       [workspaceId]
     );
     const topContent = await queryContentRows(connection, workspaceId, {
@@ -166,8 +167,9 @@ async function queryContentRows(connection, workspaceId, options = {}) {
   const offset = Math.max(Number(options.offset || 0), 0);
   const sortColumn = SORT_COLUMNS[options.sort] || SORT_COLUMNS.views;
   const direction = String(options.direction || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-  const where = ['ci.workspace_id = ?', 'ci.deleted_at IS NULL'];
-  const params = [workspaceId];
+  const provider = options.provider === 'youtube' ? 'youtube' : 'tiktok';
+  const where = ['ci.workspace_id = ?', 'ds.provider = ?', 'ci.deleted_at IS NULL'];
+  const params = [workspaceId, provider];
   if (options.from) {
     where.push('(ci.published_at IS NULL OR ci.published_at >= ?)');
     params.push(options.from);
@@ -188,6 +190,7 @@ async function queryContentRows(connection, workspaceId, options = {}) {
             latest.observed_at, latest.view_count, latest.like_count,
             latest.comment_count, latest.share_count
      FROM content_items ci
+     JOIN data_sources ds ON ds.id = ci.data_source_id
      LEFT JOIN (
        SELECT cms.*
        FROM content_metric_snapshots cms
@@ -206,6 +209,7 @@ async function queryContentRows(connection, workspaceId, options = {}) {
   const countRows = await connection.query(
     `SELECT COUNT(*) AS count
      FROM content_items ci
+     JOIN data_sources ds ON ds.id = ci.data_source_id
      WHERE ${where.join(' AND ')}`,
     params
   );
@@ -263,9 +267,11 @@ async function getContentDetail(userId, workspaceId, contentItemId) {
   return withConnection(async connection => {
     await requireWorkspaceCapability(connection, workspaceId, userId, 'viewDashboard');
     const rows = await connection.query(
-      `SELECT *
-       FROM content_items
-       WHERE id = ? AND workspace_id = ? AND deleted_at IS NULL
+      `SELECT ci.*
+       FROM content_items ci
+       JOIN data_sources ds ON ds.id = ci.data_source_id
+       WHERE ci.id = ? AND ci.workspace_id = ? AND ci.deleted_at IS NULL
+         AND ds.provider = 'tiktok'
        LIMIT 1`,
       [contentItemId, workspaceId]
     );

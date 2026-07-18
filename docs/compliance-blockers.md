@@ -1,6 +1,6 @@
 # Compliance And Submission Blockers
 
-Date: 2026-07-17
+Date: 2026-07-18
 
 These facts must be supplied or verified before provider review submissions or public claims that depend on them.
 
@@ -30,5 +30,5 @@ These facts must be supplied or verified before provider review submissions or p
 - TikTok connector and dashboard: source-ready after repository validation passes; live status still depends on production environment verification.
 - Instagram: blocked until implementation, Meta configuration, professional test account, and review evidence exist.
 - Facebook Pages: blocked until implementation, Meta configuration, Page test resource, and review evidence exist.
-- YouTube: blocked until implementation, Google OAuth configuration, channel test resource, and verification evidence exist.
+- YouTube: source-ready behind a disabled-by-default gate; release remains blocked on Google OAuth configuration, verified-domain consent-screen setup, an eligible channel test resource, legal approval, and verification evidence.
 - Website Analytics: blocked until implementation, Google OAuth configuration, GA4 test property, and verification evidence exist.

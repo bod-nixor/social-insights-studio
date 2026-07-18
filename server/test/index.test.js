@@ -61,6 +61,7 @@ const {
 } = require('../integrations/tiktok');
 const { closePool } = require('../database');
 const { normalizeEmail, parseCookies, serializeCookie } = require('../platform/security');
+const { getYouTubeProductionErrors } = require('../platform/youtube-config');
 
 after(async () => {
   setFetchImplementation(null);
@@ -390,6 +391,37 @@ test('production environment validation rejects unsafe staging values', () => {
   };
 
   assert.doesNotThrow(() => validateRequiredEnv(validProductionEnv));
+  const validYouTubeEnv = {
+    ...validProductionEnv,
+    YOUTUBE_ENABLED: 'true',
+    YOUTUBE_CLIENT_ID: '123456789.apps.googleusercontent.com',
+    YOUTUBE_CLIENT_SECRET: 'google-oauth-secret-value',
+    YOUTUBE_REDIRECT_URI: 'https://lstc.nixorcorporate.com/api/integrations/youtube/callback'
+  };
+  assert.doesNotThrow(() => validateRequiredEnv(validYouTubeEnv));
+  const incompleteYouTubeEnv = { ...validYouTubeEnv, YOUTUBE_CLIENT_ID: '' };
+  assert.doesNotThrow(() => validateRequiredEnv(incompleteYouTubeEnv));
+  assert.ok(getYouTubeProductionErrors(incompleteYouTubeEnv).includes(
+    'youtube_configuration:YOUTUBE_CLIENT_ID_missing'
+  ));
+
+  const unsafeYouTubeRedirectEnv = {
+    ...validYouTubeEnv,
+    YOUTUBE_REDIRECT_URI: 'https://lstc.nixorcorporate.com/api/integrations/youtube/callback?unsafe=1'
+  };
+  assert.doesNotThrow(() => validateRequiredEnv(unsafeYouTubeRedirectEnv));
+  assert.ok(getYouTubeProductionErrors(unsafeYouTubeRedirectEnv).includes(
+    'youtube_configuration:YOUTUBE_REDIRECT_URI_invalid'
+  ));
+
+  const placeholderYouTubeEnv = {
+    ...validYouTubeEnv,
+    YOUTUBE_CLIENT_SECRET: 'your_youtube_client_secret'
+  };
+  assert.doesNotThrow(() => validateRequiredEnv(placeholderYouTubeEnv));
+  assert.ok(getYouTubeProductionErrors(placeholderYouTubeEnv).includes(
+    'youtube_configuration:YOUTUBE_CLIENT_SECRET_placeholder'
+  ));
   assert.throws(
     () => validateRequiredEnv({ ...validProductionEnv, BASE_URL: 'http://lstc.nixorcorporate.com' }),
     /BASE_URL must be https/

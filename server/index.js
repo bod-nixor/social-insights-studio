@@ -13,6 +13,7 @@ const { getConnection } = require('./database');
 const { createPlatformRouter } = require('./platform/routes');
 const { validateMailConfiguration } = require('./platform/mail');
 const { getDeploymentReadinessCheck, getDeploymentVersion } = require('./platform/version');
+const { getYouTubeConfiguration } = require('./platform/youtube-config');
 
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -318,12 +319,28 @@ app.get('/health/version', (req, res) => {
 
 app.get('/health/ready', async (req, res) => {
   let database = 'not_configured';
+  let youtubeFoundationReady = false;
   if (process.env.DATABASE_URL) {
     let connection;
     try {
       connection = await getConnection();
       await connection.query('SELECT 1');
       database = 'ready';
+      const foundationRows = await connection.query(
+        `SELECT COUNT(*) AS count FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (
+             'provider_authorizations',
+             'provider_authorization_credentials',
+             'provider_resources',
+             'workspace_provider_connections',
+             'youtube_channel_snapshots',
+             'youtube_analytics_daily_snapshots',
+             'youtube_video_analytics_snapshots',
+             'provider_request_events'
+           )`
+      );
+      youtubeFoundationReady = Number(foundationRows[0] && foundationRows[0].count) === 8;
     } catch (error) {
       database = 'unavailable';
     } finally {
@@ -331,16 +348,23 @@ app.get('/health/ready', async (req, res) => {
     }
   }
   const deployment = getDeploymentReadinessCheck();
+  const youtube = getYouTubeConfiguration(process.env, {
+    databaseReady: database === 'ready',
+    foundationReady: youtubeFoundationReady,
+    workerReady: true
+  });
   const body = {
     status: database === 'unavailable' ? 'not_ready' : 'ready',
     checks: {
       database,
       legacy_file_store: 'configured',
-      deployment_metadata: deployment.status
+      deployment_metadata: deployment.status,
+      youtube: youtube.status
     }
   };
-  if (deployment.warnings.length > 0) {
-    body.warnings = deployment.warnings;
+  const warnings = [...deployment.warnings, ...youtube.warnings];
+  if (warnings.length > 0) {
+    body.warnings = [...new Set(warnings)];
   }
   res.status(database === 'unavailable' ? 503 : 200).json(body);
 });

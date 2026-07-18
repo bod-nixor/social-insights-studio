@@ -1,5 +1,6 @@
 const { getConnection } = require('../database');
 const { assertCapability } = require('./rbac');
+const { getYouTubeConfiguration } = require('./youtube-config');
 
 const PROVIDERS = [
   {
@@ -135,8 +136,8 @@ const PROVIDERS = [
     id: 'youtube',
     name: 'YouTube',
     resourceName: 'YouTube channel',
-    featureFlag: 'FEATURE_YOUTUBE_CONNECTOR',
-    statusWhenDisabled: 'coming_soon',
+    featureFlag: 'YOUTUBE_ENABLED',
+    statusWhenDisabled: 'disabled',
     authModel: 'Google OAuth incremental authorization',
     selectedResourceModel: 'one authorization can discover multiple channels; selected channels become workspace connections',
     requestedScopes: [
@@ -306,6 +307,16 @@ function flagDisabled(value) {
   return ['0', 'false', 'no', 'off'].includes(String(value || '').trim().toLowerCase());
 }
 
+function parseJson(value, fallback = {}) {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
 function isEnabled(env, provider) {
   if (provider.configuredByDefault) {
     return !flagDisabled(env[provider.featureFlag]);
@@ -320,11 +331,14 @@ function getProviderStatus(env, provider) {
   if (provider.id === 'tiktok') {
     return env.TIKTOK_CLIENT_KEY && env.TIKTOK_CLIENT_SECRET ? 'available' : 'configuration_required';
   }
+  if (provider.id === 'youtube') {
+    return getYouTubeConfiguration(env).status;
+  }
   return 'feature_flagged';
 }
 
 function providerIsImplemented(provider) {
-  return provider.id === 'tiktok';
+  return provider.id === 'tiktok' || provider.id === 'youtube';
 }
 
 function toPublicProvider(provider, env) {
@@ -397,6 +411,194 @@ function toWorkspaceProvider(provider, source, env) {
   };
 }
 
+async function getYouTubeWorkspaceProvider(connection, workspaceId, userId, env) {
+  const tableRows = await connection.query(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME IN (
+         'provider_authorizations',
+         'provider_authorization_credentials',
+         'provider_resources',
+         'workspace_provider_connections',
+         'youtube_channel_snapshots',
+         'youtube_analytics_daily_snapshots',
+         'youtube_video_analytics_snapshots',
+         'provider_request_events'
+       )`
+  );
+  const foundationReady = Number(tableRows[0] && tableRows[0].count) === 8;
+  const configuration = getYouTubeConfiguration(env, {
+    databaseReady: true,
+    foundationReady,
+    workerReady: true
+  });
+  const provider = PROVIDERS.find(item => item.id === 'youtube');
+  const publicProvider = toPublicProvider(provider, env);
+  if (!foundationReady) {
+    return {
+      ...publicProvider,
+      enabled: configuration.enabled,
+      implemented: true,
+      connectable: false,
+      status: configuration.status,
+      configuration: { status: configuration.status, warnings: configuration.warnings },
+      authorization: null,
+      resources: [],
+      connections: [],
+      connection: null
+    };
+  }
+
+  const authorizationRows = await connection.query(
+    `SELECT pauth.id, pauth.status, pauth.granted_at, pauth.last_validated_at, pauth.revoked_at,
+            (
+              SELECT JSON_UNQUOTE(JSON_EXTRACT(al.metadata, '$.outcome_category'))
+              FROM audit_logs al
+              WHERE al.target_id = pauth.id
+                AND al.action = 'connection.youtube.authorization_failed'
+              ORDER BY al.created_at DESC
+              LIMIT 1
+            ) AS failure_category
+     FROM provider_authorizations pauth
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'youtube'
+     ORDER BY FIELD(pauth.status, 'active', 'authorizing', 'reconnect_required', 'disabled', 'revoked'), pauth.updated_at DESC
+     LIMIT 1`,
+    [workspaceId]
+  );
+  const authorization = authorizationRows[0] || null;
+  const scopeRows = authorization
+    ? await connection.query(
+        `SELECT scope, status FROM provider_authorization_scopes
+         WHERE provider_authorization_id = ? ORDER BY scope`,
+        [authorization.id]
+      )
+    : [];
+  const resourceRows = await connection.query(
+    `SELECT pr.id AS resource_id, pr.provider_resource_id, pr.display_name, pr.metadata,
+            wpc.id AS connection_id, wpc.data_source_id, wpc.status AS connection_status,
+            wpc.last_sync_at, wpc.last_successful_sync_at, wpc.next_sync_at, wpc.data_through_at,
+            ds.reconnect_reason, pa.username
+     FROM provider_resources pr
+     JOIN provider_authorizations pauth ON pauth.id = pr.provider_authorization_id
+     LEFT JOIN workspace_provider_connections wpc
+       ON wpc.provider_resource_id = pr.id AND wpc.workspace_id = pr.workspace_id
+     LEFT JOIN data_sources ds ON ds.id = wpc.data_source_id
+     LEFT JOIN provider_accounts pa ON pa.data_source_id = wpc.data_source_id
+     WHERE pr.workspace_id = ? AND pr.provider = 'youtube' AND pr.resource_type = 'youtube_channel'
+     ORDER BY pr.display_name, pr.created_at`,
+    [workspaceId]
+  );
+  const capabilityRows = await connection.query(
+    `SELECT pc.workspace_provider_connection_id, pc.capability_key, pc.status, pc.reason
+     FROM provider_capabilities pc
+     JOIN workspace_provider_connections wpc ON wpc.id = pc.workspace_provider_connection_id
+     WHERE wpc.workspace_id = ? AND wpc.provider = 'youtube'
+     ORDER BY pc.capability_key`,
+    [workspaceId]
+  );
+  const otherWorkspaceRows = await connection.query(
+    `SELECT pr.provider_resource_id, COUNT(DISTINCT wpc.workspace_id) AS workspace_count
+     FROM provider_resources pr
+     JOIN workspace_provider_connections wpc ON wpc.provider_resource_id = pr.id
+     JOIN workspace_memberships wm
+       ON wm.workspace_id = wpc.workspace_id AND wm.user_id = ? AND wm.status = 'active'
+     WHERE pr.provider = 'youtube' AND pr.resource_type = 'youtube_channel'
+       AND wpc.workspace_id <> ?
+     GROUP BY pr.provider_resource_id`,
+    [userId, workspaceId]
+  );
+  const otherWorkspaceCount = new Map(
+    otherWorkspaceRows.map(row => [String(row.provider_resource_id), Number(row.workspace_count || 0)])
+  );
+  const capabilitiesByConnection = new Map();
+  for (const capability of capabilityRows) {
+    const values = capabilitiesByConnection.get(capability.workspace_provider_connection_id) || [];
+    values.push({ key: capability.capability_key, status: capability.status, reason: capability.reason });
+    capabilitiesByConnection.set(capability.workspace_provider_connection_id, values);
+  }
+  const resources = resourceRows.map(row => {
+    const metadata = parseJson(row.metadata);
+    return {
+      id: row.resource_id,
+      provider_resource_id: row.provider_resource_id,
+      display_name: row.display_name,
+      thumbnail_url: metadata.thumbnailUrl || null,
+      subscriber_count_hidden: Boolean(metadata.subscriberCountHidden),
+      attached_elsewhere_count: otherWorkspaceCount.get(String(row.provider_resource_id)) || 0,
+      selected: Boolean(row.connection_id)
+    };
+  });
+  const connections = resourceRows.filter(row => row.connection_id).map(row => {
+    const metadata = parseJson(row.metadata);
+    const authorizationConnectionStatus = authorization && authorization.status === 'authorizing'
+      ? 'connecting'
+      : authorization && ['reconnect_required', 'disabled'].includes(authorization.status)
+        ? 'reconnect_required'
+        : row.connection_status;
+    return {
+      id: row.connection_id,
+      data_source_id: row.data_source_id,
+      status: authorizationConnectionStatus,
+      reconnect_reason: row.reconnect_reason,
+      last_sync_at: row.last_sync_at,
+      last_successful_sync_at: row.last_successful_sync_at,
+      next_sync_at: row.next_sync_at,
+      data_through_at: row.data_through_at,
+      account: {
+        id: row.provider_resource_id,
+        username: row.username,
+        display_name: row.display_name,
+        thumbnail_url: metadata.thumbnailUrl || null
+      },
+      capabilities: capabilitiesByConnection.get(row.connection_id) || []
+    };
+  });
+  const primaryConnection = connections[0] || null;
+  let status = configuration.status;
+  if (!configuration.connectable) status = configuration.status;
+  else if (authorization && authorization.status === 'authorizing') status = 'authorizing';
+  else if (
+    authorization &&
+    authorization.status !== 'active' &&
+    authorization.failure_category === 'missing_required_scopes'
+  ) status = 'missing_scopes';
+  else if (
+    authorization &&
+    authorization.status !== 'active' &&
+    authorization.failure_category === 'user_denied'
+  ) status = 'authorization_denied';
+  else if (authorization && authorization.status === 'disabled') status = 'provider_error';
+  else if (authorization && authorization.status === 'reconnect_required') status = 'reconnect_required';
+  else if (primaryConnection) status = primaryConnection.status;
+  else if (authorization && authorization.status === 'active') status = resources.length > 0 ? 'selection_required' : 'no_channels';
+  else if (configuration.connectable) status = 'available';
+  const grantedScopeNames = new Set(scopeRows.filter(scope => scope.status === 'granted').map(scope => scope.scope));
+  const missingScopes = provider.requestedScopes
+    .map(scope => scope.name)
+    .filter(scope => !grantedScopeNames.has(scope));
+  return {
+    ...publicProvider,
+    enabled: configuration.enabled,
+    implemented: true,
+    connectable: configuration.connectable,
+    status,
+    configuration: { status: configuration.status, warnings: configuration.warnings },
+    authorization: authorization ? {
+      id: authorization.id,
+      status: authorization.status,
+      granted_at: authorization.granted_at,
+      last_validated_at: authorization.last_validated_at,
+      failure_category: authorization.failure_category,
+      missing_scopes: missingScopes,
+      scopes: scopeRows
+    } : null,
+    resources,
+    connections,
+    connection: primaryConnection
+  };
+}
+
 async function listWorkspaceProviderCatalog(userId, workspaceId, env = process.env) {
   const connection = await getConnection();
   if (!connection) {
@@ -436,7 +638,10 @@ async function listWorkspaceProviderCatalog(userId, workspaceId, env = process.e
       [workspaceId]
     );
     const sourceByProvider = new Map(sourceRows.map(row => [row.provider, row]));
-    return PROVIDERS.map(provider => toWorkspaceProvider(provider, sourceByProvider.get(provider.id), env));
+    const youtubeProvider = await getYouTubeWorkspaceProvider(connection, workspaceId, userId, env);
+    return PROVIDERS.map(provider => provider.id === 'youtube'
+      ? youtubeProvider
+      : toWorkspaceProvider(provider, sourceByProvider.get(provider.id), env));
   } finally {
     await connection.release();
   }

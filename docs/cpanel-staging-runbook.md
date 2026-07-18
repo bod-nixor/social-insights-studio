@@ -102,7 +102,7 @@ Provider feature gates should remain conservative:
 - `FEATURE_TIKTOK_CONNECTOR=1`
 - `FEATURE_INSTAGRAM_CONNECTOR=0`
 - `FEATURE_FACEBOOK_PAGES_CONNECTOR=0`
-- `FEATURE_YOUTUBE_CONNECTOR=0`
+- `YOUTUBE_ENABLED=false` until the dedicated Google OAuth configuration and verification checklist is being exercised
 - `FEATURE_GA4_CONNECTOR=0`
 
 `/health/version` must not expose host paths, dependency inventories, full environment dumps, or secret values.

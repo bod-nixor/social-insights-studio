@@ -4,6 +4,9 @@ const tiktok = require('../integrations/tiktok');
 const { assertCapability } = require('./rbac');
 const { decryptSecret, encryptSecret } = require('./secret-envelope');
 const { createId } = require('./security');
+const { purgeOverdueYouTubeAuthorizations } = require('./youtube-connection-service');
+const { performYouTubeSyncForJob } = require('./youtube-sync-service');
+const { getYouTubeConfiguration } = require('./youtube-config');
 
 const SYNC_INTERVAL_SECONDS = Number(process.env.SYNC_INTERVAL_SECONDS || 6 * 60 * 60);
 const MANUAL_COOLDOWN_SECONDS = Number(process.env.MANUAL_SYNC_COOLDOWN_SECONDS || 15 * 60);
@@ -90,12 +93,20 @@ function internalSyncError(error) {
   };
 }
 
-async function getActiveSource(connection, workspaceId) {
+async function getActiveSource(connection, workspaceId, provider = 'tiktok', connectionId = null) {
+  const params = [workspaceId, provider];
+  const connectionJoin = connectionId
+    ? 'JOIN workspace_provider_connections wpc ON wpc.data_source_id = data_sources.id'
+    : '';
+  const connectionClause = connectionId ? 'AND wpc.id = ?' : '';
+  if (connectionId) params.push(connectionId);
   const rows = await connection.query(
-    `SELECT * FROM data_sources
-     WHERE workspace_id = ? AND provider = 'tiktok' AND deleted_at IS NULL
-     ORDER BY created_at ASC LIMIT 1`,
-    [workspaceId]
+    `SELECT data_sources.* FROM data_sources
+     ${connectionJoin}
+     WHERE data_sources.workspace_id = ? AND data_sources.provider = ?
+       AND data_sources.deleted_at IS NULL ${connectionClause}
+     ORDER BY data_sources.created_at ASC LIMIT 1`,
+    params
   );
   return rows[0] || null;
 }
@@ -122,6 +133,9 @@ async function claimJob(connection, dataSourceId, owner, ignoreRunAfter = false)
     [createId(), dataSourceId]
   );
   const runAfterClause = ignoreRunAfter ? '' : 'AND run_after <= UTC_TIMESTAMP(3)';
+  const statusClause = ignoreRunAfter
+    ? "(status IN ('due', 'paused') OR (status = 'leased' AND lease_expires_at < UTC_TIMESTAMP(3)))"
+    : "(status = 'due' OR (status = 'leased' AND lease_expires_at < UTC_TIMESTAMP(3)))";
   const result = await connection.query(
     `UPDATE sync_jobs
      SET status = 'leased',
@@ -131,7 +145,7 @@ async function claimJob(connection, dataSourceId, owner, ignoreRunAfter = false)
          updated_at = UTC_TIMESTAMP(3)
      WHERE data_source_id = ?
        ${runAfterClause}
-       AND (status = 'due' OR (status = 'leased' AND lease_expires_at < UTC_TIMESTAMP(3)))`,
+       AND ${statusClause}`,
     [owner, LEASE_SECONDS, dataSourceId]
   );
   if (Number(result.affectedRows || 0) !== 1) return null;
@@ -170,6 +184,7 @@ async function finishJob(connection, job, status, syncError = null) {
          run_after = ?,
          lease_owner = NULL,
          lease_expires_at = NULL,
+         requested_trigger_type = 'scheduled',
          updated_at = UTC_TIMESTAMP(3)
      WHERE data_source_id = ?`,
     [nonRetryableAuth && !retryable ? 'paused' : 'due', runAfter, job.data_source_id]
@@ -420,7 +435,7 @@ async function updateSourceAfterSync(connection, source, status, syncError = nul
   return nextRun;
 }
 
-async function performSyncForJob(job, options = {}) {
+async function performTikTokSyncForJob(job, options = {}) {
   const triggerType = options.triggerType || 'scheduled';
   const startedMs = Date.now();
   let runId = null;
@@ -504,19 +519,93 @@ async function performSyncForJob(job, options = {}) {
   };
 }
 
-async function requestManualSync(userId, workspaceId) {
+async function providerForJob(dataSourceId) {
+  return withConnection(async connection => {
+    const rows = await connection.query('SELECT provider FROM data_sources WHERE id = ? LIMIT 1', [dataSourceId]);
+    return rows[0] ? rows[0].provider : null;
+  });
+}
+
+async function youtubeAuthorizationIsActive(connection, dataSourceId) {
+  const rows = await connection.query(
+    `SELECT pauth.status
+     FROM workspace_provider_connections wpc
+     JOIN provider_resources pr ON pr.id = wpc.provider_resource_id
+     JOIN provider_authorizations pauth ON pauth.id = pr.provider_authorization_id
+     WHERE wpc.data_source_id = ? AND wpc.provider = 'youtube'
+     LIMIT 1`,
+    [dataSourceId]
+  );
+  return Boolean(rows[0] && rows[0].status === 'active');
+}
+
+async function performSyncForJob(job, options = {}) {
+  const provider = await providerForJob(job.data_source_id);
+  if (provider === 'youtube') return performYouTubeSyncForJob(job, options);
+  return performTikTokSyncForJob(job, options);
+}
+
+async function requestManualSync(userId, workspaceId, options = {}) {
+  const provider = options.provider || 'tiktok';
+  if (provider === 'youtube' && !getYouTubeConfiguration().connectable) {
+    throw createHttpError(503, 'youtube_not_available');
+  }
+  if (provider === 'youtube') {
+    return withConnection(async connection => {
+      await connection.beginTransaction();
+      try {
+        await requireWorkspaceCapability(connection, workspaceId, userId, 'triggerManualSync');
+        const source = await getActiveSource(connection, workspaceId, provider, options.connectionId || null);
+        if (!source || source.status !== 'active') throw createHttpError(400, 'youtube_not_connected');
+        if (!(await youtubeAuthorizationIsActive(connection, source.id))) {
+          throw createHttpError(400, 'youtube_not_connected');
+        }
+        const recent = await connection.query(
+          `SELECT id FROM sync_runs
+           WHERE workspace_id = ? AND data_source_id = ? AND trigger_type = 'manual'
+             AND started_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? SECOND)
+           LIMIT 1`,
+          [workspaceId, source.id, MANUAL_COOLDOWN_SECONDS]
+        );
+        if (recent[0]) throw createHttpError(429, 'manual_sync_cooldown');
+        const jobRows = await connection.query(
+          `SELECT status, lease_expires_at FROM sync_jobs
+           WHERE data_source_id = ? LIMIT 1 FOR UPDATE`,
+          [source.id]
+        );
+        const job = jobRows[0] || null;
+        if (job && job.status === 'leased' && job.lease_expires_at && new Date(job.lease_expires_at) > new Date()) {
+          throw createHttpError(409, 'sync_already_running');
+        }
+        await connection.query(
+          `INSERT INTO sync_jobs
+            (id, data_source_id, run_after, status, requested_trigger_type)
+           VALUES (?, ?, UTC_TIMESTAMP(3), 'due', 'manual')
+           ON DUPLICATE KEY UPDATE
+             run_after = UTC_TIMESTAMP(3), status = 'due', requested_trigger_type = 'manual',
+             lease_owner = NULL, lease_expires_at = NULL, updated_at = UTC_TIMESTAMP(3)`,
+          [createId(), source.id]
+        );
+        await connection.commit();
+        return { status: 'queued', data_source_id: source.id };
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      }
+    });
+  }
   const owner = syncOwner();
   let job;
   await withConnection(async connection => {
     await requireWorkspaceCapability(connection, workspaceId, userId, 'triggerManualSync');
-    const source = await getActiveSource(connection, workspaceId);
-    if (!source || source.status !== 'active') throw createHttpError(400, 'tiktok_not_connected');
+    const source = await getActiveSource(connection, workspaceId, provider, options.connectionId || null);
+    if (!source || source.status !== 'active') throw createHttpError(400, `${provider}_not_connected`);
     const recent = await connection.query(
       `SELECT id FROM sync_runs
-       WHERE workspace_id = ? AND trigger_type = 'manual'
+       WHERE workspace_id = ? AND data_source_id = ? AND trigger_type = 'manual'
          AND started_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? SECOND)
        LIMIT 1`,
-      [workspaceId, MANUAL_COOLDOWN_SECONDS]
+      [workspaceId, source.id, MANUAL_COOLDOWN_SECONDS]
     );
     if (recent[0]) throw createHttpError(429, 'manual_sync_cooldown');
     job = await claimJob(connection, source.id, owner, true);
@@ -530,12 +619,22 @@ async function runDueSyncs(options = {}) {
   const budgetMs = Number(options.timeBudgetSeconds || 240) * 1000;
   const deadline = Date.now() + budgetMs;
   const results = [];
+  const reconciliation = await purgeOverdueYouTubeAuthorizations(50);
   while (Date.now() < deadline) {
     const job = await claimNextDueJob(owner);
     if (!job) break;
-    results.push(await performSyncForJob(job, { triggerType: 'scheduled', correlationId: owner }));
+    results.push(await performSyncForJob(job, {
+      triggerType: job.requested_trigger_type === 'manual' ? 'manual' : 'scheduled',
+      correlationId: owner,
+      deadlineMs: deadline
+    }));
   }
-  return { lease_owner: owner, processed: results.length, results };
+  return {
+    lease_owner: owner,
+    processed: results.length,
+    reconciled_youtube_authorizations: reconciliation.purged,
+    results
+  };
 }
 
 module.exports = {

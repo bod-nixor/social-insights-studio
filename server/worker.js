@@ -21,6 +21,7 @@ async function main() {
   const result = await runDueSyncs({ timeBudgetSeconds });
   console.log(JSON.stringify({
     processed: result.processed,
+    reconciled_youtube_authorizations: result.reconciled_youtube_authorizations,
     results: result.results.map(item => ({
       data_source_id: item.data_source_id,
       sync_run_id: item.sync_run_id,

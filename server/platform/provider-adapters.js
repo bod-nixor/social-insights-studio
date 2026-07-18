@@ -55,8 +55,8 @@ const PROVIDER_ADAPTERS = {
   youtube: {
     provider: 'youtube',
     authorizationProvider: 'google',
-    implemented: false,
-    featureFlag: 'FEATURE_YOUTUBE_CONNECTOR',
+    implemented: true,
+    featureFlag: 'YOUTUBE_ENABLED',
     incrementalAuthorization: true,
     productAuthOnly: true,
     reuseSignInTokens: false,

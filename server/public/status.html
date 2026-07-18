@@ -20,13 +20,17 @@
   <main>
     <article>
       <h1>Service status and known limitations</h1>
-      <p class="meta">Last reviewed: July 17, 2026</p>
+      <p class="meta">Last reviewed: July 18, 2026</p>
       <div class="status">
         <strong>TikTok dashboard and Looker Studio connector</strong>
         <p>Current implemented connector and dashboard source. A connected TikTok account with no posts can return valid profile metrics and no video rows.</p>
       </div>
       <div class="status">
-        <strong>Instagram, Facebook Pages, YouTube, and Website Analytics</strong>
+        <strong>YouTube channel analytics</strong>
+        <p>The read-only integration is implemented but disabled by default until Google OAuth configuration and verification are complete. YouTube reports may have a visible data-through delay, and unavailable metrics are not treated as zero.</p>
+      </div>
+      <div class="status">
+        <strong>Instagram, Facebook Pages, and Website Analytics</strong>
         <p>Provider-specific dashboard and report integrations are feature-flagged until implementation, configuration, provider review evidence, and sandbox/live verification are complete.</p>
       </div>
       <div class="status">

@@ -1,10 +1,10 @@
 # ADR 0002: Provider Scope And API Baseline
 
-Status: Accepted for implementation planning
+Status: Accepted; YouTube source implementation complete
 
-Date: 2026-07-17
+Date: 2026-07-18
 
-Documentation access date: 2026-07-17
+Documentation access date: 2026-07-18
 
 ## Decision
 
@@ -17,7 +17,7 @@ Use incremental provider authorization and request only read-only scopes that ma
 | TikTok | Login Kit for Web plus Display API | `user.info.basic`, `user.info.profile`, `user.info.stats`, `video.list` | Keep current dashboard and Looker connector behavior intact. |
 | Instagram | Current Instagram Platform for professional accounts | Candidate read-only analytics set: `instagram_business_basic`, `instagram_business_manage_insights` | Feature flagged until Meta docs, app review, and reviewer evidence are complete. |
 | Facebook Pages | Meta Graph API Pages and Page Insights | `pages_show_list`, `pages_read_engagement`, `read_insights` | Feature flagged until Page discovery and Page insights screens exist. |
-| YouTube | Google OAuth incremental auth, YouTube Data API, YouTube Analytics API | `https://www.googleapis.com/auth/youtube.readonly`, `https://www.googleapis.com/auth/yt-analytics.readonly` | Feature flagged until channel discovery, analytics sync, and Google verification evidence exist. |
+| YouTube | Google OAuth incremental auth, YouTube Data API, YouTube Analytics API | `https://www.googleapis.com/auth/youtube.readonly`, `https://www.googleapis.com/auth/yt-analytics.readonly` | Source-complete and disabled by default; production enablement remains gated on Google configuration, review evidence, and live verification. |
 | Website Analytics | Google OAuth incremental auth, GA4 Admin/Data APIs | `https://www.googleapis.com/auth/analytics.readonly` | Feature flagged until GA4 property discovery, compatibility checks, and dashboard/report views exist. |
 
 ## Official References

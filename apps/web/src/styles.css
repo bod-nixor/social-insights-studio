@@ -462,8 +462,25 @@ a {
 }
 
 .content-flow {
+  min-width: 0;
   display: grid;
   gap: 16px;
+}
+
+.source-switcher {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+}
+
+.source-switcher h2 {
+  font-size: 1.25rem;
+}
+
+.source-switcher .segmented button {
+  white-space: nowrap;
 }
 
 .state-banner {
@@ -547,6 +564,10 @@ a {
   grid-template-columns: repeat(4, minmax(150px, 1fr));
 }
 
+.metric-grid.youtube-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .metric-card {
   padding: 16px;
   display: grid;
@@ -581,6 +602,7 @@ a {
 
 .panel,
 .empty-band {
+  min-width: 0;
   padding: 16px;
   display: grid;
   gap: 16px;
@@ -775,6 +797,10 @@ th {
   background: var(--surface);
 }
 
+.provider-main {
+  min-width: 0;
+}
+
 .provider-row + .provider-row {
   border-top: 1px solid var(--border);
 }
@@ -807,6 +833,132 @@ th {
 
 .button-row {
   justify-content: end;
+}
+
+.youtube-channel {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.channel-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.channel-identity > img,
+.channel-placeholder {
+  width: 52px;
+  height: 52px;
+  flex: 0 0 52px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.channel-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--red);
+  background: var(--red-bg);
+}
+
+.channel-identity > div,
+.youtube-video-cell > div {
+  min-width: 0;
+}
+
+.channel-identity.compact > img,
+.channel-identity.compact > .channel-placeholder {
+  width: 40px;
+  height: 40px;
+  flex-basis: 40px;
+}
+
+.channel-identity small,
+.youtube-video-cell small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.resource-list {
+  display: grid;
+  gap: 0;
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.resource-list h3 {
+  padding: 14px 0 8px;
+  font-size: 0.92rem;
+}
+
+.resource-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.connection-resource {
+  align-items: start;
+}
+
+.capability-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.capability-list span {
+  padding: 3px 6px;
+  border: 1px solid #b9d8c3;
+  border-radius: 4px;
+  color: var(--brand-strong);
+  background: var(--green-bg);
+  font-size: 0.72rem;
+  text-transform: capitalize;
+}
+
+.capability-list span.delayed {
+  border-color: #ecd28f;
+  color: var(--amber);
+  background: var(--amber-bg);
+}
+
+.youtube-content-table {
+  overflow-x: auto;
+}
+
+.youtube-content-table table {
+  min-width: 1060px;
+}
+
+.youtube-video-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 250px;
+}
+
+.youtube-video-cell img {
+  width: 80px;
+  aspect-ratio: 16 / 9;
+  flex: 0 0 80px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--surface-alt);
+}
+
+.youtube-video-cell a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .detail-row td {
@@ -883,6 +1035,10 @@ button.danger {
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .metric-grid.youtube-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 860px) {
@@ -951,6 +1107,11 @@ button.danger {
     grid-template-columns: 1fr;
   }
 
+  .youtube-channel,
+  .resource-row {
+    grid-template-columns: 1fr;
+  }
+
   .button-row {
     justify-content: start;
   }
@@ -986,8 +1147,14 @@ button.danger {
   }
 
   .metric-grid,
-  .metric-grid.compact {
+  .metric-grid.compact,
+  .metric-grid.youtube-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .source-switcher {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .toolbar,
@@ -1016,6 +1183,15 @@ button.danger {
   .table-wrap {
     border: 0;
     overflow: visible;
+  }
+
+  .youtube-content-table table {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .youtube-video-cell {
+    min-width: 0;
   }
 
   table,

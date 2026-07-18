@@ -19,18 +19,19 @@
   <main>
     <article>
       <h1>Data deletion instructions</h1>
-      <p class="meta">Last reviewed: July 17, 2026</p>
+      <p class="meta">Last reviewed: July 18, 2026</p>
       <p>Social Insights Studio provides provider disconnect and deletion paths for data that the service stores to operate analytics connections and reports.</p>
 
       <h2>Disconnect a provider</h2>
       <ol>
         <li>Open the connected data source or workspace where the provider is authorized.</li>
         <li>Use the disconnect or revoke action for the provider if it is available in the product surface.</li>
+        <li>For YouTube, open the workspace Connections view and choose Disconnect. The service attempts Google revocation first and then immediately purges all locally stored credentials, discovered channels, and YouTube snapshots tied to that authorization.</li>
         <li>For the current TikTok Looker Studio connector, revoke the connector in Looker Studio and, if needed, revoke the app from your TikTok account settings.</li>
       </ol>
 
       <h2>Request deletion</h2>
-      <p>Email <a href="mailto:b.o.d@nixorcollege.edu.pk">b.o.d@nixorcollege.edu.pk</a> with the subject <code>Social Insights Studio data deletion request</code>. Include the provider, workspace or data source name, and the email address you used for the connection. Do not include access tokens or passwords.</p>
+      <p>Email <a href="mailto:b.o.d@nixorcollege.edu.pk">b.o.d@nixorcollege.edu.pk</a> with the subject <code>Social Insights Studio data deletion request</code>. Include the provider, workspace or data source name, and the email address you used for the connection. Do not include access tokens or passwords. After identity and workspace authority are verified, authorized provider data is deleted promptly.</p>
 
       <h2>What deletion covers</h2>
       <ul>
@@ -40,7 +41,7 @@
       </ul>
 
       <h2>Provider-side revocation</h2>
-      <p>You may also revoke Social Insights Studio access directly in the relevant provider account settings. Provider-side revocation may stop future syncs immediately, while local deletion removes stored service data according to the verified request.</p>
+      <p>You may also revoke Social Insights Studio in <a href="https://myaccount.google.com/connections" rel="noopener" target="_blank">Google Account third-party connections</a> or the relevant provider settings. Google revocation stops future access. When the next bounded sync detects a terminal Google revocation such as <code>invalid_grant</code>, the service immediately purges the local authorization and associated YouTube data; you may use the verified request path above instead of waiting for that detection.</p>
       <p><a href="/">Return to Social Insights Studio</a></p>
     </article>
   </main>

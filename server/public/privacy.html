@@ -18,7 +18,7 @@
   <main>
     <article>
       <h1>Privacy Policy</h1>
-      <p class="meta">Last reviewed: July 17, 2026</p>
+      <p class="meta">Last reviewed: July 18, 2026</p>
       <p>Social Insights Studio provides analytics connection, synchronization, dashboard, and reporting tools for authorized social and website analytics sources.</p>
 
       <h2>Data we collect or process</h2>
@@ -42,14 +42,18 @@
       <ul>
         <li>TikTok data is accessed through the approved TikTok scopes configured for the current connector.</li>
         <li>Instagram and Facebook Pages data, when enabled, is limited to professional accounts and Pages the authorizing user can access.</li>
-        <li>YouTube and Google Analytics data, when enabled, is accessed through incremental Google OAuth authorization and read-only scopes needed for implemented features.</li>
+        <li>YouTube uses only <code>youtube.readonly</code> to discover authorized channels and read channel/video metadata, and <code>yt-analytics.readonly</code> to read channel and video Analytics reports. Social Insights Studio does not request YouTube write, upload, advertising, messaging, or monetary-data access.</li>
         <li>YouTube users are also subject to the <a href="https://www.youtube.com/t/terms" rel="noopener" target="_blank">YouTube Terms of Service</a>.</li>
       </ul>
+
+      <h2>Google API Services User Data Policy</h2>
+      <p>Social Insights Studio's use and transfer of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" rel="noopener" target="_blank">Google API Services User Data Policy</a>, including the Limited Use requirements. Google user data is used only to provide and improve the user-facing analytics connection, synchronization, dashboard, support, security, and deletion features described here. It is not used for advertising, sold, or transferred for unrelated purposes.</p>
 
       <h2>Storage and retention</h2>
       <ul>
         <li>Provider credentials are stored server-side and outside the public web root.</li>
-        <li>Encrypted token records are retained only as needed for the service, security, and approved retention policy.</li>
+        <li>Encrypted YouTube token records are retained only while the authorization is active. Disconnecting YouTube attempts Google revocation and immediately deletes credentials, discovered channels, and associated local snapshots, even if provider revocation fails.</li>
+        <li>Normalized channel, video, and Analytics snapshots are retained only for the active user-facing connection purpose. Social Insights Studio validates the authorization and refreshes stored YouTube data within each 30-day policy window; if an authorization cannot be validated by its deadline, the associated YouTube data is deleted. Raw Google or YouTube API responses are not stored by default.</li>
         <li>Generated reports should have a short retention window and be deleted after expiry.</li>
       </ul>
 
@@ -59,7 +63,7 @@
       <h2>Your choices</h2>
       <ul>
         <li>You can disconnect supported provider connections from the product surface where available.</li>
-        <li>You can revoke provider access directly in the relevant provider account settings.</li>
+        <li>You can review or revoke Google access directly in <a href="https://myaccount.google.com/connections" rel="noopener" target="_blank">Google Account third-party connections</a>.</li>
         <li>You can request deletion using the <a href="/data-deletion">data deletion instructions</a>.</li>
       </ul>
 

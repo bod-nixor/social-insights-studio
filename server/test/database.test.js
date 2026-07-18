@@ -16,16 +16,23 @@ process.env.DATABASE_URL = process.env.DATABASE_TEST_URL;
 process.env.BASE_URL = 'http://localhost:3001';
 process.env.TIKTOK_CLIENT_KEY = 'test-client-key';
 process.env.TIKTOK_CLIENT_SECRET = 'test-client-secret';
+process.env.YOUTUBE_ENABLED = 'true';
+process.env.YOUTUBE_CLIENT_ID = 'youtube-test-client-id';
+process.env.YOUTUBE_CLIENT_SECRET = 'youtube-test-client-secret';
+process.env.YOUTUBE_REDIRECT_URI = 'http://localhost:3001/api/integrations/youtube/callback';
 process.env.BACKEND_JWT_SECRET = 'b'.repeat(64);
 process.env.ENCRYPTION_KEY = '2'.repeat(64);
 process.env.LOOKER_CLIENT_ID = 'looker-studio-connector';
 delete process.env.LOOKER_CLIENT_SECRET;
 process.env.LOOKER_REDIRECT_URIS = 'https://script.google.com/macros/d/abc123/usercallback';
+process.env.RATE_LIMIT_MAX = '1000';
+process.env.API_RATE_LIMIT_MAX = '2000';
 
 const { app, stopStores } = require('../index');
 const { closePool } = require('../database');
 const { setGoogleOidcFetchImplementation } = require('../platform/google-oidc');
 const { setTikTokFetchImplementation, TIKTOK_SCOPES } = require('../integrations/tiktok');
+const { setYouTubeTestHooks, YOUTUBE_SCOPES } = require('../integrations/youtube');
 const { setMailTransportFactory } = require('../platform/mail');
 const { compareMetric, engagementRate } = require('../platform/analytics');
 const { assertCapability, hasCapability, canAssignRole } = require('../platform/rbac');
@@ -49,6 +56,7 @@ before(async () => {
 after(async () => {
   setGoogleOidcFetchImplementation(null);
   setTikTokFetchImplementation(null);
+  setYouTubeTestHooks();
   setMailTransportFactory(null);
   stopStores();
   await closePool();
@@ -191,6 +199,18 @@ function installTikTokQueue(handlers) {
     assert.ok(handlers.length > 0, `unexpected TikTok call to ${url}`);
     return handlers.shift()(String(url), options);
   });
+}
+
+function installYouTubeQueue(handlers) {
+  setYouTubeTestHooks({
+    fetch: async (url, options = {}) => {
+      assert.ok(handlers.length > 0, `unexpected YouTube call to ${url}`);
+      return handlers.shift()(String(url), options);
+    },
+    sleep: async () => {},
+    random: () => 0
+  });
+  return handlers;
 }
 
 test('RBAC role matrix matches Phase 1 policy', () => {
@@ -451,7 +471,8 @@ test('migrations are applied to the real MariaDB test database', async () => {
   assert.deepEqual(rows.map(row => row.version), [
     '001_phase1_foundation',
     '002_session_csrf',
-    '003_provider_authorization_resources'
+    '003_provider_authorization_resources',
+    '004_youtube_readonly_vertical'
   ]);
 
   const tableRows = await db.query(
@@ -464,10 +485,14 @@ test('migrations are applied to the real MariaDB test database', async () => {
        'provider_authorizations',
        'provider_authorization_credentials',
        'provider_resources',
-       'workspace_provider_connections'
+       'workspace_provider_connections',
+       'youtube_channel_snapshots',
+       'youtube_analytics_daily_snapshots',
+       'youtube_video_analytics_snapshots',
+       'provider_request_events'
      )`
   );
-  assert.equal(tableRows.length, 8);
+  assert.equal(tableRows.length, 12);
 });
 
 test('provider foundation migration preserves existing TikTok credentials without token rewrite', async () => {
@@ -570,6 +595,36 @@ test('provider foundation migration preserves existing TikTok credentials withou
     const syncRows = await shadow.query('SELECT COUNT(*) AS count FROM provider_sync_states');
     assert.equal(Number(capabilityRows[0].count), 5);
     assert.equal(Number(syncRows[0].count), 1);
+
+    await applyMigrationFile(shadow, '004_youtube_readonly_vertical.sql');
+    const youtubeTableRows = await shadow.query(
+      `SELECT TABLE_NAME AS table_name
+       FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (
+         'youtube_channel_snapshots',
+         'youtube_analytics_daily_snapshots',
+         'youtube_video_analytics_snapshots',
+         'provider_request_events'
+       )`
+    );
+    assert.equal(youtubeTableRows.length, 4);
+    const validationIndexRows = await shadow.query(
+      `SELECT INDEX_NAME AS index_name
+       FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'provider_authorizations'
+         AND INDEX_NAME = 'provider_authorizations_youtube_validation_due_idx'`
+    );
+    assert.equal(validationIndexRows.length, 3);
+    const preservedCredentials = await shadow.query(
+      `SELECT access_token_ciphertext, refresh_token_ciphertext
+       FROM provider_authorization_credentials
+       WHERE provider_authorization_id = (
+         SELECT id FROM provider_authorizations
+         WHERE source_data_source_id = '21000000-0000-4000-8000-000000000001'
+       )`
+    );
+    assert.equal(preservedCredentials[0].access_token_ciphertext, 'legacy-access-ciphertext');
+    assert.equal(preservedCredentials[0].refresh_token_ciphertext, 'legacy-refresh-ciphertext');
   } finally {
     if (shadow) await shadow.end();
     await root.query(`DROP DATABASE IF EXISTS \`${databaseName}\``);
@@ -1305,7 +1360,8 @@ test('TikTok connection lifecycle is workspace-bound, encrypted, replay-safe, an
   const youtubeProvider = providerRows.find(provider => provider.id === 'youtube');
   assert.equal(tiktokProvider.connection.status, 'active');
   assert.equal(tiktokProvider.connectable, true);
-  assert.equal(youtubeProvider.connectable, false);
+  assert.equal(youtubeProvider.connectable, true);
+  assert.equal(youtubeProvider.status, 'available');
 
   const foundationRows = await db.query(
     `SELECT pauth.source_data_source_id,
@@ -1674,6 +1730,37 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   assert.equal(cooldown.statusCode, 429);
   assert.equal(cooldown.json().error, 'manual_sync_cooldown');
 
+  const youtubeSourceId = '20000000-0000-4000-8000-000000000777';
+  const youtubeRunId = '30000000-0000-4000-8000-000000000777';
+  const youtubeContentId = '50000000-0000-4000-8000-000000000777';
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status)
+     VALUES (?, ?, 'youtube', 'active')`,
+    [youtubeSourceId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO sync_runs
+      (id, workspace_id, data_source_id, trigger_type, status, started_at, finished_at, content_seen_count)
+     VALUES (?, ?, ?, 'scheduled', 'success',
+             DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 SECOND),
+             DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 SECOND), 1)`,
+    [youtubeRunId, workspace.id, youtubeSourceId]
+  );
+  await db.query(
+    `INSERT INTO content_items
+      (id, workspace_id, data_source_id, provider_content_id, published_at, title, share_url)
+     VALUES (?, ?, ?, 'youtube-video', UTC_TIMESTAMP(3), 'YouTube must stay isolated',
+             'https://www.youtube.com/watch?v=youtube-video')`,
+    [youtubeContentId, workspace.id, youtubeSourceId]
+  );
+  await db.query(
+    `INSERT INTO content_metric_snapshots
+      (id, workspace_id, content_item_id, sync_run_id, observed_at,
+       view_count, like_count, comment_count, share_count)
+     VALUES (?, ?, ?, ?, UTC_TIMESTAMP(3), 999999, 999999, 999999, 999999)`,
+    [crypto.randomUUID(), workspace.id, youtubeContentId, youtubeRunId]
+  );
+
   const deniedManual = await requestApp(`/api/workspaces/${workspace.id}/sync-runs`, {
     method: 'POST',
     headers: {
@@ -1693,13 +1780,17 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   assert.equal(dashboardBody.connection.status, 'active');
   assert.equal(dashboardBody.metrics.find(metric => metric.key === 'follower_count').value, 150);
   assert.equal(dashboardBody.top_content[0].title, '=SUM(1,1)');
+  assert.notEqual(dashboardBody.latest_sync.id, youtubeRunId);
+  assert.equal(dashboardBody.latest_sync.status, 'success');
 
   const content = await requestApp(`/api/workspaces/${workspace.id}/content?sort=views`, {
     headers: { cookie: cookieHeader(owner.cookies) }
   });
   assert.equal(content.statusCode, 200);
   const contentBody = content.json();
+  assert.equal(contentBody.total, 1);
   assert.equal(contentBody.rows[0].engagement_rate, 13);
+  assert.equal(contentBody.rows.some(row => row.provider_content_id === 'youtube-video'), false);
 
   const searchContent = await requestApp(`/api/workspaces/${workspace.id}/content?search=${encodeURIComponent('sum')}&sort=engagement&direction=asc&limit=1&offset=0`, {
     headers: { cookie: cookieHeader(owner.cookies) }
@@ -1751,6 +1842,7 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   assert.equal(csv.statusCode, 200);
   assert.match(csv.body, /published_at,title,views/);
   assert.ok(csv.body.includes("'=SUM(1,1)"));
+  assert.equal(csv.body.includes('YouTube must stay isolated'), false);
 
   const sourceRows = await db.query('SELECT id, last_successful_sync_at FROM data_sources WHERE workspace_id = ?', [workspace.id]);
   const firstSuccess = sourceRows[0].last_successful_sync_at;
@@ -1786,6 +1878,1240 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   assert.equal(partialBody.top_content[0].provider_content_id, 'video-1');
   const sourceAfterPartial = await db.query('SELECT last_successful_sync_at FROM data_sources WHERE id = ?', [sourceRows[0].id]);
   assert.deepEqual(sourceAfterPartial[0].last_successful_sync_at, firstSuccess);
+});
+
+test('YouTube OAuth state rejects missing, expired, and cross-binding callbacks without Google calls', async () => {
+  await clearDatabase();
+  const owner = await signIn('youtube-state-owner@example.com');
+  const secondOwnerSession = await signIn('youtube-state-owner@example.com');
+  const otherUser = await signIn('youtube-state-other@example.com');
+  let googleCalls = 0;
+  setYouTubeTestHooks({
+    fetch: async () => {
+      googleCalls += 1;
+      throw new Error('google_must_not_be_called_for_rejected_state');
+    }
+  });
+
+  async function startCase(label) {
+    const workspace = await createWorkspace(owner, `YouTube ${label}`);
+    const start = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/start`, {
+      method: 'POST',
+      headers: {
+        cookie: cookieHeader(owner.cookies),
+        'x-csrf-token': owner.csrf
+      },
+      body: { return_path: `/?workspace=${workspace.id}&view=connections` }
+    });
+    assert.equal(start.statusCode, 200);
+    const state = new URL(start.json().authorization_url).searchParams.get('state');
+    const rows = await db.query(
+      `SELECT id, provider_authorization_id
+       FROM oauth_transactions WHERE state_hash = ? LIMIT 1`,
+      [crypto.createHash('sha256').update(state).digest('hex')]
+    );
+    return { workspace, state, transaction: rows[0] };
+  }
+
+  async function expectRejected(state, session = owner, outcome = 'failed') {
+    const callback = await requestApp(
+      `/api/integrations/youtube/callback?code=must-not-exchange&state=${encodeURIComponent(state)}`,
+      { headers: { cookie: cookieHeader(session.cookies) } }
+    );
+    assert.equal(callback.statusCode, 303);
+    assert.equal(
+      new URL(callback.headers.location, 'http://localhost').searchParams.get('youtube'),
+      outcome
+    );
+    assert.equal(callback.body.includes('must-not-exchange'), false);
+  }
+
+  const missingState = await requestApp('/api/integrations/youtube/callback?code=must-not-exchange', {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(missingState.headers.location, '/?view=connections&youtube=failed');
+
+  const expired = await startCase('Expired State');
+  await db.query(
+    `UPDATE oauth_transactions SET expires_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 SECOND)
+     WHERE id = ?`,
+    [expired.transaction.id]
+  );
+  await expectRejected(expired.state);
+  const expiredRows = await db.query(
+    `SELECT status, pkce_verifier_ciphertext FROM oauth_transactions WHERE id = ?`,
+    [expired.transaction.id]
+  );
+  assert.equal(expiredRows[0].status, 'expired');
+  assert.equal(expiredRows[0].pkce_verifier_ciphertext, null);
+
+  const sessionMismatch = await startCase('Session Mismatch');
+  await expectRejected(sessionMismatch.state, secondOwnerSession);
+
+  const userMismatch = await startCase('User Mismatch');
+  await db.query('UPDATE oauth_transactions SET initiated_by = ? WHERE id = ?', [
+    otherUser.user.id,
+    userMismatch.transaction.id
+  ]);
+  await expectRejected(userMismatch.state);
+
+  const workspaceMismatch = await startCase('Workspace Mismatch');
+  const movedWorkspace = await createWorkspace(owner, 'YouTube Moved Authorization');
+  await db.query('UPDATE provider_authorizations SET workspace_id = ? WHERE id = ?', [
+    movedWorkspace.id,
+    workspaceMismatch.transaction.provider_authorization_id
+  ]);
+  await expectRejected(workspaceMismatch.state);
+
+  const providerMismatch = await startCase('Provider Mismatch');
+  await db.query("UPDATE oauth_transactions SET provider = 'tiktok' WHERE id = ?", [
+    providerMismatch.transaction.id
+  ]);
+  await expectRejected(providerMismatch.state);
+
+  const redirectMismatch = await startCase('Redirect Mismatch');
+  await db.query(
+    "UPDATE oauth_transactions SET redirect_uri = 'https://evil.example/callback' WHERE id = ?",
+    [redirectMismatch.transaction.id]
+  );
+  await expectRejected(redirectMismatch.state, owner, 'configuration_error');
+
+  const scopeMismatch = await startCase('Scope Mismatch');
+  await db.query('UPDATE oauth_transactions SET requested_scopes = ? WHERE id = ?', [
+    JSON.stringify([YOUTUBE_SCOPES[0]]),
+    scopeMismatch.transaction.id
+  ]);
+  await expectRejected(scopeMismatch.state);
+
+  assert.equal(googleCalls, 0);
+});
+
+test('YouTube OAuth failures distinguish denial, missing code, missing scopes, and provider timeout', async () => {
+  await clearDatabase();
+  const owner = await signIn('youtube-failure-owner@example.com');
+
+  async function startCase(label) {
+    const workspace = await createWorkspace(owner, `YouTube ${label}`);
+    const start = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/start`, {
+      method: 'POST',
+      headers: {
+        cookie: cookieHeader(owner.cookies),
+        'x-csrf-token': owner.csrf
+      },
+      body: { return_path: `/?workspace=${workspace.id}&view=connections` }
+    });
+    assert.equal(start.statusCode, 200);
+    return {
+      workspace,
+      state: new URL(start.json().authorization_url).searchParams.get('state')
+    };
+  }
+
+  async function latestFailure(workspaceId) {
+    const rows = await db.query(
+      `SELECT JSON_UNQUOTE(JSON_EXTRACT(al.metadata, '$.outcome_category')) AS outcome
+       FROM audit_logs al
+       WHERE al.workspace_id = ? AND al.action = 'connection.youtube.authorization_failed'
+       ORDER BY al.created_at DESC LIMIT 1`,
+      [workspaceId]
+    );
+    return rows[0] && rows[0].outcome;
+  }
+
+  const denied = await startCase('Denied');
+  const deniedCallback = await requestApp(
+    `/api/integrations/youtube/callback?error=access_denied&state=${encodeURIComponent(denied.state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(new URL(deniedCallback.headers.location, 'http://localhost').searchParams.get('youtube'), 'denied');
+  assert.equal(await latestFailure(denied.workspace.id), 'user_denied');
+
+  const missingCode = await startCase('Missing Code');
+  const missingCodeCallback = await requestApp(
+    `/api/integrations/youtube/callback?state=${encodeURIComponent(missingCode.state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(new URL(missingCodeCallback.headers.location, 'http://localhost').searchParams.get('youtube'), 'failed');
+  assert.equal(await latestFailure(missingCode.workspace.id), 'missing_code');
+
+  const partial = await startCase('Partial Scopes');
+  const partialHandlers = installYouTubeQueue([
+    () => jsonResponse(200, {
+      access_token: 'partial-access-token',
+      refresh_token: 'partial-refresh-token',
+      expires_in: 3600,
+      scope: YOUTUBE_SCOPES[0]
+    }),
+    (url, options) => {
+      assert.equal(url, 'https://oauth2.googleapis.com/revoke');
+      assert.equal(new URLSearchParams(options.body).get('token'), 'partial-refresh-token');
+      return jsonResponse(200, {});
+    }
+  ]);
+  const partialCallback = await requestApp(
+    `/api/integrations/youtube/callback?code=partial-code&state=${encodeURIComponent(partial.state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(new URL(partialCallback.headers.location, 'http://localhost').searchParams.get('youtube'), 'missing_scopes');
+  assert.equal(partialHandlers.length, 0);
+  const partialRows = await db.query(
+    `SELECT pauth.status,
+            (SELECT GROUP_CONCAT(scope ORDER BY scope)
+             FROM provider_authorization_scopes pas
+             WHERE pas.provider_authorization_id = pauth.id) AS scopes,
+            (SELECT COUNT(*) FROM provider_authorization_credentials pac
+             WHERE pac.provider_authorization_id = pauth.id) AS credentials
+     FROM provider_authorizations pauth
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'youtube'`,
+    [partial.workspace.id]
+  );
+  assert.equal(partialRows[0].status, 'disabled');
+  assert.equal(partialRows[0].scopes, YOUTUBE_SCOPES[0]);
+  assert.equal(Number(partialRows[0].credentials), 0);
+  assert.equal(await latestFailure(partial.workspace.id), 'missing_required_scopes');
+
+  const expanded = await startCase('Expanded Scopes');
+  const expandedHandlers = installYouTubeQueue([
+    () => jsonResponse(200, {
+      access_token: 'expanded-access-token',
+      refresh_token: 'expanded-refresh-token',
+      expires_in: 3600,
+      scope: [...YOUTUBE_SCOPES, 'https://www.googleapis.com/auth/youtube.upload'].join(' ')
+    }),
+    (url, options) => {
+      assert.equal(url, 'https://oauth2.googleapis.com/revoke');
+      assert.equal(new URLSearchParams(options.body).get('token'), 'expanded-refresh-token');
+      return jsonResponse(200, {});
+    }
+  ]);
+  const expandedCallback = await requestApp(
+    `/api/integrations/youtube/callback?code=expanded-code&state=${encodeURIComponent(expanded.state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(new URL(expandedCallback.headers.location, 'http://localhost').searchParams.get('youtube'), 'missing_scopes');
+  assert.equal(expandedHandlers.length, 0);
+  const expandedCredentials = await db.query(
+    `SELECT COUNT(*) AS count
+     FROM provider_authorization_credentials pac
+     JOIN provider_authorizations pauth ON pauth.id = pac.provider_authorization_id
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'youtube'`,
+    [expanded.workspace.id]
+  );
+  assert.equal(Number(expandedCredentials[0].count), 0);
+  assert.equal(await latestFailure(expanded.workspace.id), 'missing_required_scopes');
+
+  const timeout = await startCase('Token Timeout');
+  setYouTubeTestHooks({
+    fetch: async () => {
+      const error = new Error('synthetic_abort_detail');
+      error.name = 'AbortError';
+      throw error;
+    }
+  });
+  const timeoutCallback = await requestApp(
+    `/api/integrations/youtube/callback?code=timeout-code&state=${encodeURIComponent(timeout.state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(new URL(timeoutCallback.headers.location, 'http://localhost').searchParams.get('youtube'), 'provider_error');
+  assert.equal(timeoutCallback.body.includes('synthetic_abort_detail'), false);
+  assert.equal(timeoutCallback.body.includes('timeout-code'), false);
+  assert.equal(await latestFailure(timeout.workspace.id), 'timeout');
+});
+
+test('YouTube read-only lifecycle is bound, encrypted, bounded, reportable, and purgeable', async () => {
+  await clearDatabase();
+  const owner = await signIn('owner-youtube@example.com');
+  const viewer = await signIn('viewer-youtube@example.com');
+  const workspace = await createWorkspace(owner, 'YouTube Workspace');
+  await db.query(
+    `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+     VALUES (?, ?, 'viewer', 'active')`,
+    [workspace.id, viewer.user.id]
+  );
+
+  const viewerStart = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(viewer.cookies),
+      'x-csrf-token': viewer.csrf
+    },
+    body: { return_path: '/?view=connections' }
+  });
+  assert.equal(viewerStart.statusCode, 403);
+
+  const start = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {
+      return_path: `/?workspace=${workspace.id}&view=connections&provider=youtube`
+    }
+  });
+  assert.equal(start.statusCode, 200);
+  const authorizationUrl = new URL(start.json().authorization_url);
+  const state = authorizationUrl.searchParams.get('state');
+  assert.ok(state);
+  assert.equal(authorizationUrl.searchParams.get('access_type'), 'offline');
+  assert.equal(authorizationUrl.searchParams.get('include_granted_scopes'), 'true');
+  assert.equal(authorizationUrl.searchParams.get('prompt'), 'consent');
+  assert.equal(authorizationUrl.searchParams.get('code_challenge_method'), 'S256');
+  assert.deepEqual(authorizationUrl.searchParams.get('scope').split(' '), YOUTUBE_SCOPES);
+
+  const transactionRows = await db.query(
+    `SELECT ot.*, pa.workspace_id AS authorization_workspace_id
+     FROM oauth_transactions ot
+     JOIN provider_authorizations pa ON pa.id = ot.provider_authorization_id
+     WHERE ot.workspace_id = ? AND ot.provider = 'youtube'`,
+    [workspace.id]
+  );
+  assert.equal(transactionRows.length, 1);
+  const transaction = transactionRows[0];
+  assert.notEqual(transaction.state_hash, state);
+  assert.equal(transaction.state_hash, crypto.createHash('sha256').update(state).digest('hex'));
+  assert.equal(transaction.workspace_id, workspace.id);
+  assert.equal(transaction.authorization_workspace_id, workspace.id);
+  assert.equal(transaction.initiated_by, owner.user.id);
+  assert.equal(transaction.redirect_uri, process.env.YOUTUBE_REDIRECT_URI);
+  assert.deepEqual(
+    typeof transaction.requested_scopes === 'string'
+      ? JSON.parse(transaction.requested_scopes)
+      : transaction.requested_scopes,
+    YOUTUBE_SCOPES
+  );
+  const verifier = decryptSecret({
+    ciphertext: transaction.pkce_verifier_ciphertext,
+    iv: transaction.pkce_verifier_iv,
+    tag: transaction.pkce_verifier_tag,
+    keyVersion: transaction.pkce_key_version
+  });
+  assert.equal(
+    authorizationUrl.searchParams.get('code_challenge'),
+    crypto.createHash('sha256').update(verifier).digest('base64url')
+  );
+
+  const noSessionCallback = await requestApp(
+    `/api/integrations/youtube/callback?code=must-not-run&state=${encodeURIComponent(state)}`
+  );
+  assert.equal(noSessionCallback.statusCode, 303);
+  assert.equal(noSessionCallback.headers.location, '/?view=connections&youtube=failed');
+  assert.equal(noSessionCallback.body.includes('must-not-run'), false);
+
+  const oauthHandlers = installYouTubeQueue([
+    (url, options) => {
+      assert.equal(url, 'https://oauth2.googleapis.com/token');
+      const body = new URLSearchParams(options.body);
+      assert.equal(body.get('code'), 'youtube-provider-code');
+      assert.equal(body.get('code_verifier'), verifier);
+      return jsonResponse(200, {
+        access_token: 'youtube-access-token',
+        refresh_token: 'youtube-refresh-token',
+        expires_in: 3600,
+        token_type: 'Bearer',
+        scope: YOUTUBE_SCOPES.join(' ')
+      });
+    },
+    (url, options) => {
+      const requestUrl = new URL(url);
+      assert.equal(requestUrl.pathname, '/youtube/v3/channels');
+      assert.equal(requestUrl.searchParams.get('mine'), 'true');
+      assert.equal(options.headers.Authorization, 'Bearer youtube-access-token');
+      return jsonResponse(200, {
+        items: [
+          {
+            id: 'channel-alpha',
+            snippet: {
+              title: 'Alpha Studio',
+              customUrl: '@alpha',
+              thumbnails: { high: { url: 'https://img.example/alpha.jpg' } }
+            },
+            statistics: { subscriberCount: '1200', viewCount: '5000', videoCount: '2' },
+            contentDetails: { relatedPlaylists: { uploads: 'uploads-alpha' } }
+          },
+          {
+            id: 'channel-beta',
+            snippet: {
+              title: 'Beta Studio',
+              thumbnails: { default: { url: 'https://img.example/beta.jpg' } }
+            },
+            statistics: { hiddenSubscriberCount: true, viewCount: '900', videoCount: '1' },
+            contentDetails: { relatedPlaylists: { uploads: 'uploads-beta' } }
+          }
+        ]
+      });
+    }
+  ]);
+  const callback = await requestApp(
+    `/api/integrations/youtube/callback?code=youtube-provider-code&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(callback.statusCode, 303);
+  const callbackLocation = new URL(callback.headers.location, 'http://localhost');
+  const callbackDiagnostic = await db.query(
+    `SELECT pa.status,
+            (SELECT JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.outcome_category'))
+             FROM audit_logs
+             WHERE target_id = pa.id AND action = 'connection.youtube.authorization_failed'
+             ORDER BY created_at DESC LIMIT 1) AS failure_category
+     FROM provider_authorizations pa
+     WHERE pa.id = ?`,
+    [transaction.provider_authorization_id]
+  );
+  assert.equal(
+    callbackLocation.searchParams.get('youtube'),
+    'selection_required',
+    JSON.stringify({
+      handlersRemaining: oauthHandlers.length,
+      authorization: callbackDiagnostic[0] || null
+    })
+  );
+  assert.equal(callbackLocation.searchParams.has('code'), false);
+  assert.equal(callbackLocation.searchParams.has('state'), false);
+  assert.equal(callback.body.includes('youtube-provider-code'), false);
+  assert.equal(callback.body.includes(state), false);
+  assert.equal(oauthHandlers.length, 0);
+
+  const consumedTransactions = await db.query(
+    `SELECT status, pkce_verifier_ciphertext, pkce_verifier_iv, pkce_verifier_tag, pkce_key_version
+     FROM oauth_transactions WHERE id = ?`,
+    [transaction.id]
+  );
+  assert.equal(consumedTransactions[0].status, 'consumed');
+  assert.equal(consumedTransactions[0].pkce_verifier_ciphertext, null);
+  assert.equal(consumedTransactions[0].pkce_verifier_iv, null);
+  assert.equal(consumedTransactions[0].pkce_verifier_tag, null);
+  assert.equal(consumedTransactions[0].pkce_key_version, null);
+
+  const replay = await requestApp(
+    `/api/integrations/youtube/callback?code=replayed-code&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(replay.statusCode, 303);
+  assert.equal(replay.headers.location, '/?view=connections&youtube=failed');
+
+  const credentialRows = await db.query(
+    `SELECT pac.*, pa.status AS authorization_status
+     FROM provider_authorization_credentials pac
+     JOIN provider_authorizations pa ON pa.id = pac.provider_authorization_id
+     WHERE pa.workspace_id = ? AND pa.provider = 'youtube'`,
+    [workspace.id]
+  );
+  assert.equal(credentialRows.length, 1);
+  assert.equal(credentialRows[0].authorization_status, 'active');
+  assert.equal(credentialRows[0].key_version, process.env.ENCRYPTION_KEY_VERSION || 'local-v1');
+  assert.notEqual(credentialRows[0].access_token_ciphertext, 'youtube-access-token');
+  assert.notEqual(credentialRows[0].refresh_token_ciphertext, 'youtube-refresh-token');
+  assert.equal(decryptSecret({
+    ciphertext: credentialRows[0].access_token_ciphertext,
+    iv: credentialRows[0].access_token_iv,
+    tag: credentialRows[0].access_token_tag,
+    keyVersion: credentialRows[0].key_version
+  }), 'youtube-access-token');
+  assert.equal(decryptSecret({
+    ciphertext: credentialRows[0].refresh_token_ciphertext,
+    iv: credentialRows[0].refresh_token_iv,
+    tag: credentialRows[0].refresh_token_tag,
+    keyVersion: credentialRows[0].key_version
+  }), 'youtube-refresh-token');
+
+  const catalogBeforeSelection = await requestApp(`/api/workspaces/${workspace.id}/provider-catalog`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(catalogBeforeSelection.statusCode, 200);
+  const youtubeBeforeSelection = catalogBeforeSelection.json().providers.find(provider => provider.id === 'youtube');
+  assert.equal(youtubeBeforeSelection.status, 'selection_required');
+  assert.equal(youtubeBeforeSelection.resources.length, 2);
+  assert.equal(youtubeBeforeSelection.resources.every(resource => resource.selected === false), true);
+  assert.deepEqual(youtubeBeforeSelection.authorization.scopes.map(scope => scope.scope).sort(), [...YOUTUBE_SCOPES].sort());
+
+  const alphaResource = youtubeBeforeSelection.resources.find(resource => resource.provider_resource_id === 'channel-alpha');
+  const selection = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/select`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { resource_id: alphaResource.id }
+  });
+  assert.equal(selection.statusCode, 201);
+  const selectedConnection = selection.json().connection;
+  assert.equal(selectedConnection.account.id, 'channel-alpha');
+  const duplicateSelection = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/select`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { resource_id: alphaResource.id }
+  });
+  assert.equal(duplicateSelection.statusCode, 409);
+  assert.equal(duplicateSelection.json().error, 'youtube_channel_already_connected');
+  await db.query(
+    `UPDATE provider_authorization_credentials pac
+     JOIN provider_authorizations pa ON pa.id = pac.provider_authorization_id
+     SET pac.access_expires_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 MINUTE)
+     WHERE pa.workspace_id = ? AND pa.provider = 'youtube'`,
+    [workspace.id]
+  );
+
+  const yesterday = new Date();
+  yesterday.setUTCHours(0, 0, 0, 0);
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const priorDay = new Date(yesterday);
+  priorDay.setUTCDate(priorDay.getUTCDate() - 1);
+  const yesterdayText = yesterday.toISOString().slice(0, 10);
+  const priorDayText = priorDay.toISOString().slice(0, 10);
+  const analyticsHeaders = ['views', 'estimatedMinutesWatched', 'averageViewDuration',
+    'averageViewPercentage', 'subscribersGained', 'subscribersLost', 'likes', 'comments', 'shares'];
+  const syncHandlers = installYouTubeQueue([
+    (url, options) => {
+      assert.equal(url, 'https://oauth2.googleapis.com/token');
+      const body = new URLSearchParams(options.body);
+      assert.equal(body.get('grant_type'), 'refresh_token');
+      assert.equal(body.get('refresh_token'), 'youtube-refresh-token');
+      return jsonResponse(200, {
+        access_token: 'youtube-refreshed-access-token',
+        expires_in: 3600,
+        token_type: 'Bearer'
+      });
+    },
+    (url, options) => {
+      const requestUrl = new URL(url);
+      assert.equal(requestUrl.pathname, '/youtube/v3/channels');
+      assert.equal(requestUrl.searchParams.get('id'), 'channel-alpha');
+      assert.equal(options.headers.Authorization, 'Bearer youtube-refreshed-access-token');
+      return jsonResponse(200, {
+        items: [{
+          id: 'channel-alpha',
+          snippet: {
+            title: 'Alpha Studio', customUrl: '@alpha',
+            thumbnails: { high: { url: 'https://img.example/alpha.jpg' } }
+          },
+          statistics: { subscriberCount: '1210', viewCount: '5300', videoCount: '2' },
+          contentDetails: { relatedPlaylists: { uploads: 'uploads-alpha' } }
+        }]
+      });
+    },
+    url => {
+      const requestUrl = new URL(url);
+      assert.equal(requestUrl.pathname, '/youtube/v3/playlistItems');
+      assert.equal(requestUrl.searchParams.get('playlistId'), 'uploads-alpha');
+      assert.equal(requestUrl.searchParams.get('maxResults'), '50');
+      return jsonResponse(200, {
+        items: [
+          {
+            contentDetails: { videoId: 'video-one', videoPublishedAt: `${priorDayText}T08:00:00Z` },
+            snippet: { title: 'First video', description: 'First description', thumbnails: { high: { url: 'https://img.example/one.jpg' } } }
+          },
+          {
+            contentDetails: { videoId: 'video-two', videoPublishedAt: `${yesterdayText}T09:00:00Z` },
+            snippet: { title: 'Second video', description: 'Second description', thumbnails: { medium: { url: 'https://img.example/two.jpg' } } }
+          },
+          {
+            contentDetails: { videoId: 'video-one', videoPublishedAt: `${priorDayText}T08:00:00Z` },
+            snippet: { title: 'Duplicate playlist entry must be deduplicated' }
+          }
+        ]
+      });
+    },
+    url => {
+      const requestUrl = new URL(url);
+      assert.equal(requestUrl.pathname, '/youtube/v3/videos');
+      assert.equal(requestUrl.searchParams.get('id'), 'video-one,video-two');
+      return jsonResponse(200, {
+        items: [
+          {
+            id: 'video-one',
+            snippet: { title: 'First video', publishedAt: `${priorDayText}T08:00:00Z`, thumbnails: { high: { url: 'https://img.example/one.jpg' } } },
+            contentDetails: { duration: 'PT2M3S' },
+            statistics: { viewCount: '1000', likeCount: '100', commentCount: '12' },
+            status: { privacyStatus: 'public' }
+          },
+          {
+            id: 'video-two',
+            snippet: { title: 'Second video', publishedAt: `${yesterdayText}T09:00:00Z`, thumbnails: { medium: { url: 'https://img.example/two.jpg' } } },
+            contentDetails: { duration: 'PT45S' },
+            statistics: { viewCount: '500', likeCount: '40', commentCount: '5' },
+            status: { privacyStatus: 'public' }
+          }
+        ]
+      });
+    },
+    url => {
+      const requestUrl = new URL(url);
+      assert.equal(requestUrl.searchParams.get('dimensions'), 'day');
+      return jsonResponse(200, {
+        columnHeaders: [{ name: 'day' }, ...analyticsHeaders.map(name => ({ name }))],
+        rows: [
+          [priorDayText, 100, 500, 300, 60, 5, 2, 10, 3, 1],
+          [yesterdayText, 150, 600, 320, 64, 3, 1, 15, 4, 2]
+        ]
+      });
+    },
+    ...[7, 30, 90].map(days => url => {
+      const requestUrl = new URL(url);
+      assert.equal(requestUrl.searchParams.get('dimensions'), 'video');
+      assert.equal(requestUrl.searchParams.get('sort'), '-views');
+      assert.equal(requestUrl.searchParams.get('maxResults'), '200');
+      return jsonResponse(200, {
+        columnHeaders: [{ name: 'video' }, ...analyticsHeaders.map(name => ({ name }))],
+        rows: [
+          ['video-one', 90 + days, 400 + days, 123, 61.5, 2, 1, 9, 2, 1],
+          ['video-two', 40 + days, 200 + days, 45, 72.2, 1, 0, 4, 1, 0]
+        ]
+      });
+    })
+  ]);
+  const manualSyncResponse = await requestApp(`/api/workspaces/${workspace.id}/providers/youtube/sync-runs`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { connection_id: selectedConnection.id }
+  });
+  assert.equal(manualSyncResponse.statusCode, 202);
+  assert.equal(manualSyncResponse.json().status, 'queued');
+  assert.equal(syncHandlers.length > 0, true);
+
+  const deniedYouTubeSync = await requestApp(`/api/workspaces/${workspace.id}/providers/youtube/sync-runs`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(viewer.cookies),
+      'x-csrf-token': viewer.csrf
+    },
+    body: { connection_id: selectedConnection.id }
+  });
+  assert.equal(deniedYouTubeSync.statusCode, 403);
+  const csrfDeniedYouTubeSync = await requestApp(`/api/workspaces/${workspace.id}/providers/youtube/sync-runs`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies) },
+    body: { connection_id: selectedConnection.id }
+  });
+  assert.equal(csrfDeniedYouTubeSync.statusCode, 403);
+
+  const manualWorker = await runDueSyncs({
+    timeBudgetSeconds: 5,
+    leaseOwner: 'youtube-manual-worker'
+  });
+  assert.equal(manualWorker.processed, 1);
+  assert.equal(manualWorker.results[0].status, 'success');
+  assert.equal(syncHandlers.length, 0);
+  const manualRunRows = await db.query(
+    `SELECT trigger_type FROM sync_runs WHERE id = ?`,
+    [manualWorker.results[0].sync_run_id]
+  );
+  assert.equal(manualRunRows[0].trigger_type, 'manual');
+  const manualCooldown = await requestApp(`/api/workspaces/${workspace.id}/providers/youtube/sync-runs`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { connection_id: selectedConnection.id }
+  });
+  assert.equal(manualCooldown.statusCode, 429);
+  assert.equal(manualCooldown.json().error, 'manual_sync_cooldown');
+
+  const snapshotCounts = await db.query(
+    `SELECT
+       (SELECT COUNT(*) FROM youtube_channel_snapshots WHERE workspace_id = ?) AS channels,
+       (SELECT COUNT(*) FROM youtube_analytics_daily_snapshots WHERE workspace_id = ?) AS daily,
+       (SELECT COUNT(*) FROM youtube_video_analytics_snapshots WHERE workspace_id = ?) AS videos,
+       (SELECT COUNT(*) FROM provider_request_events WHERE workspace_id = ?) AS requests`,
+    [workspace.id, workspace.id, workspace.id, workspace.id]
+  );
+  assert.equal(Number(snapshotCounts[0].channels), 1);
+  assert.equal(Number(snapshotCounts[0].daily), 2);
+  assert.equal(Number(snapshotCounts[0].videos), 6);
+  assert.equal(Number(snapshotCounts[0].requests), 10);
+  const requestSummary = await db.query(
+    `SELECT SUM(quota_cost_estimate) AS quota_cost, MAX(attempts) AS max_attempts,
+            GROUP_CONCAT(method_name ORDER BY method_name) AS methods
+     FROM provider_request_events WHERE workspace_id = ?`,
+    [workspace.id]
+  );
+  assert.equal(Number(requestSummary[0].quota_cost), 4);
+  assert.equal(Number(requestSummary[0].max_attempts), 1);
+  assert.match(requestSummary[0].methods, /channels\.list/);
+  assert.match(requestSummary[0].methods, /channels\.list\.discovery/);
+  assert.match(requestSummary[0].methods, /oauth\.token/);
+  assert.match(requestSummary[0].methods, /oauth\.refresh/);
+  assert.match(requestSummary[0].methods, /reports\.query\.video\.90d/);
+  const refreshedCredentialRows = await db.query(
+    `SELECT pac.*
+     FROM provider_authorization_credentials pac
+     JOIN provider_authorizations pa ON pa.id = pac.provider_authorization_id
+     WHERE pa.workspace_id = ? AND pa.provider = 'youtube'`,
+    [workspace.id]
+  );
+  assert.equal(decryptSecret({
+    ciphertext: refreshedCredentialRows[0].access_token_ciphertext,
+    iv: refreshedCredentialRows[0].access_token_iv,
+    tag: refreshedCredentialRows[0].access_token_tag,
+    keyVersion: refreshedCredentialRows[0].key_version
+  }), 'youtube-refreshed-access-token');
+  assert.equal(decryptSecret({
+    ciphertext: refreshedCredentialRows[0].refresh_token_ciphertext,
+    iv: refreshedCredentialRows[0].refresh_token_iv,
+    tag: refreshedCredentialRows[0].refresh_token_tag,
+    keyVersion: refreshedCredentialRows[0].key_version
+  }), 'youtube-refresh-token');
+
+  setYouTubeTestHooks({ fetch: async () => { throw new Error('dashboard_must_not_call_google'); } });
+  const dashboard = await requestApp(`/api/workspaces/${workspace.id}/providers/youtube/dashboard?range=7d`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(dashboard.statusCode, 200);
+  const dashboardBody = dashboard.json();
+  assert.equal(dashboardBody.channel.display_name, 'Alpha Studio');
+  assert.equal(dashboardBody.availability.data_through_date, yesterdayText);
+  assert.equal(dashboardBody.trend.length, 2);
+  assert.equal(dashboardBody.content.length, 2);
+  const metrics = Object.fromEntries(dashboardBody.metrics.map(metric => [metric.key, metric.value]));
+  assert.equal(metrics.subscribers_current, 1210);
+  assert.equal(metrics.channel_views_lifetime, 5300);
+  assert.equal(metrics.views_period, 250);
+  assert.equal(metrics.watch_time_period, 1100);
+  assert.equal(metrics.net_subscribers_period, 5);
+
+  const customDashboard = await requestApp(
+    `/api/workspaces/${workspace.id}/providers/youtube/dashboard?range=custom&from=${priorDayText}&to=${yesterdayText}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(customDashboard.statusCode, 200);
+  assert.equal(customDashboard.json().availability.video_period_supported, false);
+  assert.deepEqual(customDashboard.json().content, []);
+
+  await db.query(
+    `UPDATE provider_authorization_credentials pac
+     JOIN provider_authorizations pauth ON pauth.id = pac.provider_authorization_id
+     SET pac.refresh_expires_at = DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 DAY)
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'youtube'`,
+    [workspace.id]
+  );
+  const reauthorize = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {
+      connection_id: selectedConnection.id,
+      return_path: `/?workspace=${workspace.id}&view=connections&provider=youtube`
+    }
+  });
+  assert.equal(reauthorize.statusCode, 200);
+  const reauthorizeUrl = new URL(reauthorize.json().authorization_url);
+  assert.equal(reauthorizeUrl.searchParams.has('prompt'), false);
+  const reauthorizeState = reauthorizeUrl.searchParams.get('state');
+  const authorizingCatalog = await requestApp(`/api/workspaces/${workspace.id}/provider-catalog`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  const authorizingYouTube = authorizingCatalog.json().providers.find(provider => provider.id === 'youtube');
+  assert.equal(authorizingYouTube.status, 'authorizing');
+  assert.equal(authorizingYouTube.connectable, true);
+  assert.equal(authorizingYouTube.connections[0].status, 'connecting');
+  const authorizingDashboard = await requestApp(
+    `/api/workspaces/${workspace.id}/providers/youtube/dashboard?range=7d`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(authorizingDashboard.statusCode, 200);
+  assert.equal(authorizingDashboard.json().connection.status, 'connecting');
+  const authorizingManualSync = await requestApp(
+    `/api/workspaces/${workspace.id}/providers/youtube/sync-runs`,
+    {
+      method: 'POST',
+      headers: {
+        cookie: cookieHeader(owner.cookies),
+        'x-csrf-token': owner.csrf
+      },
+      body: { connection_id: selectedConnection.id }
+    }
+  );
+  assert.equal(authorizingManualSync.statusCode, 400);
+  assert.equal(authorizingManualSync.json().error, 'youtube_not_connected');
+  const pausedJobRows = await db.query('SELECT status FROM sync_jobs WHERE data_source_id = ?', [
+    selectedConnection.data_source_id
+  ]);
+  assert.equal(pausedJobRows[0].status, 'paused');
+
+  const reauthorizeHandlers = installYouTubeQueue([
+    () => jsonResponse(200, {
+      access_token: 'youtube-reauthorized-access-token',
+      refresh_token: 'youtube-rotated-refresh-token',
+      expires_in: 3600,
+      token_type: 'Bearer',
+      scope: YOUTUBE_SCOPES.join(' ')
+    }),
+    () => jsonResponse(200, {
+      items: [
+        {
+          id: 'channel-alpha',
+          snippet: {
+            title: 'Alpha Studio',
+            customUrl: '@alpha',
+            thumbnails: { high: { url: 'https://img.example/alpha.jpg' } }
+          },
+          statistics: { subscriberCount: '1210', viewCount: '5300', videoCount: '2' },
+          contentDetails: { relatedPlaylists: { uploads: 'uploads-alpha' } }
+        },
+        {
+          id: 'channel-beta',
+          snippet: { title: 'Beta Studio' },
+          statistics: { hiddenSubscriberCount: true, viewCount: '900', videoCount: '1' },
+          contentDetails: { relatedPlaylists: { uploads: 'uploads-beta' } }
+        }
+      ]
+    })
+  ]);
+  const reauthorizeCallback = await requestApp(
+    `/api/integrations/youtube/callback?code=youtube-reauthorize-code&state=${encodeURIComponent(reauthorizeState)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(
+    new URL(reauthorizeCallback.headers.location, 'http://localhost').searchParams.get('youtube'),
+    'reconnected'
+  );
+  assert.equal(reauthorizeHandlers.length, 0);
+  const reauthorizedRows = await db.query(
+    `SELECT pac.*, wpc.id AS connection_id, wpc.status AS connection_status, sj.status AS job_status
+     FROM provider_authorization_credentials pac
+     JOIN provider_authorizations pauth ON pauth.id = pac.provider_authorization_id
+     JOIN provider_resources pr ON pr.provider_authorization_id = pauth.id
+       AND pr.provider_resource_id = 'channel-alpha'
+     JOIN workspace_provider_connections wpc ON wpc.provider_resource_id = pr.id
+     JOIN sync_jobs sj ON sj.data_source_id = wpc.data_source_id
+     WHERE pauth.workspace_id = ? AND pauth.provider = 'youtube'`,
+    [workspace.id]
+  );
+  assert.equal(reauthorizedRows[0].connection_id, selectedConnection.id);
+  assert.equal(reauthorizedRows[0].connection_status, 'active');
+  assert.equal(reauthorizedRows[0].job_status, 'due');
+  assert.equal(reauthorizedRows[0].refresh_expires_at, null);
+  assert.equal(decryptSecret({
+    ciphertext: reauthorizedRows[0].access_token_ciphertext,
+    iv: reauthorizedRows[0].access_token_iv,
+    tag: reauthorizedRows[0].access_token_tag,
+    keyVersion: reauthorizedRows[0].key_version
+  }), 'youtube-reauthorized-access-token');
+  assert.equal(decryptSecret({
+    ciphertext: reauthorizedRows[0].refresh_token_ciphertext,
+    iv: reauthorizedRows[0].refresh_token_iv,
+    tag: reauthorizedRows[0].refresh_token_tag,
+    keyVersion: reauthorizedRows[0].key_version
+  }), 'youtube-rotated-refresh-token');
+
+  await db.query(
+    `UPDATE provider_authorization_credentials
+     SET refresh_expires_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 SECOND)
+     WHERE provider_authorization_id = ?`,
+    [reauthorizedRows[0].provider_authorization_id]
+  );
+  const expiredRefreshReauthorize = await requestApp(
+    `/api/workspaces/${workspace.id}/connections/youtube/start`,
+    {
+      method: 'POST',
+      headers: {
+        cookie: cookieHeader(owner.cookies),
+        'x-csrf-token': owner.csrf
+      },
+      body: {
+        connection_id: selectedConnection.id,
+        return_path: `/?workspace=${workspace.id}&view=connections&provider=youtube`
+      }
+    }
+  );
+  assert.equal(expiredRefreshReauthorize.statusCode, 200);
+  assert.equal(new URL(expiredRefreshReauthorize.json().authorization_url).searchParams.get('prompt'), 'consent');
+
+  const storedTextRows = await db.query(
+    `SELECT CAST(metadata AS CHAR) AS text FROM audit_logs WHERE workspace_id = ?`,
+    [workspace.id]
+  );
+  assert.equal(storedTextRows.some(row => String(row.text).includes('youtube-access-token')), false);
+  assert.equal(storedTextRows.some(row => String(row.text).includes('youtube-refresh-token')), false);
+  assert.equal(storedTextRows.some(row => String(row.text).includes('youtube-rotated-refresh-token')), false);
+
+  const revokeHandlers = installYouTubeQueue([
+    (url, options) => {
+      assert.equal(url, 'https://oauth2.googleapis.com/revoke');
+      assert.equal(new URLSearchParams(options.body).get('token'), 'youtube-rotated-refresh-token');
+      return jsonResponse(503, { error: { status: 'UNAVAILABLE' } });
+    }
+  ]);
+  const disconnect = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { connection_id: selectedConnection.id }
+  });
+  assert.equal(disconnect.statusCode, 200);
+  assert.equal(disconnect.json().provider_revoke.success, false);
+  assert.equal(disconnect.json().provider_revoke.outcome_category, 'provider_revoke_failed_local_purge');
+  assert.equal(disconnect.json().local_data_deleted, true);
+  assert.equal(revokeHandlers.length, 0);
+
+  const purgeCounts = await db.query(
+    `SELECT
+       (SELECT COUNT(*) FROM data_sources WHERE workspace_id = ? AND provider = 'youtube') AS sources,
+       (SELECT COUNT(*) FROM provider_resources WHERE workspace_id = ? AND provider = 'youtube') AS resources,
+       (SELECT COUNT(*) FROM youtube_channel_snapshots WHERE workspace_id = ?) AS channel_snapshots,
+       (SELECT COUNT(*) FROM youtube_analytics_daily_snapshots WHERE workspace_id = ?) AS daily_snapshots,
+       (SELECT COUNT(*) FROM youtube_video_analytics_snapshots WHERE workspace_id = ?) AS video_snapshots`,
+    [workspace.id, workspace.id, workspace.id, workspace.id, workspace.id]
+  );
+  assert.deepEqual({
+    sources: Number(purgeCounts[0].sources),
+    resources: Number(purgeCounts[0].resources),
+    channelSnapshots: Number(purgeCounts[0].channel_snapshots),
+    dailySnapshots: Number(purgeCounts[0].daily_snapshots),
+    videoSnapshots: Number(purgeCounts[0].video_snapshots)
+  }, { sources: 0, resources: 0, channelSnapshots: 0, dailySnapshots: 0, videoSnapshots: 0 });
+  const revokedRows = await db.query(
+    `SELECT pa.status, pa.actor_user_id, pa.provider_subject, pa.display_name,
+            (SELECT COUNT(*) FROM provider_authorization_credentials pac WHERE pac.provider_authorization_id = pa.id) AS credential_count,
+            (SELECT COUNT(*) FROM provider_revocation_events pre WHERE pre.provider_authorization_id = pa.id) AS revocation_count
+     FROM provider_authorizations pa
+     WHERE pa.workspace_id = ? AND pa.provider = 'youtube'`,
+    [workspace.id]
+  );
+  assert.equal(revokedRows.length, 1);
+  assert.equal(revokedRows[0].status, 'revoked');
+  assert.equal(revokedRows[0].actor_user_id, null);
+  assert.equal(revokedRows[0].provider_subject, null);
+  assert.equal(revokedRows[0].display_name, null);
+  assert.equal(Number(revokedRows[0].credential_count), 0);
+  assert.equal(Number(revokedRows[0].revocation_count), 1);
+});
+
+test('YouTube no-channel authorization can still be revoked and purged', async () => {
+  await clearDatabase();
+  const owner = await signIn('youtube-no-channel@example.com');
+  const workspace = await createWorkspace(owner, 'No Channel Workspace');
+  const start = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { return_path: `/?workspace=${workspace.id}&view=connections` }
+  });
+  assert.equal(start.statusCode, 200);
+  const state = new URL(start.json().authorization_url).searchParams.get('state');
+  const oauthHandlers = installYouTubeQueue([
+    () => jsonResponse(200, {
+      access_token: 'no-channel-access',
+      refresh_token: 'no-channel-refresh',
+      expires_in: 3600,
+      scope: YOUTUBE_SCOPES.join(' ')
+    }),
+    () => jsonResponse(200, { items: [] })
+  ]);
+  const callback = await requestApp(
+    `/api/integrations/youtube/callback?code=no-channel-code&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(callback.statusCode, 303);
+  assert.equal(new URL(callback.headers.location, 'http://localhost').searchParams.get('youtube'), 'no_channels');
+  assert.equal(oauthHandlers.length, 0);
+
+  const catalog = await requestApp(`/api/workspaces/${workspace.id}/provider-catalog`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  const youtubeProvider = catalog.json().providers.find(provider => provider.id === 'youtube');
+  assert.equal(youtubeProvider.status, 'no_channels');
+  assert.equal(youtubeProvider.authorization.status, 'active');
+  assert.deepEqual(youtubeProvider.resources, []);
+  assert.deepEqual(youtubeProvider.connections, []);
+  const discoveryRows = await db.query(
+    `SELECT status, quota_cost_estimate, item_count
+     FROM provider_request_events
+     WHERE workspace_id = ? AND method_name = 'channels.list.discovery'`,
+    [workspace.id]
+  );
+  assert.equal(discoveryRows.length, 1);
+  assert.equal(discoveryRows[0].status, 'empty');
+  assert.equal(Number(discoveryRows[0].quota_cost_estimate), 1);
+  assert.equal(Number(discoveryRows[0].item_count), 0);
+
+  const revokeHandlers = installYouTubeQueue([
+    (url, options) => {
+      assert.equal(url, 'https://oauth2.googleapis.com/revoke');
+      assert.equal(new URLSearchParams(options.body).get('token'), 'no-channel-refresh');
+      return jsonResponse(200, {});
+    }
+  ]);
+  const disconnect = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(disconnect.statusCode, 200);
+  assert.equal(disconnect.json().provider_revoke.success, true);
+  assert.equal(revokeHandlers.length, 0);
+  const authorizationRows = await db.query(
+    `SELECT pa.status,
+            (SELECT COUNT(*) FROM provider_authorization_credentials pac WHERE pac.provider_authorization_id = pa.id) AS credentials
+     FROM provider_authorizations pa
+     WHERE pa.workspace_id = ? AND pa.provider = 'youtube'`,
+    [workspace.id]
+  );
+  assert.equal(authorizationRows[0].status, 'revoked');
+  assert.equal(Number(authorizationRows[0].credentials), 0);
+});
+
+test('YouTube authorizations are purged at the validation deadline with or without selected channels', async () => {
+  await clearDatabase();
+  const owner = await signIn('youtube-expired-window@example.com');
+  const workspace = await createWorkspace(owner, 'Expired YouTube Authorization');
+  const start = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { return_path: `/?workspace=${workspace.id}&view=connections` }
+  });
+  const state = new URL(start.json().authorization_url).searchParams.get('state');
+  const handlers = installYouTubeQueue([
+    () => jsonResponse(200, {
+      access_token: 'validation-window-access',
+      refresh_token: 'validation-window-refresh',
+      expires_in: 3600,
+      scope: YOUTUBE_SCOPES.join(' ')
+    }),
+    () => jsonResponse(200, { items: [] })
+  ]);
+  const callback = await requestApp(
+    `/api/integrations/youtube/callback?code=validation-window-code&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(new URL(callback.headers.location, 'http://localhost').searchParams.get('youtube'), 'no_channels');
+  assert.equal(handlers.length, 0);
+
+  const beforeRows = await db.query(
+    `SELECT id, last_validated_at, deletion_due_at
+     FROM provider_authorizations
+     WHERE workspace_id = ? AND provider = 'youtube'`,
+    [workspace.id]
+  );
+  assert.ok(beforeRows[0].last_validated_at);
+  assert.ok(beforeRows[0].deletion_due_at > beforeRows[0].last_validated_at);
+  await db.query(
+    `UPDATE provider_authorizations
+     SET deletion_due_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 SECOND)
+     WHERE id = ?`,
+    [beforeRows[0].id]
+  );
+
+  setYouTubeTestHooks({ fetch: async () => { throw new Error('overdue_purge_must_not_call_google'); } });
+  const worker = await runDueSyncs({ timeBudgetSeconds: 1, leaseOwner: 'youtube-validation-window-worker' });
+  assert.equal(worker.processed, 0);
+  assert.equal(worker.reconciled_youtube_authorizations, 1);
+  const afterRows = await db.query(
+    `SELECT pauth.status, pauth.actor_user_id, pauth.provider_subject,
+            (SELECT COUNT(*) FROM provider_authorization_credentials pac
+             WHERE pac.provider_authorization_id = pauth.id) AS credentials,
+            (SELECT COUNT(*) FROM provider_authorization_scopes pas
+             WHERE pas.provider_authorization_id = pauth.id) AS scopes,
+            (SELECT failure_category FROM provider_revocation_events pre
+             WHERE pre.provider_authorization_id = pauth.id
+             ORDER BY pre.created_at DESC LIMIT 1) AS outcome
+     FROM provider_authorizations pauth WHERE pauth.id = ?`,
+    [beforeRows[0].id]
+  );
+  assert.equal(afterRows[0].status, 'revoked');
+  assert.equal(afterRows[0].actor_user_id, null);
+  assert.equal(afterRows[0].provider_subject, null);
+  assert.equal(Number(afterRows[0].credentials), 0);
+  assert.equal(Number(afterRows[0].scopes), 0);
+  assert.equal(afterRows[0].outcome, 'authorization_validation_window_expired');
+
+  const connectedStart = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/start`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { return_path: `/?workspace=${workspace.id}&view=connections` }
+  });
+  const connectedState = new URL(connectedStart.json().authorization_url).searchParams.get('state');
+  const connectedHandlers = installYouTubeQueue([
+    () => jsonResponse(200, {
+      access_token: 'connected-window-access',
+      refresh_token: 'connected-window-refresh',
+      expires_in: 3600,
+      scope: YOUTUBE_SCOPES.join(' ')
+    }),
+    () => jsonResponse(200, {
+      items: [{
+        id: 'connected-window-channel',
+        snippet: { title: 'Connected Window Channel' },
+        statistics: { subscriberCount: '4', viewCount: '20', videoCount: '1' },
+        contentDetails: { relatedPlaylists: { uploads: 'connected-window-uploads' } }
+      }]
+    })
+  ]);
+  const connectedCallback = await requestApp(
+    `/api/integrations/youtube/callback?code=connected-window-code&state=${encodeURIComponent(connectedState)}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(
+    new URL(connectedCallback.headers.location, 'http://localhost').searchParams.get('youtube'),
+    'selection_required'
+  );
+  assert.equal(connectedHandlers.length, 0);
+  const connectedCatalog = await requestApp(`/api/workspaces/${workspace.id}/provider-catalog`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  const connectedYouTube = connectedCatalog.json().providers.find(provider => provider.id === 'youtube');
+  const connectedSelection = await requestApp(`/api/workspaces/${workspace.id}/connections/youtube/select`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { resource_id: connectedYouTube.resources[0].id }
+  });
+  assert.equal(connectedSelection.statusCode, 201);
+  const connectedAuthorizationRows = await db.query(
+    `SELECT id FROM provider_authorizations
+     WHERE workspace_id = ? AND provider = 'youtube' AND status = 'active'
+     LIMIT 1`,
+    [workspace.id]
+  );
+  await db.query(
+    `UPDATE provider_authorizations
+     SET status = 'reconnect_required',
+         deletion_due_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 SECOND)
+     WHERE id = ?`,
+    [connectedAuthorizationRows[0].id]
+  );
+
+  setYouTubeTestHooks({ fetch: async () => { throw new Error('connected_overdue_purge_must_not_call_google'); } });
+  const connectedWorker = await runDueSyncs({
+    timeBudgetSeconds: 1,
+    leaseOwner: 'youtube-connected-validation-window-worker'
+  });
+  assert.equal(connectedWorker.processed, 0);
+  assert.equal(connectedWorker.reconciled_youtube_authorizations, 1);
+  const connectedAfterRows = await db.query(
+    `SELECT pauth.status,
+            (SELECT COUNT(*) FROM provider_authorization_credentials pac
+             WHERE pac.provider_authorization_id = pauth.id) AS credentials,
+            (SELECT COUNT(*) FROM provider_resources pr
+             WHERE pr.provider_authorization_id = pauth.id) AS resources,
+            (SELECT COUNT(*) FROM data_sources ds
+             WHERE ds.workspace_id = pauth.workspace_id AND ds.provider = 'youtube') AS sources
+     FROM provider_authorizations pauth WHERE pauth.id = ?`,
+    [connectedAuthorizationRows[0].id]
+  );
+  assert.equal(connectedAfterRows[0].status, 'revoked');
+  assert.equal(Number(connectedAfterRows[0].credentials), 0);
+  assert.equal(Number(connectedAfterRows[0].resources), 0);
+  assert.equal(Number(connectedAfterRows[0].sources), 0);
+});
+
+test('YouTube invalid_grant is terminal and immediately purges the authorization', async () => {
+  await clearDatabase();
+  const owner = await signIn('youtube-invalid-grant@example.com');
+  const workspace = await createWorkspace(owner, 'Revoked YouTube Workspace');
+  const authorizationId = crypto.randomUUID();
+  const resourceId = crypto.randomUUID();
+  const dataSourceId = crypto.randomUUID();
+  const connectionId = crypto.randomUUID();
+  const access = encryptSecret('expired-youtube-access');
+  const refresh = encryptSecret('externally-revoked-refresh');
+
+  await db.query(
+    `INSERT INTO provider_authorizations
+      (id, workspace_id, provider, actor_user_id, provider_subject, display_name, status, granted_at)
+     VALUES (?, ?, 'youtube', ?, 'revoked-channel', 'Revoked Channel', 'active', UTC_TIMESTAMP(3))`,
+    [authorizationId, workspace.id, owner.user.id]
+  );
+  await db.query(
+    `INSERT INTO provider_authorization_credentials
+      (id, provider_authorization_id, access_token_ciphertext, access_token_iv, access_token_tag,
+       refresh_token_ciphertext, refresh_token_iv, refresh_token_tag, key_version,
+       access_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 MINUTE))`,
+    [
+      crypto.randomUUID(), authorizationId,
+      access.ciphertext, access.iv, access.tag,
+      refresh.ciphertext, refresh.iv, refresh.tag, access.keyVersion
+    ]
+  );
+  for (const scope of YOUTUBE_SCOPES) {
+    await db.query(
+      `INSERT INTO provider_authorization_scopes
+        (provider_authorization_id, scope, status, granted_at, last_confirmed_at)
+       VALUES (?, ?, 'granted', UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+      [authorizationId, scope]
+    );
+  }
+  await db.query(
+    `INSERT INTO provider_resources
+      (id, provider_authorization_id, workspace_id, provider, resource_type,
+       provider_resource_id, display_name, metadata)
+     VALUES (?, ?, ?, 'youtube', 'youtube_channel', 'revoked-channel', 'Revoked Channel', JSON_OBJECT())`,
+    [resourceId, authorizationId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status, next_sync_at)
+     VALUES (?, ?, 'youtube', 'active', UTC_TIMESTAMP(3))`,
+    [dataSourceId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO workspace_provider_connections
+      (id, workspace_id, provider_resource_id, data_source_id, provider, status, next_sync_at)
+     VALUES (?, ?, ?, ?, 'youtube', 'active', UTC_TIMESTAMP(3))`,
+    [connectionId, workspace.id, resourceId, dataSourceId]
+  );
+  await db.query(
+    `INSERT INTO sync_jobs (id, data_source_id, run_after, status)
+     VALUES (?, ?, UTC_TIMESTAMP(3), 'due')`,
+    [crypto.randomUUID(), dataSourceId]
+  );
+
+  const handlers = installYouTubeQueue([
+    (url, options) => {
+      assert.equal(url, 'https://oauth2.googleapis.com/token');
+      assert.equal(new URLSearchParams(options.body).get('refresh_token'), 'externally-revoked-refresh');
+      return jsonResponse(400, { error: 'invalid_grant' });
+    }
+  ]);
+  const result = await runDueSyncs({ timeBudgetSeconds: 5, leaseOwner: 'youtube-invalid-grant-worker' });
+  assert.equal(result.processed, 1);
+  assert.equal(result.results[0].status, 'failed');
+  assert.equal(result.results[0].error.category, 'authentication');
+  assert.equal(result.results[0].error.provider_code, 'invalid_grant');
+  assert.equal(handlers.length, 0);
+
+  const authorizationRows = await db.query(
+    `SELECT pa.status, pa.actor_user_id, pa.provider_subject,
+            (SELECT COUNT(*) FROM provider_authorization_credentials pac WHERE pac.provider_authorization_id = pa.id) AS credential_count,
+            (SELECT COUNT(*) FROM provider_resources pr WHERE pr.provider_authorization_id = pa.id) AS resource_count,
+            (SELECT COUNT(*) FROM provider_revocation_events pre
+             WHERE pre.provider_authorization_id = pa.id
+               AND pre.failure_category = 'invalid_grant_external_revocation') AS revocation_count
+     FROM provider_authorizations pa WHERE pa.id = ?`,
+    [authorizationId]
+  );
+  assert.equal(authorizationRows[0].status, 'revoked');
+  assert.equal(authorizationRows[0].actor_user_id, null);
+  assert.equal(authorizationRows[0].provider_subject, null);
+  assert.equal(Number(authorizationRows[0].credential_count), 0);
+  assert.equal(Number(authorizationRows[0].resource_count), 0);
+  assert.equal(Number(authorizationRows[0].revocation_count), 1);
+  const sourceRows = await db.query('SELECT COUNT(*) AS count FROM data_sources WHERE id = ?', [dataSourceId]);
+  assert.equal(Number(sourceRows[0].count), 0);
 });
 
 test('seeded fixture snapshots are exposed as clearly labeled demo data', async () => {

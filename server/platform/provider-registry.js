@@ -179,6 +179,10 @@ const PROVIDERS = [
       'youtube.views',
       'youtube.watch_time_minutes',
       'youtube.average_view_duration',
+      'youtube.average_view_percentage',
+      'youtube.subscribers_gained',
+      'youtube.subscribers_lost',
+      'youtube.net_subscribers',
       'youtube.likes',
       'youtube.comments',
       'youtube.shares'
@@ -219,7 +223,9 @@ const PROVIDERS = [
       'ga4.screen_page_views',
       'ga4.engagement_rate',
       'ga4.bounce_rate',
-      'ga4.average_session_duration'
+      'ga4.average_session_duration',
+      'ga4.sessions_per_user',
+      'ga4.screen_page_views_per_user'
     ],
     docs: [
       'https://developers.google.com/analytics/devguides/reporting/data/v1/rest',
@@ -230,88 +236,74 @@ const PROVIDERS = [
   }
 ];
 
-const METRIC_DEFINITIONS = {
-  'tiktok.followers': {
-    label: 'Followers',
-    provider: 'tiktok',
-    unit: 'count',
-    aggregation: 'latest_snapshot',
-    dateSemantics: 'snapshot_at_sync_time',
-    unavailableWhen: 'TikTok scope missing or profile statistic not returned'
-  },
-  'tiktok.video_views': {
-    label: 'Video views',
-    provider: 'tiktok',
-    unit: 'count',
-    aggregation: 'latest_video_snapshot',
-    dateSemantics: 'video_snapshot_at_sync_time',
-    unavailableWhen: 'No videos returned or video statistic not returned'
-  },
-  'instagram.reach': {
-    label: 'Reach',
-    provider: 'instagram',
-    unit: 'count',
-    aggregation: 'provider_reported_period',
-    dateSemantics: 'provider_insight_period',
-    unavailableWhen: 'Permission missing, media/account type unsupported, or privacy thresholding'
-  },
-  'facebook.page_follows': {
-    label: 'Page follows',
-    provider: 'facebook_pages',
-    unit: 'count',
-    aggregation: 'latest_snapshot',
-    dateSemantics: 'provider_insight_snapshot',
-    unavailableWhen: 'Permission missing, metric unavailable, or Page ineligible'
-  },
-  'youtube.watch_time_minutes': {
-    label: 'Watch time',
-    provider: 'youtube',
-    unit: 'minutes',
-    aggregation: 'sum',
-    dateSemantics: 'youtube_analytics_available_date_range',
-    unavailableWhen: 'Analytics scope missing or YouTube data-through date is earlier than requested'
-  },
-  'ga4.active_users': {
-    label: 'Active users',
-    provider: 'google_analytics_4',
-    unit: 'count',
-    aggregation: 'sum',
-    dateSemantics: 'property_timezone_date_range',
-    unavailableWhen: 'Metric incompatible with requested dimensions or thresholded'
-  },
-  'ga4.new_users': {
-    label: 'New users',
-    provider: 'google_analytics_4',
-    unit: 'count',
-    aggregation: 'sum',
-    dateSemantics: 'property_timezone_date_range',
-    unavailableWhen: 'Metric incompatible with requested dimensions or thresholded'
-  },
-  'ga4.sessions': {
-    label: 'Sessions',
-    provider: 'google_analytics_4',
-    unit: 'count',
-    aggregation: 'sum',
-    dateSemantics: 'property_timezone_date_range',
-    unavailableWhen: 'Metric incompatible with requested dimensions or thresholded'
-  },
-  'ga4.screen_page_views': {
-    label: 'Views',
-    provider: 'google_analytics_4',
-    unit: 'count',
-    aggregation: 'sum',
-    dateSemantics: 'property_timezone_date_range',
-    unavailableWhen: 'Metric incompatible with requested dimensions or thresholded'
-  },
-  'ga4.engagement_rate': {
-    label: 'Engagement rate',
-    provider: 'google_analytics_4',
-    unit: 'ratio',
-    aggregation: 'provider_computed',
-    dateSemantics: 'property_timezone_date_range',
-    unavailableWhen: 'Metric incompatible with requested dimensions or thresholded'
-  }
-};
+const METRIC_DEFINITION_VERSION = '2026-07-18';
+
+function metric(provider, label, unit, aggregation, dateSemantics, definition, unavailableWhen) {
+  return Object.freeze({
+    label,
+    provider,
+    unit,
+    aggregation,
+    dateSemantics,
+    definition,
+    unavailableWhen,
+    version: METRIC_DEFINITION_VERSION
+  });
+}
+
+const PROFILE_UNAVAILABLE = 'Required access missing or the provider did not return the profile statistic';
+const CONTENT_UNAVAILABLE = 'No eligible content returned or the provider did not report this content statistic';
+const META_UNAVAILABLE = 'Required access missing, resource or media type unsupported, or provider data withheld';
+const YOUTUBE_UNAVAILABLE = 'Analytics access missing, report incompatible, or data-through date earlier than requested';
+const GA4_UNAVAILABLE = 'Metric incompatible with selected dimensions, delayed, or withheld by Google thresholding';
+
+const METRIC_DEFINITIONS = Object.freeze({
+  'tiktok.followers': metric('tiktok', 'Followers', 'count', 'latest_snapshot', 'snapshot_at_sync_time', 'Provider-reported follower total at observation time.', PROFILE_UNAVAILABLE),
+  'tiktok.following': metric('tiktok', 'Following', 'count', 'latest_snapshot', 'snapshot_at_sync_time', 'Provider-reported accounts-followed total at observation time.', PROFILE_UNAVAILABLE),
+  'tiktok.total_likes': metric('tiktok', 'Total likes', 'count', 'latest_snapshot', 'snapshot_at_sync_time', 'Provider-reported lifetime profile likes total at observation time.', PROFILE_UNAVAILABLE),
+  'tiktok.video_count': metric('tiktok', 'Videos', 'count', 'latest_snapshot', 'snapshot_at_sync_time', 'Provider-reported published video total at observation time.', PROFILE_UNAVAILABLE),
+  'tiktok.video_views': metric('tiktok', 'Video views', 'count', 'latest_content_snapshot', 'content_snapshot_at_sync_time', 'Provider-reported view total for one video at observation time.', CONTENT_UNAVAILABLE),
+  'tiktok.video_likes': metric('tiktok', 'Video likes', 'count', 'latest_content_snapshot', 'content_snapshot_at_sync_time', 'Provider-reported like total for one video at observation time.', CONTENT_UNAVAILABLE),
+  'tiktok.video_comments': metric('tiktok', 'Video comments', 'count', 'latest_content_snapshot', 'content_snapshot_at_sync_time', 'Provider-reported comment total for one video at observation time.', CONTENT_UNAVAILABLE),
+  'tiktok.video_shares': metric('tiktok', 'Video shares', 'count', 'latest_content_snapshot', 'content_snapshot_at_sync_time', 'Provider-reported share total for one video at observation time.', CONTENT_UNAVAILABLE),
+
+  'instagram.reach': metric('instagram', 'Reach', 'count', 'provider_reported_period', 'meta_insight_period', 'Accounts reached for the eligible account or media and provider-reported period.', META_UNAVAILABLE),
+  'instagram.views': metric('instagram', 'Views', 'count', 'provider_reported_period', 'meta_insight_period', 'Provider-reported views for the eligible account or media and period.', META_UNAVAILABLE),
+  'instagram.likes': metric('instagram', 'Likes', 'count', 'latest_content_snapshot', 'content_snapshot_at_sync_time', 'Provider-reported like total for eligible media.', META_UNAVAILABLE),
+  'instagram.comments': metric('instagram', 'Comments', 'count', 'latest_content_snapshot', 'content_snapshot_at_sync_time', 'Provider-reported comment total for eligible media.', META_UNAVAILABLE),
+  'instagram.shares': metric('instagram', 'Shares', 'count', 'provider_reported_period', 'meta_insight_period', 'Provider-reported share count for eligible media and period.', META_UNAVAILABLE),
+  'instagram.saves': metric('instagram', 'Saves', 'count', 'provider_reported_period', 'meta_insight_period', 'Provider-reported save count for eligible media and period.', META_UNAVAILABLE),
+
+  'facebook.followers': metric('facebook_pages', 'Followers', 'count', 'latest_snapshot', 'meta_insight_snapshot', 'Provider-reported Page follower total at observation time.', META_UNAVAILABLE),
+  'facebook.page_follows': metric('facebook_pages', 'Page follows', 'count', 'provider_reported_period', 'meta_insight_period', 'Provider-reported follows for the selected Page and period.', META_UNAVAILABLE),
+  'facebook.page_post_engagements': metric('facebook_pages', 'Post engagements', 'count', 'provider_reported_period', 'meta_insight_period', 'Provider-reported Page post engagements for the period.', META_UNAVAILABLE),
+  'facebook.page_media_views': metric('facebook_pages', 'Media views', 'count', 'provider_reported_period', 'meta_insight_period', 'Provider-reported eligible Page media views for the period.', META_UNAVAILABLE),
+  'facebook.post_reactions': metric('facebook_pages', 'Post reactions', 'count', 'latest_content_snapshot', 'content_snapshot_at_sync_time', 'Provider-reported reaction total for one Page post.', META_UNAVAILABLE),
+  'facebook.post_comments': metric('facebook_pages', 'Post comments', 'count', 'latest_content_snapshot', 'content_snapshot_at_sync_time', 'Provider-reported comment total for one Page post.', META_UNAVAILABLE),
+  'facebook.post_shares': metric('facebook_pages', 'Post shares', 'count', 'latest_content_snapshot', 'content_snapshot_at_sync_time', 'Provider-reported share total for one Page post.', META_UNAVAILABLE),
+
+  'youtube.subscribers': metric('youtube', 'Subscribers', 'count', 'latest_snapshot', 'channel_snapshot_at_sync_time', 'Public channel subscriber total at observation time; it may be hidden by the channel.', YOUTUBE_UNAVAILABLE),
+  'youtube.views': metric('youtube', 'Views', 'count', 'sum', 'youtube_analytics_available_date_range', 'Views reported by YouTube Analytics for the selected date range.', YOUTUBE_UNAVAILABLE),
+  'youtube.watch_time_minutes': metric('youtube', 'Watch time', 'minutes', 'sum', 'youtube_analytics_available_date_range', 'Estimated minutes watched reported by YouTube Analytics.', YOUTUBE_UNAVAILABLE),
+  'youtube.average_view_duration': metric('youtube', 'Average view duration', 'seconds', 'provider_computed', 'youtube_analytics_available_date_range', 'Average seconds watched per view reported by YouTube Analytics.', YOUTUBE_UNAVAILABLE),
+  'youtube.average_view_percentage': metric('youtube', 'Average percentage viewed', 'percent', 'provider_computed', 'youtube_analytics_available_date_range', 'Average percentage of a video watched as reported by YouTube Analytics.', YOUTUBE_UNAVAILABLE),
+  'youtube.subscribers_gained': metric('youtube', 'Subscribers gained', 'count', 'sum', 'youtube_analytics_available_date_range', 'Subscribers gained during the selected YouTube Analytics range.', YOUTUBE_UNAVAILABLE),
+  'youtube.subscribers_lost': metric('youtube', 'Subscribers lost', 'count', 'sum', 'youtube_analytics_available_date_range', 'Subscribers lost during the selected YouTube Analytics range.', YOUTUBE_UNAVAILABLE),
+  'youtube.net_subscribers': metric('youtube', 'Net subscribers', 'count', 'derived_difference', 'youtube_analytics_available_date_range', 'Subscribers gained minus subscribers lost for the same range.', YOUTUBE_UNAVAILABLE),
+  'youtube.likes': metric('youtube', 'Likes', 'count', 'sum', 'youtube_analytics_available_date_range', 'Likes reported by YouTube Analytics for the selected range.', YOUTUBE_UNAVAILABLE),
+  'youtube.comments': metric('youtube', 'Comments', 'count', 'sum', 'youtube_analytics_available_date_range', 'Comments reported by YouTube Analytics for the selected range.', YOUTUBE_UNAVAILABLE),
+  'youtube.shares': metric('youtube', 'Shares', 'count', 'sum', 'youtube_analytics_available_date_range', 'Shares reported by YouTube Analytics for the selected range.', YOUTUBE_UNAVAILABLE),
+
+  'ga4.active_users': metric('google_analytics_4', 'Active users', 'count', 'provider_reported_range', 'ga4_property_timezone_date_range', 'Distinct users who engaged with the site or app during the selected GA4 range.', GA4_UNAVAILABLE),
+  'ga4.new_users': metric('google_analytics_4', 'New users', 'count', 'provider_reported_range', 'ga4_property_timezone_date_range', 'Users who interacted for the first time during the selected GA4 range.', GA4_UNAVAILABLE),
+  'ga4.sessions': metric('google_analytics_4', 'Sessions', 'count', 'sum', 'ga4_property_timezone_date_range', 'Sessions that began on the site or app during the selected range.', GA4_UNAVAILABLE),
+  'ga4.screen_page_views': metric('google_analytics_4', 'Views', 'count', 'sum', 'ga4_property_timezone_date_range', 'Page views and screen views reported by GA4, including repeated views.', GA4_UNAVAILABLE),
+  'ga4.engagement_rate': metric('google_analytics_4', 'Engagement rate', 'ratio', 'provider_computed', 'ga4_property_timezone_date_range', 'Engaged sessions divided by sessions as reported by GA4.', GA4_UNAVAILABLE),
+  'ga4.bounce_rate': metric('google_analytics_4', 'Bounce rate', 'ratio', 'provider_computed', 'ga4_property_timezone_date_range', 'Sessions that were not engaged divided by sessions as reported by GA4.', GA4_UNAVAILABLE),
+  'ga4.average_session_duration': metric('google_analytics_4', 'Average session duration', 'seconds', 'provider_computed', 'ga4_property_timezone_date_range', 'Average session duration in seconds as reported by GA4.', GA4_UNAVAILABLE),
+  'ga4.sessions_per_user': metric('google_analytics_4', 'Sessions per user', 'ratio', 'provider_computed', 'ga4_property_timezone_date_range', 'Sessions divided by active users as reported by GA4.', GA4_UNAVAILABLE),
+  'ga4.screen_page_views_per_user': metric('google_analytics_4', 'Views per user', 'ratio', 'provider_computed', 'ga4_property_timezone_date_range', 'Views divided by active users as reported by GA4.', GA4_UNAVAILABLE)
+});
 
 function flagEnabled(value) {
   return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());

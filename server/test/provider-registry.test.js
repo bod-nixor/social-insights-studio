@@ -124,6 +124,30 @@ test('GA4 metric dictionary keeps users, sessions, and views distinct', () => {
   assert.equal(metrics['ga4.screen_page_views'].label, 'Views');
   assert.notEqual(metrics['ga4.new_users'].label, metrics['ga4.screen_page_views'].label);
   assert.notEqual(metrics['ga4.sessions'].label, metrics['ga4.screen_page_views'].label);
+  assert.equal(metrics['ga4.active_users'].aggregation, 'provider_reported_range');
+  assert.equal(metrics['ga4.average_session_duration'].unit, 'seconds');
+  assert.equal(metrics['ga4.sessions_per_user'].label, 'Sessions per user');
+  assert.equal(metrics['ga4.screen_page_views_per_user'].label, 'Views per user');
+});
+
+test('every advertised metric has a versioned provider-specific definition and unit', () => {
+  const definitions = getMetricDefinitions();
+  const providers = getProviderCatalog({});
+
+  for (const provider of providers) {
+    for (const metricKey of provider.metrics) {
+      const definition = definitions[metricKey];
+      assert.ok(definition, `missing definition for ${metricKey}`);
+      assert.equal(definition.provider, provider.id);
+      assert.ok(definition.label);
+      assert.ok(definition.unit);
+      assert.ok(definition.aggregation);
+      assert.ok(definition.dateSemantics);
+      assert.ok(definition.definition);
+      assert.ok(definition.unavailableWhen);
+      assert.match(definition.version, /^\d{4}-\d{2}-\d{2}$/);
+    }
+  }
 });
 
 test('provider adapter contract keeps product auth separate from sign-in auth', () => {

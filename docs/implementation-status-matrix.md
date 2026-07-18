@@ -31,7 +31,7 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | Backend tests | Complete for current scope - 94/94 passed. |
 | Real-MariaDB tests | Complete for current scope - 35/35 passed. |
 | Backend coverage | Complete for current gate - 87.44% lines, 68.36% branches, 92.92% functions. New security/report modules still require focused branch coverage. |
-| Migrations | Complete for 001-008 on development and test databases; clean migration and TikTok compatibility upgrade cases are covered, and applying `up` repeatedly is idempotent. |
+| Migrations | Complete for 001-010 on development and test databases; clean migration, TikTok compatibility, provider/report tenant-integrity constraints, and repeated no-op application are covered. |
 | Worker smoke | Complete for current scope - bounded no-work run exited successfully without provider calls. |
 | Dependency audits | Complete - root, server, and web production audits reported zero known vulnerabilities. |
 | Production preflight | Complete for current enabled TikTok/YouTube/Meta contract with synthetic configuration; only missing deployment provenance was warned. |
@@ -70,16 +70,18 @@ This matrix is the engineering baseline for the complete multi-platform continua
 | MariaDB modular-monolith and bounded worker | Complete | Current cPanel-compatible architecture is accepted and tested. |
 | One authorization backing multiple resources | Complete for YouTube and Meta | Shared authorization/resource/connection rows and explicit selection are implemented. |
 | Independent workspace-owned data sources and tenant isolation | Complete for current providers | Cross-workspace tests fail closed. |
-| Exact granted/missing/denied/revoked scopes | Partially complete | Provider authorization scope state exists; TikTok compatibility paths and user-facing partial-consent summaries need unification. |
+| Exact granted/missing/denied/revoked scopes | Complete for current provider foundation | Authorization scope rows preserve exact state; product copy summarizes partial consent without exposing raw implementation identifiers. |
 | Encrypted, versioned credentials | Complete | AES-256-GCM current/previous-key support covers authorization and resource credentials. |
 | Incremental provider authorization | Complete for YouTube; provider-specific for Meta/TikTok | Google product auth is separate from OIDC. Meta uses dedicated Login for Business configurations. |
 | Provider API version and capability metadata | Complete for current provider slices | Catalog, authorization, connection capability, and sync-state fields exist. |
-| Sync cursor/checkpoint/quota/request metadata | Partially complete | Shared fields and YouTube/Meta telemetry exist; GA4 and generalized breakdown checkpoints are absent. |
+| Sync cursor/checkpoint/quota/request metadata | Complete as a shared foundation | Connection sync state, per-run provider API version, cursors, data-through timestamps, retry state, and request telemetry are modeled. GA4 will populate them in its vertical slice. |
 | Immutable account/profile and content observations | Complete for TikTok, YouTube, and Meta | Provider-specific snapshot tables preserve null and date semantics. |
-| Dimension/breakdown observations | Not implemented | Required mainly for GA4 and future compatible provider reports. |
-| Report definitions, runs, jobs, and protected artifacts | Not implemented | Existing `exports` tables cover CSV only; no PDF report model exists. |
+| Dimension/breakdown observations | Complete as a storage/contract foundation | Namespaced aggregate rows have canonical dimension hashes, explicit per-metric availability, threshold flags, period semantics, and tenant constraints. GA4 will be the first writer. |
+| Report definitions, runs, jobs, and protected artifacts | Complete as a schema foundation | Workspace definitions, relational resources, idempotent leased runs, resource/metric snapshots, private artifact metadata, expiry, and hashed one-time grants exist. Rendering/API/worker behavior remains the PDF phase. |
 | Live-compatible TikTok migration | Complete | Provider-foundation upgrade preserves ciphertext without token rewrite. |
-| Universal metrics avoided | Complete in current registry | Provider-specific dictionaries exist and GA4 names are not mapped to social metrics. Cross-platform rendering remains to be built. |
+| Universal metrics avoided | Complete in current registry | Every advertised metric now has a versioned provider-specific definition, unit, aggregation, date semantics, and unavailable rule. GA4 active users are explicitly not summed across daily rows. |
+| Executable provider adapter contract | Complete for new integrations | A validated versioned boundary covers authorization, refresh/revocation, scope inspection, discovery/selection, synchronization, and deletion. Existing providers remain tested compatibility adapters until refactoring can occur without behavior change. |
+| Observation tenant integrity | Complete | Composite workspace/provider foreign keys reject cross-workspace authorization, resource, observation, definition, and run references in real MariaDB tests. |
 
 ## Provider Status
 
@@ -109,9 +111,9 @@ This matrix is the engineering baseline for the complete multi-platform continua
 
 | Requirement | Status | Evidence and remaining work |
 | --- | --- | --- |
-| Async DB-backed report pipeline | Not implemented | Requires additive report migrations, worker claims, idempotency, and retention. |
+| Async DB-backed report pipeline | Partially complete | Additive definitions and idempotent leased run/job tables exist; worker claims, rendering, retries, and retention execution remain. |
 | Stored-only report data selection | Not implemented | Dashboard query foundations can be reused, but report snapshots/definitions are absent. |
-| Protected artifact storage/download/delete | Not implemented | Requires private path validation, workspace authorization, grants, expiry, and cleanup. |
+| Protected artifact storage/download/delete | Partially complete | Private artifact metadata, expiry, hashes, size/page limits, and one-time grant records exist; filesystem validation and authorized APIs remain. |
 | cPanel-compatible renderer | Not implemented | A pure renderer must be selected and documented; system Chromium cannot be assumed. |
 | Branded cover, cross-platform summary, provider sections, methodology | Not implemented | Reference hierarchy is documented only. |
 | Deterministic five-provider fixtures and generated samples | Not implemented | No local sample PDFs exist. |
@@ -143,7 +145,7 @@ This matrix is the engineering baseline for the complete multi-platform continua
 
 ## First Safe Implementation Order
 
-1. Add the missing shared breakdown/report schema without disturbing provider credentials or TikTok compatibility.
+1. Re-verify the current official Instagram/YouTube read-only authorization boundary and retain their fail-closed gates.
 2. Implement GA4 behind a disabled-by-default exact-scope gate.
 3. Build the cross-platform overview and global provider/resource/timezone filters.
 4. Implement the protected asynchronous PDF report pipeline and deterministic render QA.

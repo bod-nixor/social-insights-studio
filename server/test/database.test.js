@@ -518,7 +518,9 @@ test('migrations are applied to the real MariaDB test database', async () => {
     '005_meta_readonly_vertical',
     '006_meta_period_snapshots',
     '007_meta_oauth_config_binding',
-    '008_account_invitation_lifecycle'
+    '008_account_invitation_lifecycle',
+    '009_observations_and_report_foundation',
+    '010_provider_report_tenant_integrity'
   ]);
 
   const tableRows = await db.query(
@@ -539,6 +541,158 @@ test('migrations are applied to the real MariaDB test database', async () => {
      )`
   );
   assert.equal(tableRows.length, 12);
+
+  const architectureRows = await db.query(
+    `SELECT TABLE_NAME AS table_name FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (
+       'provider_resource_observations',
+       'provider_metric_observations',
+       'provider_dimension_observations',
+       'report_definitions',
+       'report_definition_resources',
+       'report_runs',
+       'report_run_resources',
+       'report_artifacts',
+       'report_download_grants'
+     )`
+  );
+  assert.equal(architectureRows.length, 9);
+
+  const syncColumns = await db.query(
+    `SELECT COLUMN_NAME AS column_name FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sync_runs'
+       AND COLUMN_NAME IN ('workspace_provider_connection_id', 'provider_api_version')`
+  );
+  assert.equal(syncColumns.length, 2);
+});
+
+test('provider observations and report definitions enforce workspace ownership in the schema', async () => {
+  await clearDatabase();
+  const firstOwner = await signIn('architecture-first@example.com');
+  const secondOwner = await signIn('architecture-second@example.com');
+  const firstWorkspace = await createWorkspace(firstOwner, 'Architecture First');
+  const secondWorkspace = await createWorkspace(secondOwner, 'Architecture Second');
+  const firstSourceId = crypto.randomUUID();
+  const secondSourceId = crypto.randomUUID();
+  const firstAuthorizationId = crypto.randomUUID();
+  const secondAuthorizationId = crypto.randomUUID();
+  const firstResourceId = crypto.randomUUID();
+  const secondResourceId = crypto.randomUUID();
+  const firstConnectionId = crypto.randomUUID();
+  const secondConnectionId = crypto.randomUUID();
+  const firstRunId = crypto.randomUUID();
+
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status) VALUES
+     (?, ?, 'tiktok', 'active'), (?, ?, 'tiktok', 'active')`,
+    [firstSourceId, firstWorkspace.id, secondSourceId, secondWorkspace.id]
+  );
+  await db.query(
+    `INSERT INTO provider_authorizations
+      (id, workspace_id, provider, actor_user_id, source_data_source_id, status)
+     VALUES (?, ?, 'tiktok', ?, ?, 'active'), (?, ?, 'tiktok', ?, ?, 'active')`,
+    [
+      firstAuthorizationId,
+      firstWorkspace.id,
+      firstOwner.user.id,
+      firstSourceId,
+      secondAuthorizationId,
+      secondWorkspace.id,
+      secondOwner.user.id,
+      secondSourceId
+    ]
+  );
+  await db.query(
+    `INSERT INTO provider_resources
+      (id, provider_authorization_id, workspace_id, provider, resource_type, provider_resource_id, display_name)
+     VALUES (?, ?, ?, 'tiktok', 'tiktok_account', 'first-account', 'First Account'),
+            (?, ?, ?, 'tiktok', 'tiktok_account', 'second-account', 'Second Account')`,
+    [
+      firstResourceId,
+      firstAuthorizationId,
+      firstWorkspace.id,
+      secondResourceId,
+      secondAuthorizationId,
+      secondWorkspace.id
+    ]
+  );
+  await db.query(
+    `INSERT INTO workspace_provider_connections
+      (id, workspace_id, provider_resource_id, data_source_id, provider, status)
+     VALUES (?, ?, ?, ?, 'tiktok', 'active'), (?, ?, ?, ?, 'tiktok', 'active')`,
+    [
+      firstConnectionId,
+      firstWorkspace.id,
+      firstResourceId,
+      firstSourceId,
+      secondConnectionId,
+      secondWorkspace.id,
+      secondResourceId,
+      secondSourceId
+    ]
+  );
+  await db.query(
+    `INSERT INTO sync_runs
+      (id, workspace_id, data_source_id, workspace_provider_connection_id, trigger_type, status)
+     VALUES (?, ?, ?, ?, 'scheduled', 'success')`,
+    [firstRunId, firstWorkspace.id, firstSourceId, firstConnectionId]
+  );
+
+  await assert.rejects(
+    db.query(
+      `INSERT INTO provider_resources
+        (id, provider_authorization_id, workspace_id, provider, resource_type, provider_resource_id, display_name)
+       VALUES (?, ?, ?, 'tiktok', 'tiktok_account', 'cross-resource', 'Cross Resource')`,
+      [crypto.randomUUID(), firstAuthorizationId, secondWorkspace.id]
+    ),
+    /foreign key constraint/i
+  );
+
+  await assert.rejects(
+    db.query(
+      `INSERT INTO provider_metric_observations
+        (id, workspace_id, workspace_provider_connection_id, sync_run_id, provider, metric_key,
+         grain, period_start, period_end, observed_at, numeric_value, unit,
+         availability_status, definition_version)
+       VALUES (?, ?, ?, ?, 'tiktok', 'tiktok.followers', 'daily', '2026-07-01', '2026-07-01',
+               UTC_TIMESTAMP(3), 10, 'count', 'available', 'test-v1')`,
+      [crypto.randomUUID(), secondWorkspace.id, firstConnectionId, firstRunId]
+    ),
+    /foreign key constraint/i
+  );
+
+  const definitionId = crypto.randomUUID();
+  await db.query(
+    `INSERT INTO report_definitions
+      (id, workspace_id, created_by_user_id, title, timezone, range_start, range_end, configuration)
+     VALUES (?, ?, ?, 'First report', 'UTC', '2026-07-01', '2026-07-07', JSON_OBJECT())`,
+    [definitionId, firstWorkspace.id, firstOwner.user.id]
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO report_definition_resources
+        (report_definition_id, workspace_id, workspace_provider_connection_id, provider)
+       VALUES (?, ?, ?, 'tiktok')`,
+      [definitionId, firstWorkspace.id, secondConnectionId]
+    ),
+    /foreign key constraint/i
+  );
+  await assert.rejects(
+    db.query(
+      `INSERT INTO report_runs
+        (id, report_definition_id, workspace_id, requested_by_user_id, idempotency_key,
+         configuration_snapshot, metric_definitions_snapshot)
+       VALUES (?, ?, ?, ?, ?, JSON_OBJECT(), JSON_OBJECT())`,
+      [
+        crypto.randomUUID(),
+        definitionId,
+        secondWorkspace.id,
+        secondOwner.user.id,
+        crypto.randomBytes(32).toString('hex')
+      ]
+    ),
+    /foreign key constraint/i
+  );
 });
 
 test('provider foundation migration preserves existing TikTok credentials without token rewrite', async () => {

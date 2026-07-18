@@ -40,14 +40,19 @@ function parseArgs(argv) {
   return args;
 }
 
-function assertLocalDatabaseUrl(databaseUrl) {
+function assertLocalDatabaseUrl(databaseUrl, configuredPort = process.env.MARIADB_PORT || '3307') {
   const parsed = new URL(databaseUrl);
   const localHosts = new Set(['127.0.0.1', 'localhost', '::1']);
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
   if (!localHosts.has(hostname)) {
     throw new Error('Refusing to reset a non-local database host.');
   }
-  if (parsed.port && parsed.port !== '3307') {
+  const allowedPort = String(configuredPort || '').trim();
+  if (!/^\d+$/.test(allowedPort) || Number(allowedPort) < 1 || Number(allowedPort) > 65535) {
+    throw new Error('Refusing to reset a database with an invalid local development port.');
+  }
+  const targetPort = parsed.port || '3306';
+  if (targetPort !== allowedPort) {
     throw new Error('Refusing to reset a database outside the local development port.');
   }
 }

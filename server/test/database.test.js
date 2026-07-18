@@ -45,7 +45,7 @@ const { setGoogleOidcFetchImplementation } = require('../platform/google-oidc');
 const { setTikTokFetchImplementation, TIKTOK_SCOPES } = require('../integrations/tiktok');
 const { setYouTubeTestHooks, YOUTUBE_SCOPES } = require('../integrations/youtube');
 const { setMetaTestHooks } = require('../integrations/meta');
-const { setMailTransportFactory } = require('../platform/mail');
+const { sendInvitationEmail, setMailTransportFactory } = require('../platform/mail');
 const { compareMetric, engagementRate } = require('../platform/analytics');
 const { assertCapability, hasCapability, canAssignRole } = require('../platform/rbac');
 const { hashSecret } = require('../platform/security');
@@ -310,10 +310,14 @@ test('database command helpers normalize MariaDB URLs and refuse unsafe reset ta
       'mariadb://fallback_user:fallback_password@127.0.0.1:3307/social_insights_fallback'
     );
 
-    assert.doesNotThrow(() => assertLocalDatabaseUrl('mariadb://user:password@localhost:3307/social_insights_dev'));
-    assert.doesNotThrow(() => assertLocalDatabaseUrl('mariadb://user:password@[::1]:3307/social_insights_dev'));
+    assert.doesNotThrow(() => assertLocalDatabaseUrl('mariadb://user:password@localhost:3317/social_insights_dev'));
+    assert.doesNotThrow(() => assertLocalDatabaseUrl('mariadb://user:password@[::1]:3317/social_insights_dev'));
+    assert.doesNotThrow(() => assertLocalDatabaseUrl(
+      'mariadb://user:password@localhost:3307/social_insights_dev',
+      '3307'
+    ));
     assert.throws(
-      () => assertLocalDatabaseUrl('mariadb://user:password@db.example.com:3307/social_insights_dev'),
+      () => assertLocalDatabaseUrl('mariadb://user:password@db.example.com:3317/social_insights_dev'),
       /non-local database host/
     );
     assert.throws(
@@ -513,7 +517,8 @@ test('migrations are applied to the real MariaDB test database', async () => {
     '004_youtube_readonly_vertical',
     '005_meta_readonly_vertical',
     '006_meta_period_snapshots',
-    '007_meta_oauth_config_binding'
+    '007_meta_oauth_config_binding',
+    '008_account_invitation_lifecycle'
   ]);
 
   const tableRows = await db.query(
@@ -861,6 +866,7 @@ test('member invitations, role changes, admin limits, and last-owner protection 
   const owner = await signIn('member-owner@example.com');
   const admin = await signIn('member-admin@example.com');
   const viewer = await signIn('member-viewer@example.com');
+  const secondOwner = await signIn('member-owner-two@example.com');
   const workspace = await createWorkspace(owner, 'Members Workspace');
   await db.query(
     `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
@@ -982,6 +988,330 @@ test('member invitations, role changes, admin limits, and last-owner protection 
   });
   assert.equal(removeViewer.statusCode, 200);
   assert.equal(removeViewer.json().removed, true);
+
+  await db.query(
+    `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+     VALUES (?, ?, 'owner', 'active')`,
+    [workspace.id, secondOwner.user.id]
+  );
+  const adminCannotDemoteOwner = await requestApp(
+    `/api/workspaces/${workspace.id}/members/${owner.user.id}`,
+    {
+      method: 'PATCH',
+      headers: {
+        cookie: cookieHeader(admin.cookies),
+        'x-csrf-token': admin.csrf
+      },
+      body: { role: 'viewer' }
+    }
+  );
+  assert.equal(adminCannotDemoteOwner.statusCode, 403);
+  assert.equal(adminCannotDemoteOwner.json().error, 'owner_management_requires_owner');
+
+  const adminCannotRemoveOwner = await requestApp(`/api/workspaces/${workspace.id}/members/${owner.user.id}`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(admin.cookies),
+      'x-csrf-token': admin.csrf
+    },
+    body: {}
+  });
+  assert.equal(adminCannotRemoveOwner.statusCode, 403);
+  assert.equal(adminCannotRemoveOwner.json().error, 'owner_management_requires_owner');
+});
+
+test('invitation lifecycle is email-bound, rate-limited, auditable, and explicit', async () => {
+  await clearDatabase();
+  const owner = await signIn('invitation-owner@example.com');
+  const wrongUser = await signIn('wrong-invitee@example.com');
+  const workspace = await createWorkspace(owner, 'Invitation Lifecycle');
+
+  const invalidEmail = await requestApp(`/api/workspaces/${workspace.id}/invitations`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { email: 'invalid', role: 'viewer' }
+  });
+  assert.equal(invalidEmail.statusCode, 400);
+  assert.equal(invalidEmail.json().error, 'invalid_email');
+
+  const invite = await requestApp(`/api/workspaces/${workspace.id}/invitations`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { email: 'invited-analyst@example.com', role: 'analyst' }
+  });
+  assert.equal(invite.statusCode, 201);
+  const invitationToken = invite.json().dev_token;
+  assert.ok(invitationToken);
+
+  const duplicate = await requestApp(`/api/workspaces/${workspace.id}/invitations`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { email: 'invited-analyst@example.com', role: 'viewer' }
+  });
+  assert.equal(duplicate.statusCode, 409);
+  assert.equal(duplicate.json().error, 'invitation_pending');
+
+  const invitationRows = await db.query(
+    'SELECT id FROM workspace_invitations WHERE workspace_id = ? AND email = ?',
+    [workspace.id, 'invited-analyst@example.com']
+  );
+  const invitationId = invitationRows[0].id;
+  const cooldown = await requestApp(`/api/workspaces/${workspace.id}/invitations/${invitationId}/resend`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(cooldown.statusCode, 429);
+  assert.equal(cooldown.json().error, 'invitation_resend_cooldown');
+
+  await db.query(
+    'UPDATE workspace_invitations SET last_sent_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 2 MINUTE) WHERE id = ?',
+    [invitationId]
+  );
+  const resend = await requestApp(`/api/workspaces/${workspace.id}/invitations/${invitationId}/resend`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(resend.statusCode, 200);
+  assert.ok(resend.json().dev_token);
+
+  const mismatch = await requestApp('/api/invitations/accept', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(wrongUser.cookies),
+      'x-csrf-token': wrongUser.csrf
+    },
+    body: { token: resend.json().dev_token }
+  });
+  assert.equal(mismatch.statusCode, 403);
+  assert.equal(mismatch.json().error, 'invitation_email_mismatch');
+
+  const invited = await signIn('invited-analyst@example.com');
+  const accepted = await requestApp('/api/invitations/accept', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(invited.cookies),
+      'x-csrf-token': invited.csrf
+    },
+    body: { token: resend.json().dev_token }
+  });
+  assert.equal(accepted.statusCode, 200);
+  assert.equal(accepted.json().workspace.id, workspace.id);
+  assert.equal(accepted.json().workspace.role, 'analyst');
+
+  const replay = await requestApp('/api/invitations/accept', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(invited.cookies),
+      'x-csrf-token': invited.csrf
+    },
+    body: { token: resend.json().dev_token }
+  });
+  assert.equal(replay.statusCode, 400);
+  assert.equal(replay.json().error, 'invitation_invalid_or_expired');
+
+  const revokeInvite = await requestApp(`/api/workspaces/${workspace.id}/invitations`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: { email: 'revoked-invitee@example.com', role: 'viewer' }
+  });
+  assert.equal(revokeInvite.statusCode, 201);
+  const revokeRows = await db.query(
+    'SELECT id FROM workspace_invitations WHERE workspace_id = ? AND email = ?',
+    [workspace.id, 'revoked-invitee@example.com']
+  );
+  const revoked = await requestApp(`/api/workspaces/${workspace.id}/invitations/${revokeRows[0].id}`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(owner.cookies),
+      'x-csrf-token': owner.csrf
+    },
+    body: {}
+  });
+  assert.equal(revoked.statusCode, 200);
+  assert.equal(revoked.json().revoked, true);
+
+  const auditRows = await db.query(
+    `SELECT action FROM audit_logs WHERE workspace_id = ?
+     AND action IN ('member_invited', 'invitation_resent', 'invitation_accepted', 'invitation_revoked')`,
+    [workspace.id]
+  );
+  assert.deepEqual(new Set(auditRows.map(row => row.action)), new Set([
+    'member_invited',
+    'invitation_resent',
+    'invitation_accepted',
+    'invitation_revoked'
+  ]));
+});
+
+test('account profile, active sessions, and deletion requests are user-bound', async () => {
+  await clearDatabase();
+  const first = await signIn('account-owner@example.com');
+  const second = await signIn('account-owner@example.com');
+  const viewer = await signIn('account-viewer@example.com');
+  const workspace = await createWorkspace(first, 'Deletion Review Workspace');
+  await db.query(
+    `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+     VALUES (?, ?, 'viewer', 'active')`,
+    [workspace.id, viewer.user.id]
+  );
+
+  const account = await requestApp('/api/account', {
+    headers: { cookie: cookieHeader(first.cookies) }
+  });
+  assert.equal(account.statusCode, 200);
+  assert.equal(account.json().sessions.length, 2);
+  assert.equal(account.json().sessions.filter(session => session.current).length, 1);
+  assert.equal(account.json().sessions.every(session => session.device_label), true);
+  assert.deepEqual(account.json().authentication_methods.map(method => method.provider), ['email']);
+
+  const profile = await requestApp('/api/account/profile', {
+    method: 'PATCH',
+    headers: {
+      cookie: cookieHeader(first.cookies),
+      'x-csrf-token': first.csrf
+    },
+    body: { display_name: 'Account Owner' }
+  });
+  assert.equal(profile.statusCode, 200);
+  assert.equal(profile.json().profile.display_name, 'Account Owner');
+
+  const wrongAccountConfirmation = await requestApp('/api/account/deletion-requests', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(first.cookies),
+      'x-csrf-token': first.csrf
+    },
+    body: { confirmation: 'wrong@example.com' }
+  });
+  assert.equal(wrongAccountConfirmation.statusCode, 400);
+  assert.equal(wrongAccountConfirmation.json().error, 'account_deletion_confirmation_invalid');
+
+  const accountDeletion = await requestApp('/api/account/deletion-requests', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(first.cookies),
+      'x-csrf-token': first.csrf
+    },
+    body: { confirmation: 'account-owner@example.com' }
+  });
+  assert.equal(accountDeletion.statusCode, 202);
+  assert.equal(accountDeletion.json().status, 'verified');
+  const accountDeletionAgain = await requestApp('/api/account/deletion-requests', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(first.cookies),
+      'x-csrf-token': first.csrf
+    },
+    body: { confirmation: 'account-owner@example.com' }
+  });
+  assert.equal(accountDeletionAgain.statusCode, 202);
+  assert.equal(accountDeletionAgain.json().existing, true);
+
+  const viewerDeletion = await requestApp(`/api/workspaces/${workspace.id}/deletion-requests`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(viewer.cookies),
+      'x-csrf-token': viewer.csrf
+    },
+    body: { confirmation: workspace.name }
+  });
+  assert.equal(viewerDeletion.statusCode, 403);
+  assert.equal(viewerDeletion.json().error, 'permission_denied');
+
+  const wrongWorkspaceConfirmation = await requestApp(`/api/workspaces/${workspace.id}/deletion-requests`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(first.cookies),
+      'x-csrf-token': first.csrf
+    },
+    body: { confirmation: 'Wrong workspace' }
+  });
+  assert.equal(wrongWorkspaceConfirmation.statusCode, 400);
+  assert.equal(wrongWorkspaceConfirmation.json().error, 'workspace_deletion_confirmation_invalid');
+
+  const workspaceDeletion = await requestApp(`/api/workspaces/${workspace.id}/deletion-requests`, {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(first.cookies),
+      'x-csrf-token': first.csrf
+    },
+    body: { confirmation: workspace.name }
+  });
+  assert.equal(workspaceDeletion.statusCode, 202);
+  assert.equal(workspaceDeletion.json().status, 'verified');
+
+  const currentSessionId = account.json().sessions.find(session => session.current).id;
+  const otherSessionId = account.json().sessions.find(session => !session.current).id;
+  const revokeOther = await requestApp(`/api/account/sessions/${otherSessionId}`, {
+    method: 'DELETE',
+    headers: {
+      cookie: cookieHeader(first.cookies),
+      'x-csrf-token': first.csrf
+    },
+    body: {}
+  });
+  assert.equal(revokeOther.statusCode, 200);
+  assert.equal(revokeOther.json().signed_out, false);
+  assert.notEqual(otherSessionId, currentSessionId);
+  const secondAfterRevoke = await requestApp('/api/session', {
+    headers: { cookie: cookieHeader(second.cookies) }
+  });
+  assert.equal(secondAfterRevoke.statusCode, 401);
+
+  const third = await signIn('account-owner@example.com');
+  const revokeOthers = await requestApp('/api/account/sessions/revoke-others', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(first.cookies),
+      'x-csrf-token': first.csrf
+    },
+    body: {}
+  });
+  assert.equal(revokeOthers.statusCode, 200);
+  assert.equal(revokeOthers.json().revoked, 1);
+  const thirdAfterRevoke = await requestApp('/api/session', {
+    headers: { cookie: cookieHeader(third.cookies) }
+  });
+  assert.equal(thirdAfterRevoke.statusCode, 401);
+
+  const fourth = await signIn('account-owner@example.com');
+  const revokeAll = await requestApp('/api/account/sessions/revoke-all', {
+    method: 'POST',
+    headers: {
+      cookie: cookieHeader(first.cookies),
+      'x-csrf-token': first.csrf
+    },
+    body: {}
+  });
+  assert.equal(revokeAll.statusCode, 200);
+  assert.equal(revokeAll.json().signed_out, true);
+  assert.ok(revokeAll.json().revoked >= 2);
+  for (const session of [first, fourth]) {
+    const response = await requestApp('/api/session', {
+      headers: { cookie: cookieHeader(session.cookies) }
+    });
+    assert.equal(response.statusCode, 401);
+  }
 });
 
 test('Google OIDC route fails closed when credentials are unavailable', async () => {
@@ -1049,6 +1379,17 @@ test('production-only safety guards refuse development paths', async () => {
     assert.equal(sentMessages[0].message.text.includes('one-time sign-in code'), true);
     assert.match(sentMessages[0].message.text, /Open http:\/\/localhost:3001\/ and paste the code/);
     assert.doesNotMatch(sentMessages[0].message.text, /\/app\//);
+
+    await sendInvitationEmail({
+      email: 'invitee@example.com',
+      token: 'invitation-token',
+      workspaceName: 'Review Workspace',
+      inviterEmail: 'owner@example.com'
+    });
+    assert.equal(sentMessages.length, 2);
+    assert.equal(sentMessages[1].message.to, 'invitee@example.com');
+    assert.match(sentMessages[1].message.text, /Review Workspace/);
+    assert.match(sentMessages[1].message.text, /http:\/\/localhost:3001\/\?invitation=invitation-token/);
   } finally {
     setMailTransportFactory(null);
     for (const [name, value] of Object.entries(previous)) {

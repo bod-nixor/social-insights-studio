@@ -43,10 +43,6 @@ import {
 } from 'recharts';
 import './styles.css';
 
-declare const __APP_COMMIT_SHA__: string;
-declare const __APP_BUILD_TIME__: string;
-declare const __APP_RELEASE__: string;
-
 type View = 'overview' | 'content' | 'connections' | 'members' | 'sync' | 'account';
 type LoadState = 'ready' | 'loading' | 'empty' | 'stale' | 'partial' | 'permission' | 'error' | 'reconnect';
 type RangeKey = '7d' | '30d' | '90d' | 'custom';
@@ -311,14 +307,6 @@ type DisconnectTarget = {
   label: string;
 };
 
-type DeploymentVersion = {
-  commit_sha: string | null;
-  build_time: string | null;
-  release: string | null;
-  metadata_present: boolean;
-  warnings: string[];
-};
-
 type Member = {
   user_id: string;
   email: string;
@@ -333,10 +321,39 @@ type Invitation = {
   email: string;
   role: Exclude<Role, 'owner'>;
   created_at: string;
+  last_sent_at: string;
+  send_count: number;
   expires_at: string;
   accepted_at: string | null;
   revoked_at: string | null;
   invited_by_email: string;
+};
+
+type AccountSession = {
+  id: string;
+  device_label: string;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+  idle_expires_at: string;
+  current: boolean;
+};
+
+type DeletionRequest = {
+  id: string;
+  workspace_id: string | null;
+  workspace_name: string | null;
+  scope: 'user' | 'workspace' | 'provider_account';
+  status: string;
+  requested_at: string;
+  completed_at: string | null;
+};
+
+type AccountData = {
+  profile: User & { created_at: string; last_login_at: string | null };
+  authentication_methods: Array<{ provider: string; email: string | null; connected_at: string }>;
+  sessions: AccountSession[];
+  deletion_requests: DeletionRequest[];
 };
 
 const views: Array<{ id: View; label: string; icon: React.ComponentType<{ size?: number; 'aria-hidden'?: boolean }> }> =
@@ -363,12 +380,6 @@ const contentSortLabels: Record<ContentSort, string> = {
   comments: 'Comments',
   shares: 'Shares',
   engagement: 'Engagement'
-};
-
-const clientBuild = {
-  commitSha: __APP_COMMIT_SHA__ || null,
-  buildTime: __APP_BUILD_TIME__ || null,
-  release: __APP_RELEASE__ || null
 };
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -454,6 +465,27 @@ function todayInputValue(offsetDays = 0) {
   return date.toISOString().slice(0, 10);
 }
 
+function friendlyError(code: string) {
+  const messages: Record<string, string> = {
+    already_a_member: 'That person is already a member of this workspace.',
+    invitation_pending: 'A pending invitation already exists for that email address.',
+    invitation_resend_cooldown: 'Please wait a minute before resending this invitation.',
+    invitation_send_limit_reached: 'This invitation has reached its resend limit. Revoke it and create a new one.',
+    invitation_email_mismatch: 'Sign in with the email address that received this invitation.',
+    invitation_invalid_or_expired: 'This invitation is no longer valid. Ask a workspace owner to send a new one.',
+    last_owner_required: 'Every workspace must keep at least one owner.',
+    owner_management_requires_owner: 'Only another workspace owner can change or remove an owner.',
+    permission_denied: 'Your workspace role does not allow this action.',
+    account_deletion_confirmation_invalid: 'Enter your full email address to confirm the request.',
+    workspace_deletion_confirmation_invalid: 'Enter the exact workspace name to confirm the request.',
+    display_name_too_long: 'Display names must be 100 characters or fewer.',
+    session_not_found: 'That session is no longer active.',
+    invalid_email: 'Enter a valid email address.',
+    mail_send_failed: 'The invitation could not be sent. Try again or contact support.'
+  };
+  return messages[code] || 'Something went wrong. Try again or contact support if the problem continues.';
+}
+
 function pathDetailState() {
   const match = window.location.pathname.match(/^\/workspaces\/([^/]+)\/content\/([^/]+)/);
   return match ? { workspaceId: match[1], contentId: match[2] } : null;
@@ -476,6 +508,7 @@ function initialUrlState() {
     youtubeOutcome: params.get('youtube') || '',
     facebookOutcome: params.get('facebook') || '',
     instagramOutcome: params.get('instagram') || '',
+    invitation: params.get('invitation') || '',
     compare: params.get('compare') !== 'false',
     topSort: (params.get('topSort') as ContentSort) || 'views',
     contentSort: (params.get('sort') as ContentSort) || 'views',
@@ -540,6 +573,17 @@ function roleCanSync(role?: Role) {
   return role === 'owner' || role === 'admin' || role === 'analyst';
 }
 
+function providerAccessLabels(providerId: string) {
+  const labels: Record<string, string[]> = {
+    tiktok: ['Profile and audience totals', 'Published video performance'],
+    youtube: ['Channel and video details', 'Channel analytics'],
+    facebook_pages: ['Page identity and published posts', 'Page and post insights'],
+    instagram: ['Professional account and media', 'Account and media insights'],
+    google_analytics_4: ['Property discovery and website analytics']
+  };
+  return labels[providerId] || ['Analytics data'];
+}
+
 function App() {
   const initial = useMemo(initialUrlState, []);
   const [user, setUser] = useState<User | null>(null);
@@ -571,7 +615,8 @@ function App() {
   const [facebookDashboard, setFacebookDashboard] = useState<MetaDashboardData | null>(null);
   const [instagramDashboard, setInstagramDashboard] = useState<MetaDashboardData | null>(null);
   const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogItem[]>([]);
-  const [deploymentVersion, setDeploymentVersion] = useState<DeploymentVersion | null>(null);
+  const [accountData, setAccountData] = useState<AccountData | null>(null);
+  const [invitationToken, setInvitationToken] = useState(initial.invitation);
   const [content, setContent] = useState<ContentData | null>(null);
   const [contentDetail, setContentDetail] = useState<ContentDetail | null>(null);
   const [syncData, setSyncData] = useState<SyncData>({ sync_runs: [], total: 0, limit: 25, offset: 0 });
@@ -604,22 +649,6 @@ function App() {
     }
     return '';
   }, [range, customFrom, customTo]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadVersion() {
-      try {
-        const version = await api<DeploymentVersion>('/health/version');
-        if (!cancelled) setDeploymentVersion(version);
-      } catch {
-        if (!cancelled) setDeploymentVersion(null);
-      }
-    }
-    void loadVersion();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -675,20 +704,26 @@ function App() {
     const params = new URLSearchParams();
     params.set('workspace', activeWorkspace.id);
     params.set('view', view);
-    params.set('range', range);
-    params.set('metric', trendMetric);
-    params.set('provider', overviewProvider);
-    params.set('compare', String(compare));
-    params.set('topSort', topSort);
-    params.set('sort', contentSort);
-    params.set('direction', contentDir);
-    params.set('page', String(contentPage));
-    params.set('pageSize', String(contentPageSize));
-    if (range === 'custom') {
+    if (view === 'overview') {
+      params.set('range', range);
+      params.set('metric', trendMetric);
+      params.set('provider', overviewProvider);
+      params.set('compare', String(compare));
+      params.set('topSort', topSort);
+    }
+    if (view === 'content') {
+      params.set('range', range);
+      params.set('sort', contentSort);
+      params.set('direction', contentDir);
+      params.set('page', String(contentPage));
+      params.set('pageSize', String(contentPageSize));
+      if (contentSearch) params.set('search', contentSearch);
+    }
+    if (view === 'sync' && syncPage > 1) params.set('page', String(syncPage));
+    if ((view === 'overview' || view === 'content') && range === 'custom') {
       params.set('from', customFrom);
       params.set('to', customTo);
     }
-    if (contentSearch) params.set('search', contentSearch);
     const path = contentDetailId ? `/workspaces/${activeWorkspace.id}/content/${contentDetailId}` : '/';
     window.history.replaceState({}, '', `${path}?${params.toString()}`);
   }, [
@@ -707,14 +742,33 @@ function App() {
     contentSearch,
     contentPage,
     contentPageSize,
-    contentDetailId
+    contentDetailId,
+    syncPage
   ]);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timeout = window.setTimeout(() => setToast(''), 5000);
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
 
   async function loadWorkspaces() {
     const workspaceResult = await api<{ workspaces: Workspace[] }>('/api/workspaces');
     setWorkspaces(workspaceResult.workspaces);
     setActiveWorkspaceId(workspaceResult.workspaces[0]?.id || '');
   }
+
+  const loadAccountData = useCallback(async () => {
+    const result = await api<AccountData>('/api/account');
+    setAccountData(result);
+    setUser(result.profile);
+  }, []);
+
+  const currentUserId = user?.id;
+  useEffect(() => {
+    if (!currentUserId || view !== 'account') return;
+    void loadAccountData().catch(() => setMessage('account_load_failed'));
+  }, [currentUserId, loadAccountData, view]);
 
   const loadWorkspaceData = useCallback(
     async (workspace: Workspace) => {
@@ -800,7 +854,7 @@ function App() {
       reconnected: 'YouTube authorization restored.',
       denied: 'You cancelled YouTube authorization. No connection was created.',
       missing_scopes: 'YouTube did not grant both required read-only permissions. Authorize again to continue.',
-      configuration_error: 'YouTube authorization could not continue because its server configuration changed.',
+      configuration_error: 'YouTube authorization is temporarily unavailable. Try again later or contact support.',
       provider_error: 'Google or YouTube could not complete authorization. Try again after the provider recovers.',
       failed: 'YouTube authorization did not complete.'
     };
@@ -817,13 +871,13 @@ function App() {
     if (!providerOutcome) return;
     const outcomes: Record<string, string> = {
       selection_required: `${providerOutcome.name} authorized. Select a resource to finish connecting.`,
-      no_resources: `${providerOutcome.name} authorized, but no eligible resources with ANALYZE access were returned.`,
+      no_resources: `${providerOutcome.name} authorized, but no eligible accounts were available to select.`,
       reconnected: `${providerOutcome.name} authorization restored.`,
       selected_resource_unavailable: `${providerOutcome.name} authorization completed, but the selected resource was not returned and was not replaced. Choose an available resource explicitly or authorize again.`,
       account_mismatch: `${providerOutcome.name} was authorized with a different Meta user. The existing connection was not replaced; disconnect it before switching Meta users.`,
       denied: `${providerOutcome.name} authorization was cancelled. No connection was created.`,
       missing_scopes: `${providerOutcome.name} did not grant the exact approved read-only permissions.`,
-      configuration_error: `${providerOutcome.name} authorization could not continue because server configuration changed.`,
+      configuration_error: `${providerOutcome.name} authorization is temporarily unavailable. Try again later or contact support.`,
       provider_error: `Meta could not complete ${providerOutcome.name} authorization. Try again later.`,
       failed: `${providerOutcome.name} authorization did not complete.`
     };
@@ -942,6 +996,7 @@ function App() {
       setCsrf('');
       setWorkspaces([]);
       setActiveWorkspaceId('');
+      setAccountData(null);
       setAccountOpen(false);
       setBusy(false);
     }
@@ -1002,7 +1057,7 @@ function App() {
       } else if (result.status === 'partial') {
         setToast('YouTube sync completed with partial data.');
       } else if (result.status === 'queued') {
-        setToast('YouTube sync queued for the worker.');
+        setToast('YouTube sync scheduled.');
       } else {
         setToast('YouTube sync completed.');
       }
@@ -1136,7 +1191,7 @@ function App() {
           body: JSON.stringify({ connection_id: connectionId || null })
         }
       );
-      setToast(result.status === 'queued' ? 'Read-only Meta sync queued for the worker.' : 'Meta sync updated.');
+      setToast(result.status === 'queued' ? 'Meta sync scheduled.' : 'Meta sync updated.');
       await loadWorkspaceData(activeWorkspace);
     } catch (error) {
       const code = error instanceof Error ? error.message : `${provider}_sync_failed`;
@@ -1195,10 +1250,197 @@ function App() {
         headers: { 'x-csrf-token': csrf },
         body: JSON.stringify({ email: emailValue, role: roleValue })
       });
-      setToast('Invitation recorded.');
+      setToast('Invitation sent.');
       await loadWorkspaceData(activeWorkspace);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'invite_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resendMemberInvitation(invitation: Invitation) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      await api(`/api/workspaces/${activeWorkspace.id}/invitations/${invitation.id}/resend`, {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({})
+      });
+      setToast(`A new invitation was sent to ${invitation.email}.`);
+      await loadWorkspaceData(activeWorkspace);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'invitation_resend_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeMemberInvitation(invitation: Invitation) {
+    if (!activeWorkspace) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      await api(`/api/workspaces/${activeWorkspace.id}/invitations/${invitation.id}`, {
+        method: 'DELETE',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({})
+      });
+      setToast(`Invitation for ${invitation.email} revoked.`);
+      await loadWorkspaceData(activeWorkspace);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'invitation_revoke_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function acceptInvitation() {
+    if (!invitationToken) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ workspace: { id: string; name: string } }>('/api/invitations/accept', {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({ token: invitationToken })
+      });
+      setInvitationToken('');
+      await loadWorkspaces();
+      setActiveWorkspaceId(result.workspace.id);
+      setToast(`You joined ${result.workspace.name}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'invitation_accept_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveAccountProfile(displayName: string) {
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ profile: User }>('/api/account/profile', {
+        method: 'PATCH',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({ display_name: displayName })
+      });
+      setUser(result.profile);
+      await loadAccountData();
+      setToast('Profile updated.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'profile_update_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeAccountSessionById(session: AccountSession) {
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ signed_out: boolean }>(`/api/account/sessions/${session.id}`, {
+        method: 'DELETE',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({})
+      });
+      if (result.signed_out) {
+        await signOut();
+        return;
+      }
+      await loadAccountData();
+      setToast('Session signed out.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'session_revoke_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeOtherSessions() {
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ revoked: number }>('/api/account/sessions/revoke-others', {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({})
+      });
+      await loadAccountData();
+      setToast(
+        result.revoked
+          ? `${result.revoked} other session${result.revoked === 1 ? '' : 's'} signed out.`
+          : 'No other active sessions.'
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'session_revoke_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeAllSessions() {
+    setBusy(true);
+    setMessage('');
+    try {
+      await api('/api/account/sessions/revoke-all', {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({})
+      });
+    } catch {
+      // Clear local state even if this session was already revoked.
+    } finally {
+      setUser(null);
+      setCsrf('');
+      setWorkspaces([]);
+      setActiveWorkspaceId('');
+      setAccountData(null);
+      setBusy(false);
+    }
+  }
+
+  async function requestAccountDeletionFromUi(confirmation: string) {
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ existing?: boolean }>('/api/account/deletion-requests', {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({ confirmation })
+      });
+      await loadAccountData();
+      setToast(
+        result.existing
+          ? 'Your account deletion request is already being reviewed.'
+          : 'Account deletion request submitted.'
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'account_deletion_request_failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function requestWorkspaceDeletionFromUi(workspace: Workspace, confirmation: string) {
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await api<{ existing?: boolean }>(`/api/workspaces/${workspace.id}/deletion-requests`, {
+        method: 'POST',
+        headers: { 'x-csrf-token': csrf },
+        body: JSON.stringify({ confirmation })
+      });
+      await loadAccountData();
+      setToast(
+        result.existing
+          ? 'This workspace deletion request is already being reviewed.'
+          : 'Workspace deletion request submitted.'
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'workspace_deletion_request_failed');
     } finally {
       setBusy(false);
     }
@@ -1274,27 +1516,27 @@ function App() {
               <p className="eyebrow">Multiplatform analytics workspace</p>
               <h1 id="product-title">Social Insights Studio</h1>
               <p className="lede">
-                Connect authorized social and website analytics sources, synchronize performance data, and review
-                dashboards and exports in one workspace.
+                Bring social and website performance into one private workspace. Follow audience growth, content
+                results, and meaningful changes over time without jumping between analytics tools.
               </p>
             </div>
 
             <section className="public-section" aria-labelledby="platforms-title">
               <h2 id="platforms-title">Supported analytics sources</h2>
               <p>
-                TikTok workspace analytics, the TikTok Looker Studio connector, gated read-only YouTube channel
-                analytics, Facebook Page insights, and feature-flagged Instagram professional insights are implemented.
-                Google Analytics 4 remains unavailable until its integration and provider review are complete.
+                Social Insights Studio is built for TikTok accounts, Facebook Pages, Instagram professional accounts,
+                YouTube channels, and Google Analytics 4 properties. Available connections depend on the access enabled
+                for your workspace.
               </p>
               <div className="platform-status" aria-label="Provider availability">
                 <span>
-                  <CheckCircle2 size={16} aria-hidden /> TikTok available
+                  <CheckCircle2 size={16} aria-hidden /> Scheduled updates
                 </span>
                 <span>
-                  <CheckCircle2 size={16} aria-hidden /> YouTube gated
+                  <CheckCircle2 size={16} aria-hidden /> Range comparisons
                 </span>
                 <span>
-                  <CheckCircle2 size={16} aria-hidden /> Meta read-only gated
+                  <CheckCircle2 size={16} aria-hidden /> CSV exports
                 </span>
               </div>
             </section>
@@ -1303,8 +1545,8 @@ function App() {
               <h2 id="data-use-title">How provider data is used</h2>
               <p>
                 Authorized account, content, and analytics data is used only to operate requested connections, workspace
-                dashboards, synchronization, and exports. Social Insights Studio does not sell provider data. You can
-                disconnect a provider and request deletion of stored data.
+                dashboards, synchronization, and reports. Connections request analytics access only. You can disconnect
+                a source or request deletion of stored data at any time.
               </p>
             </section>
           </section>
@@ -1315,6 +1557,11 @@ function App() {
               <h2 id="signin-title">Sign in</h2>
               <p>Use the email address associated with your Social Insights Studio workspace.</p>
             </div>
+            {invitationToken && (
+              <p className="notice" role="status">
+                Sign in with the email address that received the invitation. You can review it before joining.
+              </p>
+            )}
             <form onSubmit={requestLink} className="stack">
               <label>
                 Email address
@@ -1398,6 +1645,11 @@ function App() {
           busy={busy}
           accountOpen={accountOpen}
           onAccountToggle={() => setAccountOpen((open) => !open)}
+          onAccountNavigate={() => {
+            setView('account');
+            setContentDetailId('');
+            setAccountOpen(false);
+          }}
           onManualSync={
             view === 'overview' && overviewProvider === 'youtube'
               ? () => manualYouTubeSync(youtubeDashboard?.connection.id)
@@ -1407,14 +1659,37 @@ function App() {
         />
 
         <div aria-live="polite" className="live-region">
-          {toast || message}
+          {toast || (message ? friendlyError(message) : '')}
         </div>
-        {toast && <p className="notice success">{toast}</p>}
-        {message && <p className="notice error">{message}</p>}
+        {toast && (
+          <p className="notice success" role="status">
+            {toast}
+          </p>
+        )}
+        {message && (
+          <p className="notice error" role="alert">
+            {friendlyError(message)}
+          </p>
+        )}
+        {invitationToken && (
+          <section className="invitation-banner" aria-labelledby="pending-invitation-title">
+            <div>
+              <strong id="pending-invitation-title">Workspace invitation</strong>
+              <p>Accept only if you recognize the invitation and signed in with the invited email address.</p>
+            </div>
+            <div className="button-row">
+              <button type="button" onClick={acceptInvitation} disabled={busy}>
+                Accept invitation
+              </button>
+              <button type="button" className="ghost-button" onClick={() => setInvitationToken('')} disabled={busy}>
+                Dismiss
+              </button>
+            </div>
+          </section>
+        )}
         {dashboard?.demo_data && (
           <p className="notice">
-            Local demo data. Fixture values are labeled, deterministic, local-only, and unavailable in production seed
-            mode.
+            Sample data is shown for this local demonstration. It does not come from a connected provider account.
           </p>
         )}
 
@@ -1545,6 +1820,8 @@ function App() {
                 invitations={invitations}
                 busy={busy}
                 onInvite={inviteMember}
+                onResendInvitation={resendMemberInvitation}
+                onRevokeInvitation={revokeMemberInvitation}
                 onRoleChange={updateMemberRole}
                 onRemove={removeMember}
               />
@@ -1558,8 +1835,21 @@ function App() {
                 onToggleRun={(runId) => setExpandedRun((current) => (current === runId ? '' : runId))}
               />
             )}
-            {view === 'account' && <Account user={user} onSignOut={signOut} />}
-            {view === 'account' && <DeploymentMetadata server={deploymentVersion} client={clientBuild} />}
+            {view === 'account' && (
+              <Account
+                user={user}
+                account={accountData}
+                workspaces={workspaces}
+                busy={busy}
+                onSaveProfile={saveAccountProfile}
+                onRevokeSession={revokeAccountSessionById}
+                onRevokeOthers={revokeOtherSessions}
+                onRevokeAll={revokeAllSessions}
+                onRequestAccountDeletion={requestAccountDeletionFromUi}
+                onRequestWorkspaceDeletion={requestWorkspaceDeletionFromUi}
+                onSignOut={signOut}
+              />
+            )}
           </div>
         ) : null}
       </section>
@@ -1639,6 +1929,7 @@ function WorkspaceHeader({
   busy,
   accountOpen,
   onAccountToggle,
+  onAccountNavigate,
   onManualSync,
   onSignOut
 }: {
@@ -1647,6 +1938,7 @@ function WorkspaceHeader({
   busy: boolean;
   accountOpen: boolean;
   onAccountToggle: () => void;
+  onAccountNavigate: () => void;
   onManualSync: () => void;
   onSignOut: () => void;
 }) {
@@ -1683,7 +1975,10 @@ function WorkspaceHeader({
           </button>
           {accountOpen && (
             <div className="menu" role="menu">
-              <span role="menuitem">Opaque server session</span>
+              <button type="button" role="menuitem" onClick={onAccountNavigate}>
+                <Settings size={16} aria-hidden />
+                Account settings
+              </button>
               <button type="button" role="menuitem" onClick={onSignOut}>
                 <LogOut size={16} aria-hidden />
                 Sign out
@@ -1969,8 +2264,8 @@ function Overview({
             ) : (
               <div className="chart-empty">
                 {trendData.length === 1
-                  ? 'One snapshot is available. More points are needed for a trend line.'
-                  : 'No profile snapshots stored for the selected range.'}
+                  ? 'One data point is available. More points are needed for a trend line.'
+                  : 'No audience history is available for the selected range.'}
               </div>
             )}
           </section>
@@ -2100,7 +2395,7 @@ function MetaOverview({
           <article className="metric-card unavailable">
             <span>Read-only insights</span>
             <strong>N/A</strong>
-            <small>No stored snapshot</small>
+            <small>No data available</small>
           </article>
         )}
       </section>
@@ -2150,7 +2445,7 @@ function MetaOverview({
       <section className="panel" aria-labelledby="meta-content-title">
         <div className="panel-title">
           <div>
-            <h2 id="meta-content-title">Content snapshots</h2>
+            <h2 id="meta-content-title">Content performance</h2>
             <p>
               {isInstagram ? 'Feed, carousel, and Reels media only.' : 'Published Page posts and available engagement.'}
             </p>
@@ -2192,7 +2487,7 @@ function MetaOverview({
             </table>
           </div>
         ) : (
-          <div className="table-empty">No content snapshots are stored for this period.</div>
+          <div className="table-empty">No content performance is available for this period.</div>
         )}
       </section>
     </>
@@ -2268,7 +2563,7 @@ function YouTubeOverview({
             <article key={label} className="metric-card unavailable">
               <span>{label}</span>
               <strong>N/A</strong>
-              <small>No stored snapshot</small>
+              <small>No data available</small>
             </article>
           ))}
       </section>
@@ -2437,7 +2732,7 @@ function YouTubeMetricCard({ metric, compare }: { metric: YouTubeMetric; compare
             : !hasPeriodComparison
               ? metric.semantics === 'lifetime'
                 ? 'Lifetime total'
-                : 'Current snapshot'
+                : 'Latest available data'
               : metric.delta === null
                 ? 'Previous period unavailable'
                 : `${metric.delta >= 0 ? '+' : ''}${metric.key === 'watch_time_period' ? formatMinutes(metric.delta) : formatNumber(metric.delta)}${metric.percent_change === null ? ' (percent N/A)' : ` (${metric.percent_change.toFixed(1)}%)`}`}
@@ -2456,7 +2751,7 @@ function MetricCard({ metric, compare }: { metric: DashboardMetric; compare: boo
       {compare ? (
         <small>
           {metric.delta === null ? (
-            <span title="No comparable baseline snapshot is available.">Comparison unavailable</span>
+            <span title="No comparable earlier data is available.">Comparison unavailable</span>
           ) : (
             `${metric.delta >= 0 ? '+' : ''}${formatNumber(metric.delta)} ${metric.percent_change === null ? '(percent N/A)' : `(${metric.percent_change.toFixed(1)}%)`}`
           )}
@@ -2633,7 +2928,7 @@ function Content({
         </>
       ) : (
         <div className="table-empty">
-          {search ? 'No content matches the active filters.' : 'No content snapshots available.'}
+          {search ? 'No content matches the active filters.' : 'No content performance is available.'}
         </div>
       )}
     </section>
@@ -2815,8 +3110,8 @@ function Connections({
     <section className="panel" aria-labelledby="connection-title">
       <div className="panel-title">
         <div>
-          <h2 id="connection-title">Provider connections</h2>
-          <p>Provider credentials are stored only on the server and are never shown here.</p>
+          <h2 id="connection-title">Connections</h2>
+          <p>Choose the accounts and properties whose analytics should appear in this workspace.</p>
         </div>
       </div>
       <div className="provider-list">
@@ -2856,15 +3151,14 @@ function Connections({
                   </p>
                 )}
                 {provider.connection?.reconnect_reason && !isYouTube && (
-                  <p className="notice error">{provider.connection.reconnect_reason}</p>
+                  <p className="notice error">This connection needs attention before syncing can continue.</p>
                 )}
-                {!provider.implemented && (
-                  <p className="muted">Feature-flagged until the complete provider slice and review evidence exist.</p>
-                )}
+                {!provider.implemented && <p className="muted">This analytics source is not available yet.</p>}
                 {(isYouTube || isMeta) &&
                   provider.configuration?.warnings.map((warning) => (
                     <p key={warning} className="notice error">
-                      Configuration: {warning.replaceAll('_', ' ')}
+                      This connection is temporarily unavailable because its setup is incomplete. Contact support if you
+                      need access.
                     </p>
                   ))}
                 {isYouTube && provider.status === 'no_channels' && (
@@ -2875,27 +3169,22 @@ function Connections({
                 )}
                 {isYouTube && provider.status === 'missing_scopes' && (
                   <p className="notice error">
-                    Google did not return the exact approved YouTube read-only permission set.
-                    {(provider.authorization?.missing_scopes || []).length > 0 && (
-                      <> Missing: {(provider.authorization?.missing_scopes || []).join(', ')}</>
-                    )}
+                    Not all required YouTube analytics access was approved. Authorize again and review each requested
+                    item.
                   </p>
                 )}
                 {isYouTube && provider.status === 'provider_error' && (
                   <p className="notice error">The latest authorization attempt failed at Google or YouTube.</p>
                 )}
                 {isMeta && provider.status === 'no_resources' && (
-                  <p className="notice">Meta returned no eligible resource with Page ANALYZE access.</p>
+                  <p className="notice">No eligible Pages or professional accounts were available to select.</p>
                 )}
                 {isMeta && provider.status === 'authorization_denied' && (
                   <p className="notice">Authorization was cancelled. No Meta data was accessed.</p>
                 )}
                 {isMeta && provider.status === 'missing_scopes' && (
                   <p className="notice error">
-                    Meta did not return the exact approved read-only scope set.
-                    {(provider.authorization?.missing_scopes || []).length > 0 && (
-                      <> Missing: {(provider.authorization?.missing_scopes || []).join(', ')}</>
-                    )}
+                    Not all required analytics access was approved. Authorize again and review each requested item.
                   </p>
                 )}
                 {isMeta && provider.status === 'provider_error' && (
@@ -2904,20 +3193,15 @@ function Connections({
                   </p>
                 )}
                 {isTikTok && latestError === 'scope' && (
-                  <p className="notice error">The latest sync reported a missing provider scope.</p>
+                  <p className="notice error">TikTok needs additional analytics access before syncing can continue.</p>
                 )}
-                <div className="scope-list" aria-label={`${provider.name} requested scopes`}>
-                  {((isYouTube || isMeta) && provider.authorization
-                    ? grantedScopes
-                    : provider.requestedScopes.map((scope) => scope.name)
-                  ).map((scope) => (
-                    <span key={scope}>
-                      {(isYouTube || isMeta) && provider.authorization ? `Granted: ${scope}` : scope}
-                    </span>
+                <div className="scope-list" aria-label={`${provider.name} analytics access`}>
+                  {providerAccessLabels(provider.id).map((label) => (
+                    <span key={label}>Read: {label}</span>
                   ))}
                 </div>
                 {(isYouTube || isMeta) && provider.authorization && grantedScopes.length === 0 && (
-                  <p className="muted">No approved product scope is currently granted.</p>
+                  <p className="muted">Analytics access has not been granted.</p>
                 )}
 
                 {isYouTube && unselectedResources.length > 0 && (
@@ -3086,9 +3370,7 @@ function Connections({
                                 {formatDate(connection.data_through_at, { dateStyle: 'medium' })}
                               </small>
                               {connection.reconnect_reason && (
-                                <small className="notice error">
-                                  {connection.reconnect_reason.replaceAll('_', ' ')}
-                                </small>
+                                <small className="notice error">Authorize this account again to resume syncing.</small>
                               )}
                               <div className="capability-list" aria-label="Resource capabilities">
                                 {(connection.capabilities || []).map((capability) => (
@@ -3209,7 +3491,7 @@ function Connections({
             </article>
           );
         })}
-        {catalog.length === 0 && <div className="table-empty">Provider catalog unavailable.</div>}
+        {catalog.length === 0 && <div className="table-empty">Connections are temporarily unavailable.</div>}
       </div>
       {!allowed && <p className="muted">Connection management requires owner or admin access.</p>}
       {disconnectTarget && (
@@ -3218,19 +3500,19 @@ function Connections({
             <h3 id="disconnect-title">Disconnect {disconnectTarget.label}?</h3>
             {disconnectTarget.provider === 'youtube' ? (
               <p>
-                This attempts Google revocation first, then immediately deletes stored credentials, discovered channels,
-                and all YouTube snapshots tied to the authorization from this workspace even if revocation fails.
+                Social Insights Studio will ask Google to revoke access, then remove this YouTube connection and its
+                stored analytics data from the workspace.
               </p>
             ) : disconnectTarget.provider === 'facebook' || disconnectTarget.provider === 'instagram' ? (
               <p>
-                Disconnecting one of several selected Meta resources preserves the shared read-only grant. Disconnecting
-                the final Meta resource across Facebook and Instagram attempts permission revocation first, then
-                immediately deletes encrypted credentials and stored Meta snapshots even if provider revocation fails.
+                Facebook and Instagram accounts selected through the same Meta sign-in can be disconnected separately.
+                Removing the final connected account also asks Meta to revoke access and removes its stored analytics
+                data.
               </p>
             ) : (
               <p>
-                This attempts provider revocation first, then disables local credentials. Existing snapshots remain in
-                the workspace.
+                Social Insights Studio will ask the provider to revoke access and disable this connection. Previously
+                synchronized analytics remain in the workspace until they are deleted under the retention policy.
               </p>
             )}
             <div className="dialog-actions">
@@ -3254,6 +3536,8 @@ function Members({
   invitations,
   busy,
   onInvite,
+  onResendInvitation,
+  onRevokeInvitation,
   onRoleChange,
   onRemove
 }: {
@@ -3262,6 +3546,8 @@ function Members({
   invitations: Invitation[];
   busy: boolean;
   onInvite: (email: string, role: Exclude<Role, 'owner'>) => void;
+  onResendInvitation: (invitation: Invitation) => void;
+  onRevokeInvitation: (invitation: Invitation) => void;
   onRoleChange: (member: Member, role: Role) => void;
   onRemove: (member: Member) => void;
 }) {
@@ -3273,7 +3559,7 @@ function Members({
       <div className="panel-title between">
         <div>
           <h2 id="members-title">Members</h2>
-          <p>Role changes are enforced again by the server.</p>
+          <p>Invite teammates and choose the access each person needs.</p>
         </div>
       </div>
       <form
@@ -3330,10 +3616,10 @@ function Members({
                   <select
                     value={member.role}
                     aria-label={`Role for ${member.email}`}
-                    disabled={!canManage || busy}
+                    disabled={!canManage || busy || (member.role === 'owner' && role !== 'owner')}
                     onChange={(event) => onRoleChange(member, event.target.value as Role)}
                   >
-                    <option value="owner">Owner</option>
+                    {(role === 'owner' || member.role === 'owner') && <option value="owner">Owner</option>}
                     <option value="admin">Admin</option>
                     <option value="analyst">Analyst</option>
                     <option value="viewer">Viewer</option>
@@ -3346,7 +3632,7 @@ function Members({
                   <button
                     type="button"
                     className="ghost-button"
-                    disabled={!canManage || busy}
+                    disabled={!canManage || busy || (member.role === 'owner' && role !== 'owner')}
                     onClick={() => onRemove(member)}
                   >
                     <Trash2 size={16} aria-hidden /> Remove
@@ -3358,15 +3644,43 @@ function Members({
         </table>
       </div>
       <h3>Invitations</h3>
-      <div className="settings-list invitation-list">
-        {invitations.map((invitation) => (
-          <span key={invitation.id}>
-            {invitation.email} · {invitation.role} · {invitationStatus(invitation)}
-          </span>
-        ))}
-        {invitations.length === 0 && <span>No invitations loaded.</span>}
+      <div className="invitation-list">
+        {invitations.map((invitation) => {
+          const status = invitationStatus(invitation);
+          const pending = status === 'pending' || status === 'expired';
+          return (
+            <article className="invitation-row" key={invitation.id}>
+              <div>
+                <strong>{invitation.email}</strong>
+                <p>
+                  {invitation.role} · sent {formatDate(invitation.last_sent_at || invitation.created_at)} ·{' '}
+                  {invitation.send_count} attempt{invitation.send_count === 1 ? '' : 's'}
+                </p>
+              </div>
+              <StatusBadge status={status} />
+              <div className="button-row">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={!canManage || busy || !pending}
+                  onClick={() => onResendInvitation(invitation)}
+                >
+                  Resend
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={!canManage || busy || !pending}
+                  onClick={() => onRevokeInvitation(invitation)}
+                >
+                  Revoke
+                </button>
+              </div>
+            </article>
+          );
+        })}
+        {invitations.length === 0 && <div className="table-empty compact-empty">No invitations yet.</div>}
       </div>
-      <p className="muted">Invitation resend and revoke controls are not exposed by the current API.</p>
       {!canManage && <div className="table-empty">Member management requires owner or admin access.</div>}
     </section>
   );
@@ -3411,7 +3725,7 @@ function SyncHistory({
                 <tr>
                   <th scope="col">Started</th>
                   <th scope="col">Completed</th>
-                  <th scope="col">Trigger</th>
+                  <th scope="col">Started by</th>
                   <th scope="col">Status</th>
                   <th scope="col">Duration</th>
                   <th scope="col">Counts</th>
@@ -3424,14 +3738,14 @@ function SyncHistory({
                     <tr>
                       <td data-label="Started">{formatDate(run.started_at)}</td>
                       <td data-label="Completed">{formatDate(run.finished_at)}</td>
-                      <td data-label="Trigger">{run.trigger_type}</td>
+                      <td data-label="Started by">{run.trigger_type === 'manual' ? 'A team member' : 'Schedule'}</td>
                       <td data-label="Status">
                         <StatusBadge status={run.status} />
                       </td>
                       <td data-label="Duration">{formatDuration(run.duration_ms)}</td>
                       <td data-label="Counts">
                         {formatNumber(run.profile_count)} profiles · {formatNumber(run.content_seen_count)} seen ·{' '}
-                        {formatNumber(run.content_snapshot_count)} snapshots
+                        {formatNumber(run.content_snapshot_count)} performance updates
                       </td>
                       <td data-label="Details">
                         <button
@@ -3447,10 +3761,11 @@ function SyncHistory({
                     {expandedRun === run.id && (
                       <tr className="detail-row">
                         <td colSpan={7}>
-                          Attempt {run.attempt || 1}. Error category: {run.error_category || 'N/A'}. Provider code:{' '}
-                          {run.provider_code || 'N/A'}. Retryable:{' '}
-                          {run.retryable === null || run.retryable === undefined ? 'N/A' : run.retryable ? 'yes' : 'no'}
-                          .
+                          Attempt {run.attempt || 1}.{' '}
+                          {run.error_category
+                            ? 'The provider did not complete this sync.'
+                            : 'No failure was reported for this sync.'}{' '}
+                          {run.retryable ? 'It will be retried automatically.' : ''}
                         </td>
                       </tr>
                     )}
@@ -3468,47 +3783,223 @@ function SyncHistory({
   );
 }
 
-function Account({ user, onSignOut }: { user: User; onSignOut: () => void }) {
-  return (
-    <section className="panel" aria-labelledby="account-title">
-      <div className="panel-title">
-        <Settings size={18} aria-hidden />
-        <h2 id="account-title">Account and session</h2>
-      </div>
-      <div className="settings-list">
-        <span>{user.email}</span>
-        <span>Opaque server session</span>
-        <span>HttpOnly session cookie</span>
-        <span>SameSite=Lax CSRF cookie</span>
-      </div>
-      <button type="button" onClick={onSignOut}>
-        <LogOut size={18} aria-hidden /> Sign out
-      </button>
-    </section>
-  );
-}
-
-function DeploymentMetadata({
-  server,
-  client
+function Account({
+  user,
+  account,
+  workspaces,
+  busy,
+  onSaveProfile,
+  onRevokeSession,
+  onRevokeOthers,
+  onRevokeAll,
+  onRequestAccountDeletion,
+  onRequestWorkspaceDeletion,
+  onSignOut
 }: {
-  server: DeploymentVersion | null;
-  client: { commitSha: string | null; buildTime: string | null; release: string | null };
+  user: User;
+  account: AccountData | null;
+  workspaces: Workspace[];
+  busy: boolean;
+  onSaveProfile: (displayName: string) => void;
+  onRevokeSession: (session: AccountSession) => void;
+  onRevokeOthers: () => void;
+  onRevokeAll: () => void;
+  onRequestAccountDeletion: (confirmation: string) => void;
+  onRequestWorkspaceDeletion: (workspace: Workspace, confirmation: string) => void;
+  onSignOut: () => void;
 }) {
+  const [displayName, setDisplayName] = useState(user.display_name || '');
+  const [accountConfirmation, setAccountConfirmation] = useState('');
+  const ownerWorkspaces = workspaces.filter((workspace) => workspace.role === 'owner');
+  const [deletionWorkspaceId, setDeletionWorkspaceId] = useState(ownerWorkspaces[0]?.id || '');
+  const [workspaceConfirmation, setWorkspaceConfirmation] = useState('');
+  const effectiveDeletionWorkspaceId = ownerWorkspaces.some((workspace) => workspace.id === deletionWorkspaceId)
+    ? deletionWorkspaceId
+    : ownerWorkspaces[0]?.id || '';
+  const deletionWorkspace = ownerWorkspaces.find((workspace) => workspace.id === effectiveDeletionWorkspaceId);
+
   return (
-    <section className="panel" aria-labelledby="deployment-title">
-      <div className="panel-title">
-        <Activity size={18} aria-hidden />
-        <h2 id="deployment-title">Deployment</h2>
-      </div>
-      <div className="settings-list">
-        <span>Server commit: {server?.commit_sha || 'not provided'}</span>
-        <span>Server release: {server?.release || 'not provided'}</span>
-        <span>Server build: {server?.build_time || 'not provided'}</span>
-        <span>Client commit: {client.commitSha || 'not provided'}</span>
-        <span>Client release: {client.release || 'not provided'}</span>
-      </div>
-    </section>
+    <div className="account-layout">
+      <section className="panel" aria-labelledby="account-title">
+        <div className="panel-title between">
+          <div>
+            <h2 id="account-title">Profile</h2>
+            <p>Choose how your name appears to workspace members.</p>
+          </div>
+        </div>
+        <form
+          className="account-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSaveProfile(displayName);
+          }}
+        >
+          <label>
+            Display name
+            <input
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+              autoComplete="name"
+              maxLength={100}
+            />
+          </label>
+          <label>
+            Email address
+            <input value={user.email} readOnly aria-describedby="email-help" />
+          </label>
+          <p id="email-help" className="muted">
+            Contact support if your sign-in email needs to change.
+          </p>
+          <div className="button-row start">
+            <button type="submit" disabled={busy || displayName === (user.display_name || '')}>
+              Save profile
+            </button>
+            <button type="button" onClick={onSignOut} disabled={busy}>
+              <LogOut size={18} aria-hidden /> Sign out
+            </button>
+          </div>
+        </form>
+        {account && (
+          <div>
+            <h3>Sign-in methods</h3>
+            <div className="settings-list">
+              {account.authentication_methods.map((method) => (
+                <span key={`${method.provider}-${method.connected_at}`}>
+                  {method.provider === 'google' ? 'Google' : 'Email code'}
+                  {method.email ? ` · ${method.email}` : ''}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="panel" aria-labelledby="sessions-title">
+        <div className="panel-title between">
+          <div>
+            <h2 id="sessions-title">Active sessions</h2>
+            <p>Review devices signed in to your account. Approximate locations are not collected.</p>
+          </div>
+          <button type="button" onClick={onRevokeOthers} disabled={busy || !account || account.sessions.length < 2}>
+            Sign out other sessions
+          </button>
+        </div>
+        <div className="session-list">
+          {account?.sessions.map((session) => (
+            <article className="session-row" key={session.id}>
+              <div>
+                <strong>
+                  {session.device_label} {session.current && <span className="current-label">Current</span>}
+                </strong>
+                <p>
+                  Last active {formatDate(session.last_seen_at)} · signed in {formatDate(session.created_at)}
+                </p>
+              </div>
+              <button type="button" className="ghost-button" disabled={busy} onClick={() => onRevokeSession(session)}>
+                {session.current ? 'Sign out this session' : 'Sign out'}
+              </button>
+            </article>
+          ))}
+          {!account && <div className="table-empty compact-empty">Loading sessions…</div>}
+        </div>
+        <button type="button" className="danger account-danger-button" onClick={onRevokeAll} disabled={busy}>
+          Sign out everywhere
+        </button>
+      </section>
+
+      <section className="panel" aria-labelledby="deletion-title">
+        <div className="panel-title between">
+          <div>
+            <h2 id="deletion-title">Deletion requests</h2>
+            <p>Requests are verified and reviewed before data is permanently removed.</p>
+          </div>
+        </div>
+        {account?.deletion_requests.length ? (
+          <div className="deletion-request-list">
+            {account.deletion_requests.map((request) => (
+              <article key={request.id}>
+                <span>
+                  {request.scope === 'workspace' ? request.workspace_name || 'Workspace' : 'Account'} ·{' '}
+                  {formatDate(request.requested_at)}
+                </span>
+                <StatusBadge status={request.status} />
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">No deletion requests.</p>
+        )}
+
+        <details className="danger-zone">
+          <summary>Request account deletion</summary>
+          <div>
+            <p>
+              This starts a reviewed deletion request for your account and associated personal data. Enter your full
+              email address to confirm.
+            </p>
+            <label>
+              Email confirmation
+              <input
+                value={accountConfirmation}
+                onChange={(event) => setAccountConfirmation(event.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <button
+              type="button"
+              className="danger"
+              disabled={busy || accountConfirmation.trim().toLowerCase() !== user.email.toLowerCase()}
+              onClick={() => onRequestAccountDeletion(accountConfirmation)}
+            >
+              Submit account deletion request
+            </button>
+          </div>
+        </details>
+
+        {ownerWorkspaces.length > 0 && (
+          <details className="danger-zone">
+            <summary>Request workspace deletion</summary>
+            <div>
+              <p>Only workspace owners can request deletion. Enter the exact workspace name to confirm.</p>
+              <label>
+                Workspace
+                <select
+                  value={effectiveDeletionWorkspaceId}
+                  onChange={(event) => {
+                    setDeletionWorkspaceId(event.target.value);
+                    setWorkspaceConfirmation('');
+                  }}
+                >
+                  {ownerWorkspaces.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>
+                      {workspace.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Workspace name confirmation
+                <input
+                  value={workspaceConfirmation}
+                  onChange={(event) => setWorkspaceConfirmation(event.target.value)}
+                  autoComplete="off"
+                />
+              </label>
+              <button
+                type="button"
+                className="danger"
+                disabled={busy || !deletionWorkspace || workspaceConfirmation.trim() !== deletionWorkspace.name}
+                onClick={() =>
+                  deletionWorkspace && onRequestWorkspaceDeletion(deletionWorkspace, workspaceConfirmation)
+                }
+              >
+                Submit workspace deletion request
+              </button>
+            </div>
+          </details>
+        )}
+      </section>
+    </div>
   );
 }
 

@@ -5,15 +5,26 @@ const {
   OIDC_STATE_COOKIE,
   SESSION_COOKIE,
   SESSION_TTL_SECONDS,
+  acceptWorkspaceInvitation,
   authenticate,
   createWorkspaceForUser,
+  describeUserAgent,
+  getAccount,
   hashSecret,
   inviteMember,
   listWorkspaceMembers,
   listWorkspaces,
   removeMember,
+  requestAccountDeletion,
   requestMagicLink,
+  requestWorkspaceDeletion,
+  resendInvitation,
+  revokeAccountSession,
+  revokeAllAccountSessions,
+  revokeInvitation,
+  revokeOtherAccountSessions,
   signOut,
+  updateAccountProfile,
   updateMemberRole,
   verifyGoogleOidc,
   verifyMagicLink
@@ -204,8 +215,9 @@ function createPlatformRouter() {
 
   router.post('/auth/magic-link/verify', async (req, res) => {
     try {
-      const userAgentHash = req.get('user-agent') ? hashSecret(req.get('user-agent')) : null;
-      const result = await verifyMagicLink(req.body.token, userAgentHash);
+      const userAgent = req.get('user-agent') || '';
+      const userAgentHash = userAgent ? hashSecret(userAgent) : null;
+      const result = await verifyMagicLink(req.body.token, userAgentHash, describeUserAgent(userAgent));
       setAuthCookies(req, res, result.sessionToken, result.csrfToken);
       return res.json({
         user: result.user,
@@ -246,11 +258,13 @@ function createPlatformRouter() {
       return res.status(403).json({ error: 'oidc_state_invalid' });
     }
     try {
-      const userAgentHash = req.get('user-agent') ? hashSecret(req.get('user-agent')) : null;
+      const userAgent = req.get('user-agent') || '';
+      const userAgentHash = userAgent ? hashSecret(userAgent) : null;
       const result = await verifyGoogleOidc({
         idToken: req.body.id_token,
         nonce: req.body.nonce,
-        userAgentHash
+        userAgentHash,
+        deviceLabel: describeUserAgent(userAgent)
       });
       setAuthCookies(req, res, result.sessionToken, result.csrfToken);
       clearOidcCookies(req, res);
@@ -275,6 +289,69 @@ function createPlatformRouter() {
       await signOut(req.session.id);
       clearAuthCookies(req, res);
       return res.json({ signed_out: true });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.get('/account', requireSession, async (req, res) => {
+    try {
+      return res.json(await getAccount(req.session.user.id, req.session.id));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.patch('/account/profile', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await updateAccountProfile(req.session.user.id, req.body && req.body.display_name));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.delete('/account/sessions/:sessionId', requireSession, requireCsrf, async (req, res) => {
+    try {
+      const result = await revokeAccountSession(req.session.user.id, req.params.sessionId);
+      if (req.params.sessionId === req.session.id) clearAuthCookies(req, res);
+      return res.json({ ...result, signed_out: req.params.sessionId === req.session.id });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/account/sessions/revoke-others', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await revokeOtherAccountSessions(req.session.user.id, req.session.id));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/account/sessions/revoke-all', requireSession, requireCsrf, async (req, res) => {
+    try {
+      const result = await revokeAllAccountSessions(req.session.user.id);
+      clearAuthCookies(req, res);
+      return res.json({ ...result, signed_out: true });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/account/deletion-requests', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.status(202).json(await requestAccountDeletion(
+        req.session.user.id,
+        req.body && req.body.confirmation
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/invitations/accept', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await acceptWorkspaceInvitation(req.session.user.id, req.body && req.body.token));
     } catch (error) {
       return sendError(res, error);
     }
@@ -313,6 +390,42 @@ function createPlatformRouter() {
         req.params.workspaceId,
         req.body.email,
         req.body.role
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/workspaces/:workspaceId/invitations/:invitationId/resend', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await resendInvitation(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.params.invitationId
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.delete('/workspaces/:workspaceId/invitations/:invitationId', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.json(await revokeInvitation(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.params.invitationId
+      ));
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/workspaces/:workspaceId/deletion-requests', requireSession, requireCsrf, async (req, res) => {
+    try {
+      return res.status(202).json(await requestWorkspaceDeletion(
+        req.session.user.id,
+        req.params.workspaceId,
+        req.body && req.body.confirmation
       ));
     } catch (error) {
       return sendError(res, error);

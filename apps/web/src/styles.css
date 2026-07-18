@@ -346,6 +346,23 @@ a {
   color: var(--brand-strong);
 }
 
+.invitation-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid #bed0e6;
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--blue-bg);
+}
+
+.invitation-banner p {
+  margin-top: 4px;
+  color: var(--muted);
+}
+
 .app-shell {
   min-height: 100vh;
   display: grid;
@@ -777,7 +794,32 @@ th {
 }
 
 .invitation-list {
-  align-items: stretch;
+  display: grid;
+  gap: 8px;
+}
+
+.invitation-row,
+.session-row,
+.deletion-request-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.invitation-row p,
+.session-row p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.compact-empty {
+  min-height: 84px;
 }
 
 .provider-list {
@@ -833,6 +875,69 @@ th {
 
 .button-row {
   justify-content: end;
+}
+
+.button-row.start {
+  justify-content: start;
+}
+
+.account-layout,
+.account-form,
+.session-list,
+.deletion-request-list,
+.danger-zone > div {
+  display: grid;
+  gap: 12px;
+}
+
+.account-form {
+  max-width: 640px;
+}
+
+.session-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.current-label {
+  display: inline-flex;
+  margin-left: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--green-bg);
+  color: var(--brand-strong);
+  font-size: 0.75rem;
+  vertical-align: middle;
+}
+
+.account-danger-button {
+  justify-self: start;
+}
+
+.deletion-request-list article {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.danger-zone {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.danger-zone summary {
+  width: fit-content;
+  padding: 8px 0;
+  color: var(--red);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.danger-zone > div {
+  max-width: 640px;
+  padding: 4px 0 8px;
+}
+
+.danger-zone p {
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .youtube-channel {
@@ -1105,6 +1210,17 @@ button.danger {
 
   .provider-row {
     grid-template-columns: 1fr;
+  }
+
+  .invitation-banner,
+  .invitation-row,
+  .session-row {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .invitation-banner {
+    display: grid;
   }
 
   .youtube-channel,

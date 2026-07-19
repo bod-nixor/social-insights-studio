@@ -71,7 +71,9 @@ Facebook Page account metrics:
 - `page_media_view`
 - `page_total_media_view_unique`
 
-Facebook content uses Page post metadata and available reaction/comment/share counts, plus `post_media_view` and `post_total_media_view_unique`. Deprecated Page impression metrics are not requested.
+Facebook content uses Page post ID, message, publish time, permalink, full picture, attachment media types, provider-returned share counts, plus `post_media_view` and `post_total_media_view_unique`. Deprecated Page impression metrics are not requested.
+
+Facebook Page reaction and comment totals are intentionally unavailable under the approved narrow permission set. The worker does not request nested `reactions` or `comments` on the Page posts edge because those fields require `pages_read_user_content` or Page Public Content Access. Both broader access paths are outside this integration's approved boundary and will not be requested. Normalized reaction and comment counts therefore remain `null`, never zero, and their provider metadata uses the stable `unavailable_under_approved_narrow_permissions` availability value. Post-level insights and provider-returned share counts remain collected.
 
 Instagram account metrics:
 

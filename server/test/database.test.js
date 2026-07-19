@@ -4154,14 +4154,20 @@ test('Facebook Pages uses explicit selection, encrypted Page tokens, worker-only
       });
     }
     if (pathName === '/v25.0/page-1/posts') {
+      assert.equal(
+        call.url.searchParams.get('fields'),
+        'id,message,created_time,permalink_url,full_picture,attachments{media_type},shares'
+      );
+      assert.equal(call.url.searchParams.get('fields').includes('reactions'), false);
+      assert.equal(call.url.searchParams.get('fields').includes('comments'), false);
       return jsonResponse(200, {
         data: [{
           id: 'page-1_post-1',
           message: 'A read-only Page post',
           created_time: `${yesterday}T10:00:00+0000`,
           permalink_url: 'https://facebook.example/page-1/posts/1',
-          reactions: { summary: { total_count: 9 } },
-          comments: { summary: { total_count: 4 } },
+          full_picture: 'https://img.example/page-1-post-1.jpg',
+          attachments: { data: [{ media_type: 'photo' }] },
           shares: { count: 2 }
         }]
       });
@@ -4301,8 +4307,26 @@ test('Facebook Pages uses explicit selection, encrypted Page tokens, worker-only
   assert.equal(dashboardBody.account.display_name, 'Read Only Page');
   assert.equal(dashboardBody.metrics.find(metric => metric.key === 'page_follows').value, 101);
   assert.equal(dashboardBody.content[0].view_count, 88);
-  assert.equal(dashboardBody.content[0].like_count, 9);
+  assert.equal(dashboardBody.content[0].like_count, null);
+  assert.equal(dashboardBody.content[0].comment_count, null);
+  assert.equal(dashboardBody.content[0].share_count, 2);
   assert.equal(calls.length, 15, 'dashboard API must read stored snapshots only');
+
+  const contentDetail = await requestApp(
+    `/api/workspaces/${workspace.id}/content/${dashboardBody.content[0].id}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(contentDetail.statusCode, 200);
+  assert.equal(contentDetail.json().current_metrics.like_count, null);
+  assert.equal(contentDetail.json().current_metrics.comment_count, null);
+  assert.equal(contentDetail.json().current_metrics.share_count, 2);
+  assert.deepEqual(contentDetail.json().item.provider_metadata.availability, {
+    reactions: 'unavailable_under_approved_narrow_permissions',
+    comments: 'unavailable_under_approved_narrow_permissions'
+  });
+  assert.deepEqual(contentDetail.json().item.provider_metadata.attachmentTypes, ['photo']);
+  assert.equal(contentDetail.json().history[0].provider_metrics.insightsAvailability, 'available');
+  assert.equal(calls.length, 15, 'content detail API must read stored snapshots only');
 
   const siblingSourceId = crypto.randomUUID();
   const siblingRunId = crypto.randomUUID();

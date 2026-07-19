@@ -15,6 +15,7 @@ const {
   normalizeDiscoveredResources
 } = require('../platform/meta-connection-service');
 const {
+  FACEBOOK_POST_COUNT_AVAILABILITY,
   dailyInsightValues,
   latestInsightValue,
   normalizeFacebookPost,
@@ -153,6 +154,27 @@ test('Graph calls use the pinned version, appsecret proof, bearer header, bounde
   assert.equal(result.usage.maximum, 81);
 });
 
+test('Facebook Page post listing requests only narrow-scope fields', async () => {
+  let requestUrl;
+  meta.setMetaTestHooks({
+    fetch: async url => {
+      requestUrl = new URL(String(url));
+      return response(200, { data: [] });
+    }
+  });
+
+  const result = await meta.listPagePosts('page-1', 'page-token', null, { env: testEnv });
+
+  assert.equal(result.ok, true);
+  assert.equal(requestUrl.pathname, '/v25.0/page-1/posts');
+  assert.equal(
+    requestUrl.searchParams.get('fields'),
+    'id,message,created_time,permalink_url,full_picture,attachments{media_type},shares'
+  );
+  assert.equal(requestUrl.searchParams.get('fields').includes('reactions'), false);
+  assert.equal(requestUrl.searchParams.get('fields').includes('comments'), false);
+});
+
 test('Meta failures distinguish token, permission, throttling, invalid metric, and transient provider states', () => {
   assert.equal(meta.categorizeMetaFailure(400, { error: { code: 190 } }).category, 'authentication');
   assert.equal(meta.categorizeMetaFailure(403, { error: { code: 10 } }).category, 'scope');
@@ -209,9 +231,18 @@ test('resource and content normalization requires Page ANALYZE and excludes unsu
 
   const pagePost = normalizeFacebookPost({
     id: 'post-1', message: 'Page post', reactions: { summary: { total_count: 5 } },
-    comments: { summary: { total_count: 2 } }, shares: { count: 1 }
+    comments: { summary: { total_count: 2 } }, shares: { count: 1 },
+    attachments: { data: [{ media_type: 'photo' }] }
   });
-  assert.equal(pagePost.likeCount, 5);
+  assert.equal(pagePost.likeCount, null);
+  assert.equal(pagePost.commentCount, null);
+  assert.equal(pagePost.shareCount, 1);
+  assert.deepEqual(pagePost.metadata.attachmentTypes, ['photo']);
+  assert.deepEqual(pagePost.metadata.availability, {
+    reactions: 'unavailable_under_approved_narrow_permissions',
+    comments: 'unavailable_under_approved_narrow_permissions'
+  });
+  assert.deepEqual(pagePost.metadata.availability, FACEBOOK_POST_COUNT_AVAILABILITY);
   const media = normalizeInstagramMedia({
     id: 'media-1', media_product_type: 'FEED', media_type: 'IMAGE', like_count: 4, comments_count: 1
   });

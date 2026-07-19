@@ -6,6 +6,10 @@ const { getMetaConfiguration, getMetaLimits, META_GRAPH_API_VERSION } = require(
 
 const DEFAULT_SYNC_INTERVAL_SECONDS = 6 * 60 * 60;
 const INSTAGRAM_ACCOUNT_PERIOD_DAYS = Object.freeze([7, 30, 90]);
+const FACEBOOK_POST_COUNT_AVAILABILITY = Object.freeze({
+  reactions: 'unavailable_under_approved_narrow_permissions',
+  comments: 'unavailable_under_approved_narrow_permissions'
+});
 
 function createSyncError(code, result = null) {
   const error = new Error(code);
@@ -175,8 +179,6 @@ async function createSyncRun(source, triggerType, correlationId) {
 }
 
 function normalizeFacebookPost(item) {
-  const reactions = item && item.reactions && item.reactions.summary ? item.reactions.summary.total_count : null;
-  const comments = item && item.comments && item.comments.summary ? item.comments.summary.total_count : null;
   const shares = item && item.shares ? item.shares.count : null;
   const message = item && item.message ? String(item.message) : null;
   const attachmentTypes = [...new Set(
@@ -191,13 +193,14 @@ function normalizeFacebookPost(item) {
     publishedAt: item.created_time || null,
     shareUrl: item.permalink_url || null,
     viewCount: null,
-    likeCount: integerOrNull(reactions),
-    commentCount: integerOrNull(comments),
+    likeCount: null,
+    commentCount: null,
     shareCount: integerOrNull(shares),
     metadata: {
       thumbnailUrl: item.full_picture || null,
       attachmentTypes,
-      providerType: 'page_post'
+      providerType: 'page_post',
+      availability: { ...FACEBOOK_POST_COUNT_AVAILABILITY }
     }
   };
 }
@@ -809,6 +812,7 @@ async function performMetaSyncForJob(job, options = {}) {
 }
 
 module.exports = {
+  FACEBOOK_POST_COUNT_AVAILABILITY,
   INSTAGRAM_ACCOUNT_PERIOD_DAYS,
   dailyInsightValues,
   latestInsightValue,

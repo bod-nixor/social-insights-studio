@@ -362,7 +362,7 @@ function getPageInsights(pageId, pageToken, metrics, since, until, requestOption
 
 function listPagePosts(pageId, pageToken, after = null, requestOptions = {}) {
   return authorizedRequest(`${pageId}/posts`, pageToken, {
-    fields: 'id,message,created_time,permalink_url,full_picture,attachments{media_type},shares,reactions.limit(0).summary(true),comments.limit(0).summary(true)',
+    fields: 'id,message,created_time,permalink_url,full_picture,attachments{media_type},shares',
     limit: 50,
     after
   }, requestOptions);

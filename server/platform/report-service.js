@@ -454,8 +454,8 @@ async function enqueueReport(userId, workspaceId, body) {
       await connection.query(
         `INSERT INTO report_runs
           (id, report_definition_id, workspace_id, requested_by_user_id, idempotency_key,
-           configuration_snapshot, metric_definitions_snapshot, data_through_at, max_attempts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           configuration_snapshot, metric_definitions_snapshot, data_through_at, run_after, max_attempts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3), ?)`,
         [
           runId,
           definitionId,

@@ -47,7 +47,7 @@ process.env.FEATURE_PDF_REPORTS = 'true';
 process.env.REPORT_ARTIFACT_ROOT = path.join(os.tmpdir(), `sis-report-db-${process.pid}`);
 
 const { app, stopStores } = require('../index');
-const { closePool } = require('../database');
+const { closePool, getConnection } = require('../database');
 const { setGoogleOidcFetchImplementation } = require('../platform/google-oidc');
 const { setTikTokFetchImplementation, TIKTOK_SCOPES } = require('../integrations/tiktok');
 const { setYouTubeTestHooks, YOUTUBE_SCOPES } = require('../integrations/youtube');
@@ -5049,7 +5049,7 @@ test('development seed foundation creates one idempotent workspace-owned TikTok 
   assert.equal(Number(rows[0].connections), 1);
 });
 
-test('PDF reports are authorized, queued idempotently, rendered by the worker, downloaded once, expired, and deleted safely', async () => {
+test('PDF reports use UTC scheduling with non-UTC MariaDB sessions and preserve authorization, storage, and deletion behavior', async t => {
   await clearDatabase();
   await fs.rm(process.env.REPORT_ARTIFACT_ROOT, { recursive: true, force: true });
   const owner = await signIn('report-owner@example.com');
@@ -5143,6 +5143,27 @@ test('PDF reports are authorized, queued idempotently, rendered by the worker, d
   });
   assert.equal(outsiderHidden.statusCode, 404);
 
+  const defaultDatabaseUrl = process.env.DATABASE_URL;
+  const offsetDatabaseUrl = new URL(defaultDatabaseUrl);
+  offsetDatabaseUrl.searchParams.set('sessionVariables', JSON.stringify({ time_zone: '+02:00' }));
+  await closePool();
+  process.env.DATABASE_URL = offsetDatabaseUrl.toString();
+  t.after(async () => {
+    await closePool();
+    process.env.DATABASE_URL = defaultDatabaseUrl;
+  });
+  const sessionConnection = await getConnection();
+  try {
+    const sessionRows = await sessionConnection.query(
+      `SELECT @@SESSION.time_zone AS session_time_zone,
+              TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(3), NOW(3)) AS utc_offset_seconds`
+    );
+    assert.equal(sessionRows[0].session_time_zone, '+02:00');
+    assert.equal(Number(sessionRows[0].utc_offset_seconds), 7200);
+  } finally {
+    await sessionConnection.release();
+  }
+
   const queued = await requestApp(`/api/workspaces/${workspace.id}/reports`, {
     method: 'POST',
     headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
@@ -5164,23 +5185,18 @@ test('PDF reports are authorized, queued idempotently, rendered by the worker, d
   assert.equal(duplicate.json().report.id, reportId);
   assert.equal(duplicate.json().idempotent, true);
 
-  await db.query(
-    `UPDATE report_runs
-     SET run_after = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)
+  const scheduleRows = await db.query(
+    `SELECT run_after <= UTC_TIMESTAMP(3) AS immediately_due,
+            TIMESTAMPDIFF(SECOND, run_after, UTC_TIMESTAMP(3)) AS schedule_age_seconds,
+            TIMESTAMPDIFF(MINUTE, run_after, queued_at) AS queued_at_offset_minutes
+     FROM report_runs
      WHERE id = ?`,
     [reportId]
   );
-  const overdueReadiness = await requestApp('/health/ready');
-  assert.equal(overdueReadiness.statusCode, 200);
-  assert.equal(overdueReadiness.json().checks.sync_queue, 'ready');
-  assert.equal(overdueReadiness.json().checks.report_queue, 'overdue');
-  assert.ok(overdueReadiness.json().warnings.includes('report_jobs_overdue'));
-  await db.query(
-    `UPDATE report_runs
-     SET run_after = UTC_TIMESTAMP(3)
-     WHERE id = ?`,
-    [reportId]
-  );
+  assert.equal(Number(scheduleRows[0].immediately_due), 1);
+  assert.ok(Number(scheduleRows[0].schedule_age_seconds) >= 0);
+  assert.ok(Number(scheduleRows[0].schedule_age_seconds) < 10);
+  assert.equal(Number(scheduleRows[0].queued_at_offset_minutes), 120);
 
   const rendered = await runDueReports({ timeBudgetSeconds: 30, leaseOwner: 'report-test-worker' });
   assert.equal(rendered.processed, 1);
@@ -5227,6 +5243,17 @@ test('PDF reports are authorized, queued idempotently, rendered by the worker, d
     body: deletionBody
   });
   const deletionReportId = deletionQueued.json().report.id;
+  await db.query(
+    `UPDATE report_runs
+     SET run_after = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)
+     WHERE id = ?`,
+    [deletionReportId]
+  );
+  const overdueReadiness = await requestApp('/health/ready');
+  assert.equal(overdueReadiness.statusCode, 200);
+  assert.equal(overdueReadiness.json().checks.sync_queue, 'ready');
+  assert.equal(overdueReadiness.json().checks.report_queue, 'overdue');
+  assert.ok(overdueReadiness.json().warnings.includes('report_jobs_overdue'));
   const deletionWorker = await runDueReports({ timeBudgetSeconds: 30, leaseOwner: 'report-deletion-worker' });
   assert.equal(deletionWorker.processed, 1);
   const deletionArtifact = await db.query(

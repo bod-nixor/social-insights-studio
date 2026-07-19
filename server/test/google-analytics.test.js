@@ -265,6 +265,37 @@ test('GA4 report parsing treats omitted rows and rowCount zero as an empty resul
   assert.equal(parsed.rowCount, 0);
 });
 
+test('GA4 report parsing accepts the known empty 200 envelope without inventing zeroes', () => {
+  const expected = {
+    dimensions: [],
+    metrics: ['sessions', 'activeUsers']
+  };
+  const parsed = parseReportRows({
+    metadata: {
+      currencyCode: 'PKR',
+      timeZone: 'Asia/Karachi'
+    },
+    propertyQuota: {
+      tokensPerDay: {
+        consumed: 1,
+        remaining: 99999
+      }
+    },
+    kind: 'analyticsData#runReport'
+  }, expected);
+
+  assert.deepEqual(parsed.dimensions, []);
+  assert.deepEqual(parsed.metrics, ['sessions', 'activeUsers']);
+  assert.deepEqual(parsed.rows, []);
+  assert.equal(parsed.rowCount, 0);
+  assert.equal(parsed.metadata.currencyCode, 'PKR');
+  assert.equal(parsed.propertyQuota.tokensPerDay.consumed, 1);
+
+  assert.throws(() => parseReportRows({
+    metadata: {}
+  }, expected), /ga4_report_response_malformed/);
+});
+
 test('GA4 report parsing rejects present non-array or missing required headers', () => {
   assert.throws(() => parseReportRows({
     dimensionHeaders: {},

@@ -188,6 +188,33 @@ function parseReportRows(body, expected = null) {
   }
   const expectedDimensions = expectedReportColumns(expected, 'dimensions');
   const expectedMetrics = expectedReportColumns(expected, 'metrics');
+
+  const hasNoReportTableFields =
+    !Object.hasOwn(body, 'dimensionHeaders') &&
+    !Object.hasOwn(body, 'metricHeaders') &&
+    !Object.hasOwn(body, 'rows') &&
+    !Object.hasOwn(body, 'rowCount');
+  const hasKnownEmptyEnvelope =
+    body.kind === 'analyticsData#runReport' &&
+    Object.hasOwn(body, 'metadata') &&
+    Object.hasOwn(body, 'propertyQuota');
+
+  if (
+    expectedDimensions !== null &&
+    expectedMetrics !== null &&
+    hasNoReportTableFields &&
+    hasKnownEmptyEnvelope
+  ) {
+    return {
+      dimensions: [...expectedDimensions],
+      metrics: [...expectedMetrics],
+      rows: [],
+      rowCount: 0,
+      metadata: optionalReportObject(body, 'metadata', {}),
+      propertyQuota: optionalReportObject(body, 'propertyQuota', null)
+    };
+  }
+
   const dimensions = responseHeaderNames(body, 'dimensionHeaders', true);
   const metrics = responseHeaderNames(
     body,

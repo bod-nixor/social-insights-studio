@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Status - Social Insights Studio</title>
+  <style>
+    body { color: #14213d; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; margin: 0; background: #f5f8fb; }
+    main { margin: 0 auto; max-width: 860px; padding: 48px 22px; }
+    article { background: #fff; border: 1px solid #d9e2ea; border-radius: 8px; padding: 30px; }
+    h1 { font-size: clamp(2rem, 4vw, 3rem); line-height: 1.1; margin: 0 0 14px; }
+    h2 { margin-top: 32px; }
+    a { color: #087e8b; font-weight: 700; }
+    .meta { color: #526070; margin-bottom: 26px; }
+    .status { border: 1px solid #d9e2ea; border-radius: 8px; margin-top: 16px; padding: 16px; }
+    .status strong { display: block; margin-bottom: 6px; }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Service status and known limitations</h1>
+      <p class="meta">Last reviewed: July 18, 2026</p>
+      <div class="status">
+        <strong>TikTok dashboard and Looker Studio connector</strong>
+        <p>Current implemented connector and dashboard source. A connected TikTok account with no posts can return valid profile metrics and no video rows.</p>
+      </div>
+      <div class="status">
+        <strong>YouTube channel analytics</strong>
+        <p>The read-only integration is implemented but disabled by default until Google OAuth configuration and verification are complete. YouTube reports may have a visible data-through delay, and unavailable metrics are not treated as zero.</p>
+      </div>
+      <div class="status">
+        <strong>Facebook Page and Instagram professional analytics</strong>
+        <p>The read-only integrations are implemented but disabled by default until exact Meta permissions, Facebook Login for Business configuration, provider review evidence, and eligible live test resources are confirmed. Instagram is independently blocked unless its exact four-scope Facebook Login set is available.</p>
+      </div>
+      <div class="status">
+        <strong>Website Analytics</strong>
+        <p>The read-only GA4 integration is implemented but disabled by default until a dedicated Google OAuth client, Analytics Admin/Data APIs, consent configuration, an eligible test property, review evidence, and live verification are complete. Reporting delay, unavailable combinations, and privacy thresholding remain visible rather than being estimated.</p>
+      </div>
+      <div class="status">
+        <strong>Report PDFs</strong>
+        <p>PDF reports are available only when private report storage and background generation are enabled. Reports use stored analytics snapshots, retain provider metric definitions, and expire seven days after generation.</p>
+      </div>
+      <p><a href="/">Return to Social Insights Studio</a></p>
+    </article>
+  </main>
+</body>
+</html>

@@ -2,6 +2,7 @@
 const crypto = require('crypto');
 const mariadb = require('mariadb');
 const { assertLocalDatabaseUrl, assertNotProductionCommand, getDatabaseUrl } = require('./database-env');
+const { upsertProviderFoundation } = require('./seed-provider-foundation');
 
 function fixedId(group, index) {
   return `${String(group).padStart(8, '0')}-0000-4000-8000-${String(index).padStart(12, '0')}`;
@@ -41,18 +42,26 @@ function metricValue(value, nullable) {
 }
 
 async function upsertUser(connection, id, email, displayName) {
-  await connection.query(
-    `INSERT INTO users (id, email, display_name)
-     VALUES (?, ?, ?)
-     ON DUPLICATE KEY UPDATE display_name = VALUES(display_name), status = 'active', deleted_at = NULL`,
-    [id, email, displayName]
-  );
+  const existingRows = await connection.query('SELECT id FROM users WHERE email = ? LIMIT 1', [email]);
+  const userId = existingRows[0] ? existingRows[0].id : id;
+  if (existingRows[0]) {
+    await connection.query(
+      `UPDATE users SET display_name = ?, status = 'active', deleted_at = NULL WHERE id = ?`,
+      [displayName, userId]
+    );
+  } else {
+    await connection.query(
+      `INSERT INTO users (id, email, display_name) VALUES (?, ?, ?)`,
+      [userId, email, displayName]
+    );
+  }
   await connection.query(
     `INSERT INTO user_identities (id, user_id, provider, provider_subject, email)
      VALUES (?, ?, 'email', ?, ?)
-     ON DUPLICATE KEY UPDATE email = VALUES(email)`,
-    [fixedId(90000000, Number(id.slice(-3))), id, email, email]
+     ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), email = VALUES(email)`,
+    [crypto.randomUUID(), userId, email, email]
   );
+  return userId;
 }
 
 async function upsertWorkspace(connection, { id, name, slug, ownerId }) {
@@ -343,12 +352,12 @@ async function seedMembersAndInvitations(connection, workspaceId, ownerId) {
     { id: fixedId(0, 203), email: 'viewer+local@social-insights.test', name: 'Local Viewer User', role: 'viewer' }
   ];
   for (const user of users) {
-    await upsertUser(connection, user.id, user.email, user.name);
+    const userId = await upsertUser(connection, user.id, user.email, user.name);
     await connection.query(
       `INSERT INTO workspace_memberships (workspace_id, user_id, role, status, invited_by)
        VALUES (?, ?, ?, 'active', ?)
        ON DUPLICATE KEY UPDATE role = VALUES(role), status = 'active', invited_by = VALUES(invited_by)`,
-      [workspaceId, user.id, user.role, ownerId]
+      [workspaceId, userId, user.role, ownerId]
     );
   }
 
@@ -386,7 +395,7 @@ async function main() {
   const connection = await mariadb.createConnection(databaseUrl);
   const clock = makeClock();
   try {
-    const ownerId = fixedId(0, 101);
+    const requestedOwnerId = fixedId(0, 101);
     const workspaces = [
       {
         id: fixedId(10000000, 101),
@@ -438,7 +447,12 @@ async function main() {
     ];
 
     await connection.beginTransaction();
-    await upsertUser(connection, ownerId, 'demo+local@social-insights.test', 'Local Demo User');
+    const ownerId = await upsertUser(
+      connection,
+      requestedOwnerId,
+      'demo+local@social-insights.test',
+      'Local Demo User'
+    );
     for (const workspace of workspaces) {
       await upsertWorkspace(connection, { ...workspace, ownerId });
       await resetDemoSource(connection, workspace.sourceId, workspace.id);
@@ -455,6 +469,19 @@ async function main() {
             : clock.daysAgo(workspace.lastSyncAge),
         nextSyncAt: workspace.nextAge === null ? null : clock.daysAgo(workspace.nextAge)
       });
+      await upsertProviderFoundation(connection, {
+        id: workspace.sourceId,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        status: workspace.status,
+        lastSyncAt: workspace.lastSyncAge === null ? null : clock.daysAgo(workspace.lastSyncAge),
+        lastSuccessfulSyncAt: workspace.lastSuccessfulSyncAge !== undefined
+          ? clock.daysAgo(workspace.lastSuccessfulSyncAge)
+          : workspace.lastSyncAge === null || workspace.status === 'reconnect_required'
+            ? null
+            : clock.daysAgo(workspace.lastSyncAge),
+        nextSyncAt: workspace.nextAge === null ? null : clock.daysAgo(workspace.nextAge)
+      }, ownerId);
     }
 
     await seedMembersAndInvitations(connection, workspaces[0].id, ownerId);
@@ -496,7 +523,9 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch(error => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}

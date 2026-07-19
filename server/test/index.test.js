@@ -1,14 +1,24 @@
 const { after, test } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 
 const tempDir = path.join(os.tmpdir(), `social-insights-studio-test-${process.pid}`);
+const testWebDistDir = path.join(tempDir, 'web-dist');
+const testWebAsset = 'index-a1b2c3d4.js';
 const allowedRedirect = 'https://script.google.com/macros/d/abc123/usercallback';
 const allowedWebAppRedirect = 'https://script.google.com/macros/s/deployment-id/exec';
+
+fsSync.mkdirSync(path.join(testWebDistDir, 'assets'), { recursive: true });
+fsSync.writeFileSync(
+  path.join(testWebDistDir, 'index.html'),
+  `<!doctype html><html><head><title>Social Insights Studio</title></head><body><div id="root" data-test-shell="true"></div><script type="module" src="/assets/${testWebAsset}"></script></body></html>`
+);
+fsSync.writeFileSync(path.join(testWebDistDir, 'assets', testWebAsset), 'globalThis.__SIS_TEST_BUILD__ = true;');
 
 process.env.BASE_URL = 'http://localhost:3001';
 process.env.NODE_ENV = 'test';
@@ -24,6 +34,7 @@ process.env.TOKEN_STORE_PATH = path.join(tempDir, 'tokens.json');
 process.env.TOKEN_LOCK_PATH = path.join(tempDir, 'tokens.json.lock');
 process.env.STATE_STORE_PATH = path.join(tempDir, 'oauth-state.json');
 process.env.STATE_LOCK_PATH = path.join(tempDir, 'oauth-state.json.lock');
+process.env.WEB_DIST_DIR = testWebDistDir;
 
 const {
   app,
@@ -50,6 +61,7 @@ const {
 } = require('../integrations/tiktok');
 const { closePool } = require('../database');
 const { normalizeEmail, parseCookies, serializeCookie } = require('../platform/security');
+const { getYouTubeProductionErrors } = require('../platform/youtube-config');
 
 after(async () => {
   setFetchImplementation(null);
@@ -379,6 +391,37 @@ test('production environment validation rejects unsafe staging values', () => {
   };
 
   assert.doesNotThrow(() => validateRequiredEnv(validProductionEnv));
+  const validYouTubeEnv = {
+    ...validProductionEnv,
+    YOUTUBE_ENABLED: 'true',
+    YOUTUBE_CLIENT_ID: '123456789.apps.googleusercontent.com',
+    YOUTUBE_CLIENT_SECRET: 'google-oauth-secret-value',
+    YOUTUBE_REDIRECT_URI: 'https://lstc.nixorcorporate.com/api/integrations/youtube/callback'
+  };
+  assert.doesNotThrow(() => validateRequiredEnv(validYouTubeEnv));
+  const incompleteYouTubeEnv = { ...validYouTubeEnv, YOUTUBE_CLIENT_ID: '' };
+  assert.doesNotThrow(() => validateRequiredEnv(incompleteYouTubeEnv));
+  assert.ok(getYouTubeProductionErrors(incompleteYouTubeEnv).includes(
+    'youtube_configuration:YOUTUBE_CLIENT_ID_missing'
+  ));
+
+  const unsafeYouTubeRedirectEnv = {
+    ...validYouTubeEnv,
+    YOUTUBE_REDIRECT_URI: 'https://lstc.nixorcorporate.com/api/integrations/youtube/callback?unsafe=1'
+  };
+  assert.doesNotThrow(() => validateRequiredEnv(unsafeYouTubeRedirectEnv));
+  assert.ok(getYouTubeProductionErrors(unsafeYouTubeRedirectEnv).includes(
+    'youtube_configuration:YOUTUBE_REDIRECT_URI_invalid'
+  ));
+
+  const placeholderYouTubeEnv = {
+    ...validYouTubeEnv,
+    YOUTUBE_CLIENT_SECRET: 'your_youtube_client_secret'
+  };
+  assert.doesNotThrow(() => validateRequiredEnv(placeholderYouTubeEnv));
+  assert.ok(getYouTubeProductionErrors(placeholderYouTubeEnv).includes(
+    'youtube_configuration:YOUTUBE_CLIENT_SECRET_placeholder'
+  ));
   assert.throws(
     () => validateRequiredEnv({ ...validProductionEnv, BASE_URL: 'http://lstc.nixorcorporate.com' }),
     /BASE_URL must be https/
@@ -566,14 +609,146 @@ test('readJsonResponse parses JSON and flags malformed upstream responses', asyn
   );
 });
 
-test('/health endpoints are non-sensitive', async () => {
-  const live = await requestApp('/health/live');
-  const ready = await requestApp('/health/ready');
+test('canonical root serves the React build and legacy app URLs redirect permanently', async () => {
+  const root = await requestApp('/?workspace=abc&view=content');
+  assert.equal(root.statusCode, 200);
+  assert.match(root.headers['content-type'], /^text\/html/);
+  assert.match(root.body, /data-test-shell="true"/);
+  assert.match(root.body, new RegExp(`src="/assets/${testWebAsset}"`));
+  assert.doesNotMatch(root.body, /\/app\//);
 
-  assert.equal(live.statusCode, 200);
-  assert.deepEqual(live.json(), { status: 'live' });
-  assert.equal(ready.statusCode, 200);
-  assert.equal(ready.json().status, 'ready');
+  const asset = await requestApp(`/assets/${testWebAsset}`);
+  assert.equal(asset.statusCode, 200);
+  assert.match(asset.body, /__SIS_TEST_BUILD__/);
+  const favicon = await requestApp('/favicon.ico');
+  assert.equal(favicon.statusCode, 200);
+  assert.match(favicon.headers['content-type'], /^image\/png/);
+
+  const legacyRoot = await requestApp('/app');
+  const legacySlash = await requestApp('/app/');
+  const legacyQuery = await requestApp('/app/?workspace=abc&view=content&page=2');
+  const legacyDetail = await requestApp('/app/workspaces/11111111-1111-4111-8111-111111111111/content/22222222-2222-4222-8222-222222222222?range=30d');
+  const unsafeLegacyPath = await requestApp('/app//evil.example?workspace=abc');
+  assert.equal(legacyRoot.statusCode, 308);
+  assert.equal(legacyRoot.headers.location, '/');
+  assert.equal(legacySlash.statusCode, 308);
+  assert.equal(legacySlash.headers.location, '/');
+  assert.equal(legacyQuery.statusCode, 308);
+  assert.equal(legacyQuery.headers.location, '/?workspace=abc&view=content&page=2');
+  assert.equal(legacyDetail.statusCode, 308);
+  assert.equal(
+    legacyDetail.headers.location,
+    '/workspaces/11111111-1111-4111-8111-111111111111/content/22222222-2222-4222-8222-222222222222?range=30d'
+  );
+  assert.equal(unsafeLegacyPath.statusCode, 308);
+  assert.equal(unsafeLegacyPath.headers.location, '/?workspace=abc');
+
+  const indexAlias = await requestApp('/index.html?view=connections');
+  assert.equal(indexAlias.statusCode, 308);
+  assert.equal(indexAlias.headers.location, '/?view=connections');
+});
+
+test('public compliance pages and their html aliases work without authentication', async () => {
+  const pages = new Map([
+    ['privacy', 'Privacy Policy'],
+    ['terms', 'Terms of Service'],
+    ['support', 'Support'],
+    ['data-deletion', 'Data deletion instructions'],
+    ['status', 'Service status and known limitations']
+  ]);
+
+  for (const [slug, heading] of pages) {
+    for (const pathname of [`/${slug}`, `/${slug}.html`]) {
+      const response = await requestApp(pathname);
+      assert.equal(response.statusCode, 200, pathname);
+      assert.match(response.headers['content-type'], /^text\/html/, pathname);
+      assert.match(response.body, new RegExp(`<h1>${heading}</h1>`, 'i'), pathname);
+      assert.doesNotMatch(response.body, /data-test-shell="true"/, pathname);
+    }
+  }
+});
+
+test('SPA fallback is limited to supported client routes and never intercepts API or OAuth routes', async () => {
+  const detail = await requestApp(
+    '/workspaces/11111111-1111-4111-8111-111111111111/content/22222222-2222-4222-8222-222222222222?view=content'
+  );
+  assert.equal(detail.statusCode, 200);
+  assert.match(detail.body, /data-test-shell="true"/);
+
+  const unknownApi = await requestApp('/api/does-not-exist');
+  assert.equal(unknownApi.statusCode, 404);
+  assert.match(unknownApi.headers['content-type'], /^application\/json/);
+  assert.deepEqual(unknownApi.json(), { error: 'not_found' });
+
+  const callback = await requestApp('/api/integrations/tiktok/callback');
+  assert.equal(callback.statusCode, 400);
+  assert.doesNotMatch(callback.body, /data-test-shell="true"/);
+
+  const legacyCallback = await requestApp('/auth/tiktok/callback?error=access_denied');
+  assert.equal(legacyCallback.statusCode, 400);
+  assert.doesNotMatch(legacyCallback.body, /data-test-shell="true"/);
+
+  const unknownOAuth = await requestApp('/oauth/does-not-exist');
+  assert.equal(unknownOAuth.statusCode, 404);
+  assert.doesNotMatch(unknownOAuth.body, /data-test-shell="true"/);
+});
+
+test('public routing does not expose arbitrary files, traversal targets, or source maps', async () => {
+  const paths = [
+    '/package.json',
+    '/server/index.js',
+    '/.env',
+    '/.well-known/does-not-exist',
+    '/assets/index-a1b2c3d4.js.map',
+    '/assets/%2e%2e/%2e%2e/server/index.js',
+    '/workspaces/not-a-uuid/content/not-a-uuid'
+  ];
+
+  for (const pathname of paths) {
+    const response = await requestApp(pathname);
+    assert.notEqual(response.statusCode, 200, pathname);
+    assert.doesNotMatch(response.body, /require\(['"]dotenv['"]\)|BACKEND_JWT_SECRET|data-test-shell="true"/, pathname);
+  }
+});
+
+test('/health endpoints are non-sensitive', async () => {
+  const previousCommit = process.env.APP_COMMIT_SHA;
+  try {
+    process.env.APP_COMMIT_SHA = 'cc8a30818a96f2fbf11018580033942c31f0e622';
+    const live = await requestApp('/health/live');
+    const ready = await requestApp('/health/ready');
+    const version = await requestApp('/health/version');
+
+    assert.equal(live.statusCode, 200);
+    assert.deepEqual(live.json(), { status: 'live' });
+    assert.equal(ready.statusCode, 200);
+    assert.equal(ready.json().status, 'ready');
+    assert.equal(version.statusCode, 200);
+    assert.equal(version.json().commit_sha, 'cc8a30818a96f2fbf11018580033942c31f0e622');
+    assert.equal(Object.keys(version.json()).includes('DATABASE_URL'), false);
+  } finally {
+    if (previousCommit === undefined) {
+      delete process.env.APP_COMMIT_SHA;
+    } else {
+      process.env.APP_COMMIT_SHA = previousCommit;
+    }
+  }
+});
+
+test('/api/providers/catalog exposes read-only public provider metadata', async () => {
+  const response = await requestApp('/api/providers/catalog');
+  assert.equal(response.statusCode, 200);
+  const providers = response.json().providers;
+  assert.deepEqual(
+    providers.map(provider => provider.id).sort(),
+    ['facebook_pages', 'google_analytics_4', 'instagram', 'tiktok', 'youtube']
+  );
+  assert.equal(providers.some(provider => provider.id === 'youtube' && provider.connectable), false);
+  for (const provider of providers) {
+    for (const scope of provider.requestedScopes) {
+      assert.equal(scope.access, 'read');
+    }
+  }
 });
 
 test('/oauth/authorize rejects unconfigured redirects and requires the expected client', async () => {

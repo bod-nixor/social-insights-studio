@@ -12,6 +12,11 @@ const { FileStateStore, FileTokenStore } = require('./store');
 const { getConnection } = require('./database');
 const { createPlatformRouter } = require('./platform/routes');
 const { validateMailConfiguration } = require('./platform/mail');
+const { getDeploymentReadinessCheck, getDeploymentVersion } = require('./platform/version');
+const { getYouTubeConfiguration } = require('./platform/youtube-config');
+const { getMetaConfiguration } = require('./platform/meta-config');
+const { getGoogleAnalyticsConfiguration } = require('./platform/google-analytics-config');
+const { getReportConfiguration, getReportProductionErrors } = require('./platform/report-config');
 
 const BASE_URL = process.env.BASE_URL;
 const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
@@ -133,6 +138,10 @@ function validateRequiredEnv(env = process.env) {
     if ((env.ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).includes('*')) {
       throw new Error('ALLOWED_ORIGINS must not contain wildcard origins in production.');
     }
+    const reportErrors = getReportProductionErrors(env);
+    if (reportErrors.length > 0) {
+      throw new Error(`PDF report configuration is invalid: ${reportErrors.join(' ')}`);
+    }
     const expectedTikTokRedirect = `${parsedBaseUrl.origin}/api/integrations/tiktok/callback`;
     const configuredTikTokRedirect = env.TIKTOK_REDIRECT_URI || expectedTikTokRedirect;
     if (configuredTikTokRedirect !== expectedTikTokRedirect) {
@@ -191,7 +200,19 @@ const REQUIRED_SCOPES = [
 ].join(',');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const WEB_DIST_DIR = path.join(__dirname, '..', 'apps', 'web', 'dist');
+const WEB_DIST_DIR = process.env.WEB_DIST_DIR
+  ? path.resolve(process.env.WEB_DIST_DIR)
+  : path.join(__dirname, '..', 'apps', 'web', 'dist');
+const WEB_INDEX_FILE = path.join(WEB_DIST_DIR, 'index.html');
+const WEB_ASSETS_DIR = path.join(WEB_DIST_DIR, 'assets');
+const PUBLIC_PAGE_FILES = new Map([
+  ['privacy', 'privacy.html'],
+  ['terms', 'terms.html'],
+  ['support', 'support.html'],
+  ['data-deletion', 'data-deletion.html'],
+  ['status', 'status.html']
+]);
+const CLIENT_ROUTE_PATTERN = /^\/workspaces\/[0-9a-f-]{36}\/content\/[0-9a-f-]{36}\/?$/i;
 
 function ensureStoreOutsidePublic(storePath, envName) {
   const resolvedStore = path.resolve(storePath);
@@ -288,13 +309,6 @@ const apiLimiter = rateLimit({
   handler: (req, res) => res.status(429).json({ error: 'rate_limited' })
 });
 
-app.use(express.static(PUBLIC_DIR));
-if (fs.existsSync(WEB_DIST_DIR)) {
-  app.use('/app', express.static(WEB_DIST_DIR));
-  app.get(['/app', '/app/*'], (req, res) => {
-    res.sendFile(path.join(WEB_DIST_DIR, 'index.html'));
-  });
-}
 app.use(express.urlencoded({ extended: false, limit: DEFAULT_BODY_LIMIT }));
 app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
 
@@ -306,43 +320,157 @@ app.get('/health/live', (req, res) => {
   res.json({ status: 'live' });
 });
 
+app.get('/health/version', (req, res) => {
+  res.json(getDeploymentVersion());
+});
+
 app.get('/health/ready', async (req, res) => {
   let database = 'not_configured';
+  let syncQueue = 'not_configured';
+  let reportQueue = 'not_configured';
+  let youtubeFoundationReady = false;
+  let metaFoundationReady = false;
+  let ga4FoundationReady = false;
   if (process.env.DATABASE_URL) {
     let connection;
     try {
       connection = await getConnection();
       await connection.query('SELECT 1');
       database = 'ready';
+      const foundationRows = await connection.query(
+        `SELECT COUNT(*) AS count FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (
+             'provider_authorizations',
+             'provider_authorization_credentials',
+             'provider_resources',
+             'workspace_provider_connections',
+             'youtube_channel_snapshots',
+             'youtube_analytics_daily_snapshots',
+             'youtube_video_analytics_snapshots',
+             'provider_request_events'
+           )`
+      );
+      youtubeFoundationReady = Number(foundationRows[0] && foundationRows[0].count) === 8;
+      const ga4FoundationRows = await connection.query(
+        `SELECT COUNT(*) AS count FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (
+             'provider_authorizations',
+             'provider_authorization_credentials',
+             'provider_authorization_scopes',
+             'provider_resources',
+             'workspace_provider_connections',
+             'provider_resource_observations',
+             'provider_metric_observations',
+             'provider_dimension_observations',
+             'provider_request_events'
+           )`
+      );
+      ga4FoundationReady = Number(ga4FoundationRows[0] && ga4FoundationRows[0].count) === 9;
+      const metaFoundationRows = await connection.query(
+        `SELECT COUNT(*) AS count FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (
+             'provider_authorizations',
+             'provider_authorization_credentials',
+             'provider_resources',
+             'provider_resource_credentials',
+             'workspace_provider_connections',
+             'meta_account_insight_snapshots',
+             'meta_callback_events',
+             'provider_request_events'
+           )`
+      );
+      if (Number(metaFoundationRows[0] && metaFoundationRows[0].count) === 8) {
+        const metaFoundationColumnRows = await connection.query(
+          `SELECT COUNT(*) AS count FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND (
+               (TABLE_NAME = 'meta_account_insight_snapshots'
+                AND COLUMN_NAME IN ('range_days', 'range_start_date', 'range_end_date'))
+               OR (TABLE_NAME = 'oauth_transactions' AND COLUMN_NAME = 'provider_config_id')
+             )`
+        );
+        metaFoundationReady = Number(metaFoundationColumnRows[0] && metaFoundationColumnRows[0].count) === 4;
+      }
+      const overdueSeconds = Math.min(Math.max(Number(process.env.WORKER_OVERDUE_SECONDS) || 1800, 300), 86400);
+      const syncQueueRows = await connection.query(
+        `SELECT COUNT(*) AS count
+         FROM sync_jobs
+         WHERE (status = 'due' AND run_after < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? SECOND))
+            OR (status = 'leased' AND lease_expires_at < UTC_TIMESTAMP(3))`,
+        [overdueSeconds]
+      );
+      syncQueue = Number(syncQueueRows[0] && syncQueueRows[0].count) > 0 ? 'overdue' : 'ready';
+      const reportQueueRows = await connection.query(
+        `SELECT COUNT(*) AS count
+         FROM report_runs
+         WHERE (status = 'queued' AND run_after < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? SECOND))
+            OR (status = 'running' AND lease_expires_at < UTC_TIMESTAMP(3))`,
+        [overdueSeconds]
+      );
+      reportQueue = Number(reportQueueRows[0] && reportQueueRows[0].count) > 0 ? 'overdue' : 'ready';
     } catch (error) {
       database = 'unavailable';
     } finally {
       if (connection) await connection.release();
     }
   }
-  res.status(database === 'unavailable' ? 503 : 200).json({
+  const deployment = getDeploymentReadinessCheck();
+  const youtube = getYouTubeConfiguration(process.env, {
+    databaseReady: database === 'ready',
+    foundationReady: youtubeFoundationReady,
+    workerReady: true
+  });
+  const facebookPages = getMetaConfiguration('facebook_pages', process.env, {
+    databaseReady: database === 'ready',
+    foundationReady: metaFoundationReady,
+    workerReady: true
+  });
+  const instagram = getMetaConfiguration('instagram', process.env, {
+    databaseReady: database === 'ready',
+    foundationReady: metaFoundationReady,
+    workerReady: true
+  });
+  const googleAnalytics = getGoogleAnalyticsConfiguration(process.env, {
+    databaseReady: database === 'ready',
+    foundationReady: ga4FoundationReady,
+    workerReady: true
+  });
+  const reports = getReportConfiguration();
+  const body = {
     status: database === 'unavailable' ? 'not_ready' : 'ready',
     checks: {
       database,
-      legacy_file_store: 'configured'
+      legacy_file_store: 'configured',
+      deployment_metadata: deployment.status,
+      youtube: youtube.status,
+      facebook_pages: facebookPages.status,
+      instagram: instagram.status,
+      google_analytics_4: googleAnalytics.status,
+      pdf_reports: !reports.enabled ? 'disabled' : reports.ready ? 'ready' : 'configuration_required',
+      sync_queue: syncQueue,
+      report_queue: reports.enabled ? reportQueue : 'disabled'
     }
-  });
+  };
+  const warnings = [
+    ...deployment.warnings,
+    ...youtube.warnings,
+    ...facebookPages.warnings,
+    ...instagram.warnings,
+    ...googleAnalytics.warnings,
+    ...reports.errors.map(() => 'pdf_reports_configuration_invalid'),
+    ...(syncQueue === 'overdue' ? ['sync_jobs_overdue'] : []),
+    ...(reports.enabled && reportQueue === 'overdue' ? ['report_jobs_overdue'] : [])
+  ];
+  if (warnings.length > 0) {
+    body.warnings = [...new Set(warnings)];
+  }
+  res.status(database === 'unavailable' ? 503 : 200).json(body);
 });
 
 app.use('/api', createPlatformRouter());
-
-app.use((err, req, res, next) => {
-  if (err && err.type === 'entity.too.large') {
-    return res.status(413).json({ error: 'payload_too_large' });
-  }
-  if (err && err.message === 'CORS origin not allowed') {
-    return res.status(403).json({ error: 'cors_not_allowed' });
-  }
-  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
-    return res.status(400).json({ error: 'invalid_json' });
-  }
-  return next(err);
-});
 
 const LOOKER_CLIENT_ID = process.env.LOOKER_CLIENT_ID || 'looker-studio-connector';
 const LOOKER_CLIENT_SECRET = process.env.LOOKER_CLIENT_SECRET || null;
@@ -1197,6 +1325,110 @@ app.post('/api/connector/revoke', async (req, res) => {
   } catch (error) {
     return res.status(500).json({ error: 'server_error' });
   }
+});
+
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'not_found' });
+});
+
+app.use('/health', (req, res) => {
+  res.status(404).json({ error: 'not_found' });
+});
+
+function originalQuery(req) {
+  const queryIndex = req.originalUrl.indexOf('?');
+  return queryIndex === -1 ? '' : req.originalUrl.slice(queryIndex);
+}
+
+function legacyAppDestination(req) {
+  const queryIndex = req.originalUrl.indexOf('?');
+  const requestPath = queryIndex === -1 ? req.originalUrl : req.originalUrl.slice(0, queryIndex);
+  const suffix = requestPath.slice('/app'.length);
+  const destinationPath = CLIENT_ROUTE_PATTERN.test(suffix) ? suffix : '/';
+  return `${destinationPath}${originalQuery(req)}`;
+}
+
+function sendWebIndex(req, res) {
+  if (!fs.existsSync(WEB_INDEX_FILE)) {
+    return res.status(503).type('text/plain').send('Application build unavailable.');
+  }
+  res.set('cache-control', 'no-cache');
+  return res.sendFile(WEB_INDEX_FILE);
+}
+
+app.get(['/app', '/app/*'], (req, res) => {
+  res.redirect(308, legacyAppDestination(req));
+});
+
+app.get('/index.html', (req, res) => {
+  res.redirect(308, `/${originalQuery(req)}`);
+});
+
+for (const [slug, filename] of PUBLIC_PAGE_FILES) {
+  app.get([`/${slug}`, `/${slug}/`, `/${filename}`], (req, res) => {
+    res.set('cache-control', 'no-cache');
+    res.sendFile(path.join(PUBLIC_DIR, filename));
+  });
+}
+
+app.get(['/logo.png', '/favicon.ico'], (req, res) => {
+  res.set('cache-control', 'public, max-age=86400');
+  res.sendFile(path.join(PUBLIC_DIR, 'logo.png'));
+});
+
+const WELL_KNOWN_DIR = path.join(PUBLIC_DIR, '.well-known');
+if (fs.existsSync(WELL_KNOWN_DIR)) {
+  app.use('/.well-known', express.static(WELL_KNOWN_DIR, {
+    dotfiles: 'deny',
+    fallthrough: false,
+    index: false
+  }));
+}
+
+if (fs.existsSync(WEB_ASSETS_DIR)) {
+  app.use('/assets', express.static(WEB_ASSETS_DIR, {
+    dotfiles: 'deny',
+    fallthrough: false,
+    immutable: true,
+    index: false,
+    maxAge: '1y'
+  }));
+}
+
+app.get('/', sendWebIndex);
+app.get(CLIENT_ROUTE_PATTERN, sendWebIndex);
+
+app.use((req, res) => {
+  res.status(404).type('text/plain').send('Not found.');
+});
+
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'payload_too_large' });
+  }
+  if (err && err.message === 'CORS origin not allowed') {
+    return res.status(403).json({ error: 'cors_not_allowed' });
+  }
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'invalid_json' });
+  }
+
+  const status = Number.isInteger(err && err.status) ? err.status : 500;
+  if (status >= 500) {
+    logEvent('error', 'request_failed', {
+      correlation_id: req.correlationId,
+      method: req.method,
+      path: req.path,
+      status
+    });
+  }
+  if (req.path.startsWith('/api/') || req.path.startsWith('/health/')) {
+    return res.status(status).json({ error: status === 404 ? 'not_found' : 'server_error' });
+  }
+  if (res.headersSent) {
+    return next(err);
+  }
+  return res.status(status).type('text/plain').send(status === 404 ? 'Not found.' : 'Request failed.');
 });
 
 function getListenTarget() {

@@ -36,6 +36,26 @@ function parsePreviousKeys() {
   return keys;
 }
 
+function validateEncryptionConfiguration(env = process.env) {
+  try {
+    parseEncryptionKey(env.ENCRYPTION_KEY);
+    const entries = String(env.ENCRYPTION_PREVIOUS_KEYS || '')
+      .split(',')
+      .map(entry => entry.trim())
+      .filter(Boolean);
+    for (const entry of entries) {
+      const separatorIndex = entry.indexOf(':');
+      if (separatorIndex <= 0) {
+        throw new Error('ENCRYPTION_PREVIOUS_KEYS entries must use version:key format.');
+      }
+      parseEncryptionKey(entry.slice(separatorIndex + 1));
+    }
+    return { ready: true, error: null };
+  } catch (error) {
+    return { ready: false, error: error.message };
+  }
+}
+
 function getKeyForVersion(version) {
   const currentVersion = getCurrentKeyVersion();
   if (!version || version === currentVersion) {
@@ -75,5 +95,6 @@ function decryptSecret(envelope) {
 module.exports = {
   decryptSecret,
   encryptSecret,
-  parsePreviousKeys
+  parsePreviousKeys,
+  validateEncryptionConfiguration
 };

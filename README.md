@@ -1,17 +1,23 @@
 # Social Insights Studio
 
-Social Insights Studio is now a workspace-based TikTok analytics application with the legacy Looker Studio connector preserved beside it. The standalone dashboard uses Express, React/Vite, MariaDB, server-side sessions, database-backed TikTok OAuth credentials, one-shot worker syncs, stored snapshots, and CSV exports.
+Social Insights Studio is a workspace-based, multiplatform analytics application with read-only TikTok plus gated YouTube, Facebook Pages, Instagram, and Google Analytics 4 verticals. The legacy TikTok Looker Studio connector remains preserved beside them. The standalone dashboard uses Express, React/Vite, MariaDB, server-side sessions, encrypted provider credentials, bounded one-shot background jobs, stored snapshots, CSV exports, and protected asynchronous PDF reports.
 
 The production domain assumption remains `https://lstc.nixorcorporate.com`. Production deployment is cPanel/Passenger-compatible: the web process serves the API and compiled Vite app, migrations run as an explicit release command, and cron runs the bounded worker.
+
+Production alignment is currently an evidence-backed assumption: local `phase-3-dashboard` commit `cc8a30818a96f2fbf11018580033942c31f0e622` matched the deployed frontend asset hashes and runtime health endpoints during read-only checks, but that does not prove deployed commit identity. Future releases should inject `APP_COMMIT_SHA` so `/health/version` can report the exact source revision.
 
 ## Current Architecture
 
 - `server/index.js` keeps the legacy connector routes and mounts the new application API under `/api`.
-- `server/platform/` contains auth, sessions, RBAC, TikTok connection lifecycle, sync, dashboard, and export services.
+- `server/platform/` contains auth, sessions, RBAC, provider connection lifecycles, sync, dashboard, and export services.
 - `server/migrations/` contains explicit MariaDB migrations. Migrations never run from normal web requests.
-- `server/worker.js` runs bounded cron-safe jobs such as due TikTok syncs.
-- `apps/web/` contains the React/Vite dashboard shell served by Express under `/app` after `npm run web:build`.
+- `server/worker.js` runs separate bounded cron-safe commands for due provider syncs and queued PDF reports.
+- `apps/web/` contains the React/Vite application shell served by Express at `/` after `npm run web:build`.
 - `Code.gs` remains the legacy Apps Script connector. Do not delete the encrypted file store until a production migration/retirement plan is approved.
+- `server/platform/provider-registry.js` records the current provider catalog. TikTok, YouTube, Facebook Pages, Instagram, and Website Analytics are implemented. Newer provider verticals are disabled by default until their exact OAuth configuration, provider-review evidence, and eligible live test resources are ready.
+- Express serves hashed frontend files only from `/assets/`, serves the logo and standalone compliance pages from an explicit allowlist, and returns JSON for unknown `/api/*` routes.
+- `/privacy`, `/terms`, `/support`, `/data-deletion`, and `/status` remain public without a session. Their `.html` aliases remain available for provider-console compatibility.
+- Legacy `/app`, `/app/`, and `/app/*` URLs redirect permanently to the equivalent canonical-root path while preserving query parameters. `BASE_URL` remains the site origin with no path suffix.
 
 ## Local MariaDB
 
@@ -39,6 +45,8 @@ Do not point destructive tests or reset commands at production or shared remote 
 | `npm --prefix server test` | Run backend tests, including Phase 0 regressions and MariaDB integration tests. |
 | `npm run web:build` | Type-check and build the React dashboard. |
 | `npm run worker -- sync-due --time-budget-seconds 240` | Run a bounded due-sync worker suitable for cron. |
+| `npm run worker:reports` | Run one bounded queued-report and expiry-cleanup pass. |
+| `npm run reports:samples` | Generate the ten ignored deterministic PDF QA samples under `output/pdf/`. |
 | `npm --prefix server audit --omit=dev` | Audit backend production dependencies. |
 | `npm --prefix apps/web audit --omit=dev` | Audit web production dependencies. |
 
@@ -49,9 +57,18 @@ Do not point destructive tests or reset commands at production or shared remote 
 - Workspaces, owner/admin/analyst/viewer memberships, invitations, last-owner protection, and centralized server-enforced RBAC.
 - Workspace-bound TikTok OAuth start/callback flow with hashed state, relative-only internal return paths, encrypted AES-256-GCM credentials, scope state, reconnect-required handling, and audit events.
 - TikTok disconnect attempts provider revoke before local credential disabling and stops future sync jobs.
-- Bounded worker syncs use MariaDB leases, refresh credentials when needed, write immutable profile/content snapshots, record partial/failed states, preserve last valid data, and stagger six-hour schedules.
-- Dashboard APIs read stored snapshots only; page requests do not fetch TikTok directly.
+- Workspace/session/user/scope/redirect-bound YouTube OAuth uses hashed state, S256 PKCE, offline incremental authorization, exact read-only scopes, encrypted access/refresh tokens, and explicit discovered-channel selection.
+- YouTube disconnect attempts Google revocation and immediately purges local credentials, resources, connections, and snapshots. Terminal external revocation (`invalid_grant`) causes the same local purge on detection.
+- Facebook Login for Business authorizations bind state to the workspace, session, user, provider, exact scopes, and exact callback. Page and linked Instagram professional resources require explicit selection; reauthorization never silently replaces the selected resource.
+- Meta app-user and Page tokens use the existing AES-256-GCM envelope. Page/content/Instagram insight requests run only in the worker, add `appsecret_proof`, and are bounded by time, page, item, retry, and provider-usage limits.
+- Meta disconnect, deauthorization, and data-deletion callbacks revoke where possible and purge local credentials, resources, jobs, content, and snapshots. Signed callbacks are HMAC-verified, time-bounded, and replay-protected.
+- Website Analytics uses a dedicated Google OAuth client with exactly `analytics.readonly`, S256 PKCE, encrypted access/refresh tokens, bounded Admin/Data API discovery, and explicit GA4 property selection. Worker-only reports store property-timezone metrics, daily traffic, compatible aggregate breakdowns, data-through dates, and privacy-threshold states.
+- GA4 disconnect preserves a shared authorization while sibling properties remain selected; removing the final property attempts Google revocation and purges local credentials, resources, observations, and jobs. Terminal external revocation performs the same local purge.
+- The cross-platform Overview reads stored snapshots only and renders each selected resource separately with source health, freshness, provider-defined metrics, small-multiple trends, top content or landing pages, and explicit availability alerts. It never sums unlike provider metrics. Full provider hierarchy and explicit resource filters remain under Sources.
+- Bounded worker syncs use MariaDB leases, refresh credentials when needed, write immutable profile/content/provider Analytics snapshots, record request/quota/retry metadata and partial/failed states, preserve last valid data, and stagger six-hour schedules.
+- Dashboard APIs, including `/api/workspaces/:workspaceId/cross-platform-overview`, read stored snapshots only; page requests do not fetch provider APIs directly. See [`docs/cross-platform-overview.md`](docs/cross-platform-overview.md).
 - CSV content exports are workspace-scoped, analyst-or-higher, formula-injection safe, and recorded in export tables.
+- PDF reports are workspace-scoped and Analyst-or-higher, freeze stored-only provider snapshots at enqueue time, render outside HTTP requests, use private non-public storage, issue user-bound one-time downloads, and expire after seven days. See [`docs/pdf-reporting.md`](docs/pdf-reporting.md).
 
 ## Required Environment
 
@@ -67,15 +84,51 @@ Important variables:
 - `TIKTOK_CLIENT_KEY`
 - `TIKTOK_CLIENT_SECRET`
 - `TIKTOK_REDIRECT_URI`
+- `YOUTUBE_ENABLED` (defaults to disabled)
+- `YOUTUBE_CLIENT_ID`
+- `YOUTUBE_CLIENT_SECRET`
+- `YOUTUBE_REDIRECT_URI`
+- `FEATURE_FACEBOOK_PAGES_CONNECTOR` (defaults to disabled)
+- `FEATURE_INSTAGRAM_CONNECTOR` (defaults to disabled)
+- `META_APP_ID`
+- `META_APP_SECRET`
+- `META_FACEBOOK_LOGIN_CONFIG_ID`
+- `META_INSTAGRAM_LOGIN_CONFIG_ID`
+- `META_GRAPH_API_VERSION`
+- `FACEBOOK_REDIRECT_URI`
+- `INSTAGRAM_REDIRECT_URI`
+- `META_FACEBOOK_APPROVED_SCOPES`
+- `META_INSTAGRAM_APPROVED_SCOPES`
+- `FEATURE_GA4_CONNECTOR` (defaults to disabled)
+- `GA4_CLIENT_ID`
+- `GA4_CLIENT_SECRET`
+- `GA4_REDIRECT_URI`
 - `GOOGLE_OIDC_CLIENT_ID` and mail settings when production auth providers are enabled
 - `LOOKER_CLIENT_ID`
 - `LOOKER_REDIRECT_URIS`
 - `SYNC_INTERVAL_SECONDS`
 - `MANUAL_SYNC_COOLDOWN_SECONDS`
 - `WORKER_TIME_BUDGET_SECONDS`
+- `WORKER_OVERDUE_SECONDS`
+- `FEATURE_PDF_REPORTS` (production defaults to disabled and must be enabled explicitly)
+- `REPORT_ARTIFACT_ROOT` (absolute private path outside every public web root in production)
+- bounded `REPORT_*` rendering, grant, lease, page, byte, range, and resource settings from `.env.example`
 - `TRUST_PROXY`
+- `APP_COMMIT_SHA`
+- `APP_BUILD_TIME` or `APP_RELEASE`
+- provider feature gates such as `FEATURE_TIKTOK_CONNECTOR`, `YOUTUBE_ENABLED`, `FEATURE_FACEBOOK_PAGES_CONNECTOR`, `FEATURE_INSTAGRAM_CONNECTOR`, and `FEATURE_GA4_CONNECTOR`
 
 Google OIDC currently fails closed unless configured and completed; magic links are available with a development-only mail adapter boundary.
+
+## Deployment Provenance
+
+The backend exposes `GET /health/version` with sanitized deployment metadata:
+
+- `APP_COMMIT_SHA`: exact git SHA for the deployed source state.
+- `APP_BUILD_TIME`: optional build timestamp.
+- `APP_RELEASE` or `APP_RELEASE_ID`: optional human release identifier.
+
+`/health/ready` warns when production commit metadata is missing, but readiness does not fail solely because build time or release labels are absent. Do not expose host paths, full environment dumps, dependency inventories, or secret values in provenance output. The Vite build also accepts the same metadata at build time for the dashboard account screen.
 
 ## Production Deployment Notes
 
@@ -84,20 +137,23 @@ For a controlled cPanel staging deployment and TikTok Sandbox verification, use
 
 1. Install dependencies for `server/` and `apps/web/`.
 2. Build the web app with `npm run web:build`.
-3. Set Passenger to run `server/index.js`.
-4. Configure production MariaDB and set `DATABASE_URL`.
-5. Run migrations explicitly with `node server/scripts/migrate.js up --database dev` or the production-equivalent target command.
-6. Add a cron entry similar to:
+3. Export `APP_COMMIT_SHA=$(git rev-parse HEAD)` in the cPanel/Passenger environment for the deployed source revision.
+4. Set Passenger to run `server/index.js`.
+5. Ensure the cPanel domain document root does not contain a separately served `index.html`; Express/Passenger must own `/`.
+6. Configure production MariaDB and set `DATABASE_URL`.
+7. Run migrations explicitly with `node server/scripts/migrate.js up --database dev` or the production-equivalent target command.
+8. Add separate sync and report cron entries similar to:
 
    ```bash
    cd /path/to/social && npm run worker -- sync-due --time-budget-seconds 240
+   cd /path/to/social && npm run worker:reports
    ```
 
-7. Keep private token/state file-store paths configured for the legacy connector until retirement is approved.
-8. Set `LOOKER_REDIRECT_URIS` to the exact Apps Script callback URI for the retained connector.
-9. Use a precise `TRUST_PROXY` hop count for Passenger/Cloudflare.
+9. Keep private token/state file-store paths configured for the legacy connector until retirement is approved.
+10. Set `LOOKER_REDIRECT_URIS` to the exact Apps Script callback URI for the retained connector.
+11. Use a precise `TRUST_PROXY` hop count for Passenger/Cloudflare.
 
-Backups, restore testing, legal retention approvals, final Google OIDC verification, mail delivery, and production TikTok review are external release gates.
+Backups, restore testing, legal retention approvals, Google OAuth/YouTube/Analytics verification, Meta dashboard configuration/review, mail delivery, and production provider reviews are external release gates. The consolidated review package is in [`docs/review/exact-permission-matrix.md`](docs/review/exact-permission-matrix.md) and [`docs/review/submission-evidence-checklist.md`](docs/review/submission-evidence-checklist.md). Production activation, queue monitoring, backup/restore, incident, rotation, deletion, and hosting guidance is in [`docs/operations/production-operations.md`](docs/operations/production-operations.md).
 
 ## Legacy Looker Connector
 
@@ -122,3 +178,37 @@ Only these scopes are requested for the standalone dashboard:
 - `video.list`
 
 TikTok cover-image URLs are treated as ephemeral and are not stored as durable media assets.
+
+## YouTube Read-Only Integration
+
+YouTube is gated by `YOUTUBE_ENABLED=false` by default and requests exactly:
+
+- `https://www.googleapis.com/auth/youtube.readonly`
+- `https://www.googleapis.com/auth/yt-analytics.readonly`
+
+The worker reads owned/managed channel identity, uploads/video metadata, lifetime channel/video counters, and non-monetary YouTube Analytics metrics. A default run uses at most five upload-playlist pages and five 50-video batches, for an estimated maximum of 11 YouTube Data API quota units plus bounded Analytics requests. The dashboard exposes provider data-through dates and leaves unavailable metrics as `N/A`; it does not infer engagement or revenue.
+
+## Meta Read-Only Integrations
+
+Facebook Pages is gated by `FEATURE_FACEBOOK_PAGES_CONNECTOR=false` by default and requests exactly:
+
+- `pages_show_list`
+- `pages_read_engagement`
+- `read_insights`
+
+Instagram uses Facebook Login only and is independently gated by `FEATURE_INSTAGRAM_CONNECTOR=false`. It requests exactly:
+
+- `instagram_basic`
+- `instagram_manage_insights`
+- `pages_show_list`
+- `pages_read_engagement`
+
+Runtime scope assertions must match those sets exactly or the provider remains non-connectable. The callbacks are `/api/integrations/facebook/callback` and `/api/integrations/instagram/callback`. Neither flow requests publishing, comment-management, messaging, ads, app events, demographics, webhooks, or `business_management`. Instagram must remain disabled until those exact permissions are confirmed for the configured Facebook Login for Business path. Resources whose Business Manager access path requires Meta's additional ads permissions are deliberately unsupported. Instagram account totals are stored as explicit provider-reported 7/30/90-day windows, not synthetic daily values.
+
+## Google Analytics 4 Read-Only Integration
+
+Website Analytics is gated by `FEATURE_GA4_CONNECTOR=false` by default and requests exactly:
+
+- `https://www.googleapis.com/auth/analytics.readonly`
+
+It uses the exact callback `/api/integrations/google-analytics/callback` and a dedicated OAuth client that must differ from Google sign-in and YouTube. Authorization discovers GA4 properties but never selects one automatically. The worker uses only Analytics Admin/Data read methods, stores aggregate metrics and compatible breakdowns, honors the property timezone, preserves threshold/delay states, and never sums distinct-user or provider-computed rate metrics across days. See [`docs/google-analytics-readonly-integration.md`](docs/google-analytics-readonly-integration.md).

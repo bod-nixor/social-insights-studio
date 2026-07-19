@@ -4,6 +4,7 @@ const CAPABILITIES = {
   viewDashboard: new Set(['owner', 'admin', 'analyst', 'viewer']),
   triggerManualSync: new Set(['owner', 'admin', 'analyst']),
   exportCsv: new Set(['owner', 'admin', 'analyst']),
+  manageReports: new Set(['owner', 'admin', 'analyst']),
   manageConnection: new Set(['owner', 'admin']),
   manageMembers: new Set(['owner', 'admin']),
   deleteWorkspace: new Set(['owner'])

@@ -91,7 +91,13 @@ function escapeHtml(value) {
 
 function loginUrl(env = process.env) {
   const baseUrl = String(env.BASE_URL || '').replace(/\/+$/, '');
-  return baseUrl ? `${baseUrl}/app/` : '/app/';
+  return baseUrl ? `${baseUrl}/` : '/';
+}
+
+function invitationUrl(token, env = process.env) {
+  const url = new URL(loginUrl(env), String(env.BASE_URL || 'http://localhost'));
+  url.searchParams.set('invitation', token);
+  return String(env.BASE_URL || '').trim() ? url.toString() : `/?invitation=${encodeURIComponent(token)}`;
 }
 
 async function sendMagicLinkEmail({ email, token }, env = process.env) {
@@ -136,6 +142,47 @@ async function sendMagicLinkEmail({ email, token }, env = process.env) {
   }
 }
 
+async function sendInvitationEmail({ email, token, workspaceName, inviterEmail }, env = process.env) {
+  const developmentTokenReturn =
+    !isProduction(env) && String(env.AUTH_DEV_MAGIC_LINKS || '').toLowerCase() === 'true';
+  if (developmentTokenReturn) {
+    return { sent: false, development: true };
+  }
+
+  const adapter = validateMailConfiguration(env);
+  if (adapter !== 'smtp') {
+    return { sent: false, suppressed: true };
+  }
+
+  const transporter = transportFactory(getSmtpOptions(env));
+  const url = invitationUrl(token, env);
+  const safeWorkspaceName = String(workspaceName || 'a workspace');
+  const safeInviter = String(inviterEmail || 'A workspace owner');
+  try {
+    await transporter.sendMail({
+      from: requireMailValue(env, 'MAIL_FROM'),
+      to: email,
+      subject: `Join ${safeWorkspaceName} in Social Insights Studio`,
+      text: [
+        `${safeInviter} invited you to join ${safeWorkspaceName} in Social Insights Studio.`,
+        '',
+        `Open ${url} to sign in and accept the invitation.`,
+        'This invitation expires in 7 days. If you were not expecting it, you can ignore this email.'
+      ].join('\n'),
+      html: [
+        `<p>${escapeHtml(safeInviter)} invited you to join <strong>${escapeHtml(safeWorkspaceName)}</strong> in Social Insights Studio.</p>`,
+        `<p><a href="${escapeHtml(url)}">Sign in and accept the invitation</a></p>`,
+        '<p>This invitation expires in 7 days. If you were not expecting it, you can ignore this email.</p>'
+      ].join(''),
+      disableFileAccess: true,
+      disableUrlAccess: true
+    });
+    return { sent: true };
+  } catch (error) {
+    throw createHttpError(503, 'mail_send_failed');
+  }
+}
+
 function setMailTransportFactory(factory) {
   transportFactory = factory || (options => nodemailer.createTransport(options));
 }
@@ -143,6 +190,7 @@ function setMailTransportFactory(factory) {
 module.exports = {
   getMailAdapter,
   getSmtpOptions,
+  sendInvitationEmail,
   sendMagicLinkEmail,
   setMailTransportFactory,
   validateMailConfiguration

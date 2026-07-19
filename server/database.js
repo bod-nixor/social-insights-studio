@@ -29,7 +29,14 @@ async function getConnection() {
   if (!currentPool) {
     return null;
   }
-  return currentPool.getConnection();
+  const connection = await currentPool.getConnection();
+  try {
+    await connection.query("SET time_zone = '+00:00'");
+    return connection;
+  } catch (error) {
+    connection.release();
+    throw error;
+  }
 }
 
 async function closePool() {

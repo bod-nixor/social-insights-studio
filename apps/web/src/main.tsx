@@ -153,6 +153,10 @@ type SyncRun = {
   profile_count?: number;
   content_seen_count: number;
   content_snapshot_count?: number;
+  error_count?: number;
+  error_categories?: string[];
+  error_codes?: string[];
+  retryable_error_count?: number;
   error_category?: string | null;
   provider_code?: string | null;
   retryable?: boolean | null;
@@ -5720,10 +5724,11 @@ function SyncHistory({
                       <tr className="detail-row">
                         <td colSpan={7}>
                           Attempt {run.attempt || 1}.{' '}
-                          {run.error_category
-                            ? 'The provider did not complete this sync.'
+                          {(run.error_count || 0) > 0
+                            ? `${run.error_count} error${run.error_count === 1 ? '' : 's'} were recorded${run.error_categories?.length ? ` (${run.error_categories.join(', ')})` : ''}.`
                             : 'No failure was reported for this sync.'}{' '}
-                          {run.retryable ? 'It will be retried automatically.' : ''}
+                          {run.error_codes?.length ? `Codes: ${run.error_codes.join(', ')}. ` : ''}
+                          {run.retryable ? 'At least one error was marked retryable.' : ''}
                         </td>
                       </tr>
                     )}

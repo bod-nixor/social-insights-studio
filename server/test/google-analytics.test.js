@@ -207,21 +207,141 @@ test('GA4 property normalization requires timezone and currency before selection
   assert.equal(incomplete.selectable, false);
 });
 
-test('GA4 report parsing preserves zeroes and rejects malformed rows', () => {
+test('GA4 summary report parsing accepts omitted dimension headers and preserves provider zeroes', () => {
   const parsed = parseReportRows({
-    dimensionHeaders: [{ name: 'date' }],
     metricHeaders: [{ name: 'sessions' }, { name: 'engagementRate' }],
     rows: [{
-      dimensionValues: [{ value: '20260717' }],
       metricValues: [{ value: '0' }, { value: '0.5' }]
     }],
     rowCount: 1,
     metadata: { subjectToThresholding: true }
+  }, {
+    dimensions: [],
+    metrics: ['sessions', 'engagementRate']
   });
+  assert.deepEqual(parsed.dimensions, []);
   assert.equal(parsed.rows[0].metrics.sessions, '0');
   assert.equal(parsed.metadata.subjectToThresholding, true);
+});
+
+test('GA4 summary report parsing accepts an explicitly empty dimension header array', () => {
+  const parsed = parseReportRows({
+    dimensionHeaders: [],
+    metricHeaders: [{ name: 'sessions' }],
+    rows: [{ dimensionValues: [], metricValues: [{ value: '4' }] }]
+  }, {
+    dimensions: [],
+    metrics: ['sessions']
+  });
+  assert.deepEqual(parsed.dimensions, []);
+  assert.equal(parsed.rows[0].metrics.sessions, '4');
+});
+
+test('GA4 daily report parsing requires and maps the requested date dimension', () => {
+  const parsed = parseReportRows({
+    dimensionHeaders: [{ name: 'date' }],
+    metricHeaders: [{ name: 'sessions' }],
+    rows: [{
+      dimensionValues: [{ value: '20260717' }],
+      metricValues: [{ value: '3' }]
+    }]
+  }, {
+    dimensions: ['date'],
+    metrics: ['sessions']
+  });
+  assert.equal(parsed.rows[0].dimensions.date, '20260717');
+  assert.equal(parsed.rows[0].metrics.sessions, '3');
+});
+
+test('GA4 report parsing treats omitted rows and rowCount zero as an empty result', () => {
+  const parsed = parseReportRows({
+    metricHeaders: [{ name: 'sessions' }],
+    rowCount: 0
+  }, {
+    dimensions: [],
+    metrics: ['sessions']
+  });
+  assert.deepEqual(parsed.rows, []);
+  assert.equal(parsed.rowCount, 0);
+});
+
+test('GA4 report parsing rejects present non-array or missing required headers', () => {
   assert.throws(() => parseReportRows({
-    dimensionHeaders: [{ name: 'date' }], metricHeaders: [], rows: [{ dimensionValues: [] }]
+    dimensionHeaders: {},
+    metricHeaders: [{ name: 'sessions' }]
+  }, {
+    dimensions: [],
+    metrics: ['sessions']
+  }), /ga4_report_response_malformed/);
+  assert.throws(() => parseReportRows({
+    dimensionHeaders: [],
+    metricHeaders: {}
+  }, {
+    dimensions: [],
+    metrics: ['sessions']
+  }), /ga4_report_response_malformed/);
+  assert.throws(() => parseReportRows({}, {
+    dimensions: [],
+    metrics: ['sessions']
+  }), /ga4_report_response_malformed/);
+  assert.throws(() => parseReportRows({
+    dimensionHeaders: [],
+    metricHeaders: [{ name: 'sessions' }],
+    rows: {}
+  }, {
+    dimensions: [],
+    metrics: ['sessions']
+  }), /ga4_report_response_malformed/);
+  assert.throws(() => parseReportRows({
+    dimensionHeaders: [],
+    metricHeaders: [{ name: 'sessions' }],
+    rowCount: '0'
+  }, {
+    dimensions: [],
+    metrics: ['sessions']
+  }), /ga4_report_response_malformed/);
+});
+
+test('GA4 report parsing rejects returned header count, name, and order mismatches', () => {
+  assert.throws(() => parseReportRows({
+    dimensionHeaders: [],
+    metricHeaders: [{ name: 'activeUsers' }]
+  }, {
+    dimensions: [],
+    metrics: ['sessions']
+  }), /ga4_report_response_malformed/);
+  assert.throws(() => parseReportRows({
+    dimensionHeaders: [{ name: 'country' }],
+    metricHeaders: [{ name: 'sessions' }, { name: 'activeUsers' }]
+  }, {
+    dimensions: ['date'],
+    metrics: ['activeUsers', 'sessions']
+  }), /ga4_report_response_malformed/);
+  assert.throws(() => parseReportRows({
+    dimensionHeaders: [{ name: 'date' }],
+    metricHeaders: [{ name: 'sessions' }, { name: 'activeUsers' }]
+  }, {
+    dimensions: ['date'],
+    metrics: ['sessions']
+  }), /ga4_report_response_malformed/);
+});
+
+test('GA4 report parsing rejects row dimension and metric cardinality mismatches', () => {
+  assert.throws(() => parseReportRows({
+    dimensionHeaders: [{ name: 'date' }],
+    metricHeaders: [{ name: 'sessions' }],
+    rows: [{ dimensionValues: [], metricValues: [{ value: '3' }] }]
+  }, {
+    dimensions: ['date'],
+    metrics: ['sessions']
+  }), /ga4_report_row_malformed/);
+  assert.throws(() => parseReportRows({
+    dimensionHeaders: [],
+    metricHeaders: [{ name: 'sessions' }, { name: 'activeUsers' }],
+    rows: [{ metricValues: [{ value: '3' }] }]
+  }, {
+    dimensions: [],
+    metrics: ['sessions', 'activeUsers']
   }), /ga4_report_row_malformed/);
 });
 

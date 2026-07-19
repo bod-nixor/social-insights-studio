@@ -2471,6 +2471,54 @@ test('dashboard, manual sync, stale partial state, and CSV export use stored sna
   assert.deepEqual(sourceAfterPartial[0].last_successful_sync_at, firstSuccess);
 });
 
+test('sync history returns one sanitized aggregate row for a run with multiple errors', async () => {
+  await clearDatabase();
+  const owner = await signIn('sync-history-owner@example.com');
+  const workspace = await createWorkspace(owner, 'Sync History Workspace');
+  const dataSourceId = crypto.randomUUID();
+  const syncRunId = crypto.randomUUID();
+  await db.query(
+    `INSERT INTO data_sources (id, workspace_id, provider, status)
+     VALUES (?, ?, 'google_analytics_4', 'active')`,
+    [dataSourceId, workspace.id]
+  );
+  await db.query(
+    `INSERT INTO sync_runs
+      (id, workspace_id, data_source_id, trigger_type, status, finished_at)
+     VALUES (?, ?, ?, 'scheduled', 'partial', UTC_TIMESTAMP(3))`,
+    [syncRunId, workspace.id, dataSourceId]
+  );
+  for (let index = 0; index < 6; index += 1) {
+    await db.query(
+      `INSERT INTO sync_errors
+        (id, sync_run_id, category, provider_code, message, retryable)
+       VALUES (?, ?, 'provider', ?, ?, FALSE)`,
+      [
+        crypto.randomUUID(),
+        syncRunId,
+        index === 5 ? 'credential=must-not-be-exposed' : 'ga4_report_response_malformed',
+        `sanitized message ${index} access_token=must-not-be-exposed`
+      ]
+    );
+  }
+
+  const history = await requestApp(`/api/workspaces/${workspace.id}/sync-runs`, {
+    headers: { cookie: cookieHeader(owner.cookies) }
+  });
+  assert.equal(history.statusCode, 200);
+  const body = history.json();
+  assert.equal(body.total, 1);
+  assert.equal(body.sync_runs.length, 1);
+  assert.equal(body.sync_runs[0].id, syncRunId);
+  assert.equal(body.sync_runs[0].error_count, 6);
+  assert.deepEqual(body.sync_runs[0].error_categories, ['provider']);
+  assert.deepEqual(body.sync_runs[0].error_codes, ['ga4_report_response_malformed']);
+  assert.equal(body.sync_runs[0].retryable_error_count, 0);
+  assert.equal(body.sync_runs[0].retryable, false);
+  assert.equal(JSON.stringify(body).includes('must-not-be-exposed'), false);
+  assert.equal(Object.hasOwn(body.sync_runs[0], 'message'), false);
+});
+
 test('YouTube OAuth state rejects missing, expired, and cross-binding callbacks without Google calls', async () => {
   await clearDatabase();
   const owner = await signIn('youtube-state-owner@example.com');
@@ -4062,6 +4110,207 @@ test('GA4 uses explicit property selection, encrypted credentials, worker-only r
   assert.equal(Number(purged[0].sources), 0);
   assert.equal(Number(purged[0].metrics), 0);
   assert.equal(Number(purged[0].dimensions), 0);
+});
+
+test('GA4 new-property sync accepts omitted summary dimension headers without fabricating data', async () => {
+  await clearDatabase();
+  const owner = await signIn('ga4-new-property-owner@example.com');
+  const workspace = await createWorkspace(owner, 'GA4 New Property Workspace');
+  const authorizationId = crypto.randomUUID();
+  const resourceId = crypto.randomUUID();
+  const accessToken = encryptSecret('ga4-new-property-access-token');
+  const propertyMetadata = {
+    id: 'properties/789',
+    propertyId: '789',
+    displayName: 'New Web Property',
+    account: 'accounts/456',
+    accountDisplayName: 'New Analytics Account',
+    timezone: 'UTC',
+    currency: 'USD',
+    propertyType: 'PROPERTY_TYPE_ORDINARY',
+    serviceLevel: 'GOOGLE_ANALYTICS_STANDARD',
+    selectable: true,
+    discoveryStatus: 'available'
+  };
+  await db.query(
+    `INSERT INTO provider_authorizations
+      (id, workspace_id, provider, actor_user_id, display_name, status, api_version, granted_at)
+     VALUES (?, ?, 'google_analytics_4', ?, 'New Analytics Account', 'active',
+             'admin-v1beta/data-v1beta', UTC_TIMESTAMP(3))`,
+    [authorizationId, workspace.id, owner.user.id]
+  );
+  await db.query(
+    `INSERT INTO provider_authorization_credentials
+      (id, provider_authorization_id, access_token_ciphertext, access_token_iv,
+       access_token_tag, key_version, access_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 HOUR))`,
+    [
+      crypto.randomUUID(),
+      authorizationId,
+      accessToken.ciphertext,
+      accessToken.iv,
+      accessToken.tag,
+      accessToken.keyVersion
+    ]
+  );
+  await db.query(
+    `INSERT INTO provider_authorization_scopes
+      (provider_authorization_id, scope, status, granted_at, last_confirmed_at)
+     VALUES (?, ?, 'granted', UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))`,
+    [authorizationId, GA4_SCOPES[0]]
+  );
+  await db.query(
+    `INSERT INTO provider_resources
+      (id, provider_authorization_id, workspace_id, provider, resource_type,
+       provider_resource_id, display_name, metadata)
+     VALUES (?, ?, ?, 'google_analytics_4', 'ga4_property', 'properties/789',
+             'New Web Property', ?)`,
+    [resourceId, authorizationId, workspace.id, JSON.stringify(propertyMetadata)]
+  );
+
+  const selection = await requestApp(`/api/workspaces/${workspace.id}/connections/google-analytics/select`, {
+    method: 'POST',
+    headers: { cookie: cookieHeader(owner.cookies), 'x-csrf-token': owner.csrf },
+    body: { resource_id: resourceId }
+  });
+  assert.equal(selection.statusCode, 201);
+  const selectedConnection = selection.json().connection;
+  const breakdownDimensions = [...new Set(GA4_BREAKDOWNS.flatMap(item => item.dimensions))];
+  let summaryRequestCount = 0;
+  const calls = installGoogleAnalyticsMock(call => {
+    const pathName = call.url.pathname;
+    assert.equal(call.options.headers.Authorization, 'Bearer ga4-new-property-access-token');
+    if (call.url.hostname === 'analyticsadmin.googleapis.com' && pathName === '/v1beta/properties/789') {
+      return jsonResponse(200, {
+        name: 'properties/789',
+        account: 'accounts/456',
+        displayName: 'New Web Property',
+        timeZone: 'UTC',
+        currencyCode: 'USD',
+        propertyType: 'PROPERTY_TYPE_ORDINARY',
+        serviceLevel: 'GOOGLE_ANALYTICS_STANDARD'
+      });
+    }
+    if (call.url.hostname === 'analyticsdata.googleapis.com' && pathName === '/v1beta/properties/789/metadata') {
+      return jsonResponse(200, {
+        dimensions: ['date', ...breakdownDimensions].map(apiName => ({ apiName, uiName: apiName })),
+        metrics: GA4_METRICS.map(apiName => ({ apiName, uiName: apiName, type: 'TYPE_FLOAT' }))
+      });
+    }
+    if (call.url.hostname === 'analyticsdata.googleapis.com' && pathName === '/v1beta/properties/789:checkCompatibility') {
+      const request = JSON.parse(call.options.body);
+      return jsonResponse(200, {
+        ...(request.dimensions.length > 0 ? {
+          dimensionCompatibilities: request.dimensions.map(item => ({
+            dimensionMetadata: { apiName: item.name },
+            compatibility: 'COMPATIBLE'
+          }))
+        } : {}),
+        metricCompatibilities: request.metrics.map(item => ({
+          metricMetadata: { apiName: item.name },
+          compatibility: 'COMPATIBLE'
+        }))
+      });
+    }
+    if (call.url.hostname === 'analyticsdata.googleapis.com' && pathName === '/v1beta/properties/789:runReport') {
+      const request = JSON.parse(call.options.body);
+      const dimensions = request.dimensions.map(item => item.name);
+      const metrics = request.metrics.map(item => item.name);
+      const responseBody = {
+        metricHeaders: metrics.map(name => ({ name, type: 'TYPE_FLOAT' })),
+        rowCount: 0,
+        metadata: { subjectToThresholding: false, dataLossFromOtherRow: false },
+        propertyQuota: { tokensPerDay: { consumed: 1, remaining: 9999 } }
+      };
+      if (dimensions.length === 0) {
+        summaryRequestCount += 1;
+        assert.equal(Object.hasOwn(responseBody, 'dimensionHeaders'), false);
+        if (summaryRequestCount === 1) {
+          responseBody.rows = [{ metricValues: metrics.map(() => ({ value: '0' })) }];
+          responseBody.rowCount = 1;
+        }
+        return jsonResponse(200, responseBody);
+      }
+      responseBody.dimensionHeaders = dimensions.map(name => ({ name }));
+      return jsonResponse(200, responseBody);
+    }
+    throw new Error(`unexpected Google Analytics mock call: ${call.url.toString()}`);
+  });
+
+  const worker = await runDueSyncs({ timeBudgetSeconds: 20, leaseOwner: 'ga4-new-property-worker' });
+  assert.equal(worker.processed, 1);
+  assert.equal(worker.results[0].status, 'success');
+  assert.equal(worker.results[0].error, null);
+  assert.equal(worker.results[0].data_through_date, null);
+  assert.equal(worker.results[0].metric_observation_count, GA4_METRICS.length * 6);
+  assert.equal(worker.results[0].dimension_observation_count, 0);
+  assert.equal(summaryRequestCount, 6);
+
+  const syncRunId = worker.results[0].sync_run_id;
+  const stored = await db.query(
+    `SELECT
+       (SELECT status FROM sync_runs WHERE id = ?) AS run_status,
+       (SELECT COUNT(*) FROM sync_errors WHERE sync_run_id = ?) AS sync_errors,
+       (SELECT COUNT(*) FROM provider_request_events
+         WHERE sync_run_id = ? AND status = 'failed') AS failed_requests,
+       (SELECT COUNT(*) FROM provider_metric_observations
+         WHERE sync_run_id = ? AND grain = 'range') AS range_metrics,
+       (SELECT COUNT(DISTINCT CONCAT(period_start, ':', period_end))
+         FROM provider_metric_observations WHERE sync_run_id = ? AND grain = 'range') AS summary_ranges,
+       (SELECT COUNT(*) FROM provider_metric_observations
+         WHERE sync_run_id = ? AND grain = 'range'
+           AND availability_status = 'available' AND numeric_value = 0) AS provider_zeroes,
+       (SELECT COUNT(*) FROM provider_metric_observations
+         WHERE sync_run_id = ? AND grain = 'range'
+           AND availability_status = 'not_reported' AND numeric_value IS NULL) AS not_reported,
+       (SELECT COUNT(*) FROM provider_metric_observations
+         WHERE sync_run_id = ? AND grain = 'daily') AS daily_metrics,
+       (SELECT COUNT(*) FROM provider_dimension_observations WHERE sync_run_id = ?) AS dimensions`,
+    [syncRunId, syncRunId, syncRunId, syncRunId, syncRunId, syncRunId, syncRunId, syncRunId, syncRunId]
+  );
+  assert.equal(stored[0].run_status, 'success');
+  assert.equal(Number(stored[0].sync_errors), 0);
+  assert.equal(Number(stored[0].failed_requests), 0);
+  assert.equal(Number(stored[0].range_metrics), GA4_METRICS.length * 6);
+  assert.equal(Number(stored[0].summary_ranges), 6);
+  assert.equal(Number(stored[0].provider_zeroes), GA4_METRICS.length);
+  assert.equal(Number(stored[0].not_reported), GA4_METRICS.length * 5);
+  assert.equal(Number(stored[0].daily_metrics), 0);
+  assert.equal(Number(stored[0].dimensions), 0);
+
+  const connectionRows = await db.query(
+    `SELECT last_successful_sync_at, data_through_at
+     FROM workspace_provider_connections WHERE id = ?`,
+    [selectedConnection.id]
+  );
+  assert.ok(connectionRows[0].last_successful_sync_at);
+  assert.equal(connectionRows[0].data_through_at, null);
+  const resourceRows = await db.query(
+    `SELECT data_through_at, availability
+     FROM provider_resource_observations WHERE sync_run_id = ?`,
+    [syncRunId]
+  );
+  const availability = typeof resourceRows[0].availability === 'string'
+    ? JSON.parse(resourceRows[0].availability)
+    : resourceRows[0].availability;
+  assert.equal(resourceRows[0].data_through_at, null);
+  assert.equal(availability.state, 'delayed');
+
+  const callsAfterWorker = calls.length;
+  const dashboard = await requestApp(
+    `/api/workspaces/${workspace.id}/providers/google_analytics_4/dashboard?range=30d&connection_id=${selectedConnection.id}`,
+    { headers: { cookie: cookieHeader(owner.cookies) } }
+  );
+  assert.equal(dashboard.statusCode, 200);
+  assert.equal(calls.length, callsAfterWorker, 'new-property dashboard must remain stored-only');
+  const dashboardBody = dashboard.json();
+  assert.equal(dashboardBody.availability.state, 'delayed');
+  assert.equal(dashboardBody.availability.data_through_date, null);
+  assert.equal(dashboardBody.availability.note, 'ga4_reporting_delay');
+  assert.deepEqual(dashboardBody.trend, []);
+  assert.deepEqual(dashboardBody.breakdowns, []);
+  assert.equal(dashboardBody.metrics.every(metric => metric.value === null), true);
+  assert.equal(dashboardBody.metrics.every(metric => metric.availability_status === 'not_reported'), true);
 });
 
 test('Facebook Pages uses explicit selection, encrypted Page tokens, worker-only insights, dashboards, and purge', async () => {

@@ -2,6 +2,32 @@ const { getConnection } = require('../database');
 const { compareMetric, engagementRate, resolveDateRange } = require('./analytics');
 const { assertCapability } = require('./rbac');
 
+const SYNC_ERROR_CATEGORIES = new Set([
+  'authentication',
+  'scope',
+  'rate_limit',
+  'quota',
+  'data_delay',
+  'provider',
+  'timeout',
+  'network',
+  'malformed_response',
+  'internal'
+]);
+const SAFE_EXTERNAL_ERROR_CODES = new Set([
+  'access_denied',
+  'access_token_invalid',
+  'bad_request',
+  'insufficient_permissions',
+  'insufficient_scope',
+  'invalid_grant',
+  'permission_denied',
+  'provider_down',
+  'quota_exceeded',
+  'rate_limit_exceeded',
+  'resource_exhausted'
+]);
+
 function createHttpError(status, code) {
   const error = new Error(code);
   error.status = status;
@@ -34,6 +60,17 @@ async function requireWorkspaceCapability(connection, workspaceId, userId, capab
 
 function serializeDate(value) {
   return value ? new Date(value).toISOString() : null;
+}
+
+function sanitizedSyncErrorCode(value) {
+  const code = String(value || '').trim();
+  const normalized = code.toLowerCase();
+  if (!code || code.length > 120) return null;
+  if (/^\d{1,10}$/.test(code)) return code;
+  if (/^(?:facebook_pages|ga4|instagram|meta|tiktok|youtube)_[a-z0-9_]+$/.test(normalized)) {
+    return normalized;
+  }
+  return SAFE_EXTERNAL_ERROR_CODES.has(normalized) ? normalized : null;
 }
 
 function metricCard(label, key, current, baseline) {
@@ -359,14 +396,36 @@ async function getSyncHistory(userId, workspaceId, options = {}) {
     const offset = Math.max(Number(options.offset || 0), 0);
     const rows = await connection.query(
       `SELECT sr.id, sr.trigger_type, sr.status, sr.started_at, sr.finished_at, sr.duration_ms,
-              sr.attempt, sr.profile_count, sr.content_seen_count, sr.content_snapshot_count,
-              se.category AS error_category, se.provider_code, se.retryable
+              sr.attempt, sr.profile_count, sr.content_seen_count, sr.content_snapshot_count
        FROM sync_runs sr
-       LEFT JOIN sync_errors se ON se.sync_run_id = sr.id
        WHERE sr.workspace_id = ?
        ORDER BY sr.started_at DESC LIMIT ? OFFSET ?`,
       [workspaceId, limit, offset]
     );
+    const errorsByRun = new Map();
+    if (rows.length > 0) {
+      const errorRows = await connection.query(
+        `SELECT sync_run_id, category, provider_code, retryable
+         FROM sync_errors
+         WHERE sync_run_id IN (${rows.map(() => '?').join(', ')})
+         ORDER BY created_at, id`,
+        rows.map(row => row.id)
+      );
+      for (const error of errorRows) {
+        const details = errorsByRun.get(error.sync_run_id) || {
+          count: 0,
+          categories: new Set(),
+          codes: new Set(),
+          retryableCount: 0
+        };
+        details.count += 1;
+        if (SYNC_ERROR_CATEGORIES.has(error.category)) details.categories.add(error.category);
+        const code = sanitizedSyncErrorCode(error.provider_code);
+        if (code) details.codes.add(code);
+        if (error.retryable) details.retryableCount += 1;
+        errorsByRun.set(error.sync_run_id, details);
+      }
+    }
     const countRows = await connection.query(
       `SELECT COUNT(*) AS count
        FROM sync_runs
@@ -377,11 +436,23 @@ async function getSyncHistory(userId, workspaceId, options = {}) {
       total: Number(countRows[0].count || 0),
       limit,
       offset,
-      sync_runs: rows.map(row => ({
-        ...row,
-        started_at: serializeDate(row.started_at),
-        finished_at: serializeDate(row.finished_at)
-      }))
+      sync_runs: rows.map(row => {
+        const details = errorsByRun.get(row.id);
+        const errorCategories = details ? [...details.categories].sort() : [];
+        const errorCodes = details ? [...details.codes].sort() : [];
+        return {
+          ...row,
+          started_at: serializeDate(row.started_at),
+          finished_at: serializeDate(row.finished_at),
+          error_count: details ? details.count : 0,
+          error_categories: errorCategories,
+          error_codes: errorCodes,
+          retryable_error_count: details ? details.retryableCount : 0,
+          error_category: errorCategories[0] || null,
+          provider_code: errorCodes.length === 1 ? errorCodes[0] : null,
+          retryable: details ? details.retryableCount > 0 : false
+        };
+      })
     };
   });
 }

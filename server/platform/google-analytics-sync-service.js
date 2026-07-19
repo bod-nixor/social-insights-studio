@@ -137,16 +137,83 @@ function buildDateWindows(timezone, lookbackDays) {
   return { propertyToday, endDate, dailyStart, ranges };
 }
 
-function parseReportRows(body) {
-  if (!body || !Array.isArray(body.dimensionHeaders) || !Array.isArray(body.metricHeaders)) {
+function expectedReportColumns(expected, field) {
+  if (!expected || expected[field] === undefined) return null;
+  if (!Array.isArray(expected[field]) || expected[field].some(name => typeof name !== 'string' || !name)) {
+    throw createSyncError('ga4_report_request_malformed');
+  }
+  return expected[field];
+}
+
+function responseHeaderNames(body, field, allowMissing) {
+  if (!Object.hasOwn(body, field)) {
+    if (allowMissing) return [];
     throw createSyncError('ga4_report_response_malformed');
   }
-  const dimensions = body.dimensionHeaders.map(header => String(header && header.name || ''));
-  const metrics = body.metricHeaders.map(header => String(header && header.name || ''));
-  const sourceRows = Array.isArray(body.rows) ? body.rows : [];
+  if (!Array.isArray(body[field])) throw createSyncError('ga4_report_response_malformed');
+  return body[field].map(header => {
+    if (!header || typeof header !== 'object' || Array.isArray(header) || typeof header.name !== 'string' || !header.name) {
+      throw createSyncError('ga4_report_response_malformed');
+    }
+    return header.name;
+  });
+}
+
+function reportValueArray(row, field) {
+  if (!Object.hasOwn(row, field)) return [];
+  if (!Array.isArray(row[field])) throw createSyncError('ga4_report_row_malformed');
+  for (const value of row[field]) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw createSyncError('ga4_report_row_malformed');
+    }
+    if (Object.hasOwn(value, 'value') && typeof value.value !== 'string') {
+      throw createSyncError('ga4_report_row_malformed');
+    }
+  }
+  return row[field];
+}
+
+function optionalReportObject(body, field, fallback) {
+  if (!Object.hasOwn(body, field)) return fallback;
+  const value = body[field];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw createSyncError('ga4_report_response_malformed');
+  }
+  return value;
+}
+
+function parseReportRows(body, expected = null) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw createSyncError('ga4_report_response_malformed');
+  }
+  const expectedDimensions = expectedReportColumns(expected, 'dimensions');
+  const expectedMetrics = expectedReportColumns(expected, 'metrics');
+  const dimensions = responseHeaderNames(body, 'dimensionHeaders', true);
+  const metrics = responseHeaderNames(
+    body,
+    'metricHeaders',
+    expectedMetrics !== null && expectedMetrics.length === 0
+  );
+  if (
+    (expectedDimensions && (
+      dimensions.length !== expectedDimensions.length ||
+      dimensions.some((name, index) => name !== expectedDimensions[index])
+    )) ||
+    (expectedMetrics && (
+      metrics.length !== expectedMetrics.length ||
+      metrics.some((name, index) => name !== expectedMetrics[index])
+    ))
+  ) {
+    throw createSyncError('ga4_report_response_malformed');
+  }
+  const sourceRows = Object.hasOwn(body, 'rows') ? body.rows : [];
+  if (!Array.isArray(sourceRows)) throw createSyncError('ga4_report_response_malformed');
   const rows = sourceRows.map(row => {
-    const dimensionValues = Array.isArray(row && row.dimensionValues) ? row.dimensionValues : [];
-    const metricValues = Array.isArray(row && row.metricValues) ? row.metricValues : [];
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw createSyncError('ga4_report_row_malformed');
+    }
+    const dimensionValues = reportValueArray(row, 'dimensionValues');
+    const metricValues = reportValueArray(row, 'metricValues');
     if (dimensionValues.length !== dimensions.length || metricValues.length !== metrics.length) {
       throw createSyncError('ga4_report_row_malformed');
     }
@@ -161,13 +228,20 @@ function parseReportRows(body) {
     });
     return record;
   });
+  let rowCount = rows.length;
+  if (Object.hasOwn(body, 'rowCount')) {
+    rowCount = body.rowCount;
+    if (typeof rowCount !== 'number' || !Number.isSafeInteger(rowCount) || rowCount < rows.length) {
+      throw createSyncError('ga4_report_response_malformed');
+    }
+  }
   return {
     dimensions,
     metrics,
     rows,
-    rowCount: Number(body.rowCount || rows.length),
-    metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
-    propertyQuota: body.propertyQuota && typeof body.propertyQuota === 'object' ? body.propertyQuota : null
+    rowCount,
+    metadata: optionalReportObject(body, 'metadata', {}),
+    propertyQuota: optionalReportObject(body, 'propertyQuota', null)
   };
 }
 
@@ -373,7 +447,10 @@ async function fetchReport(source, runId, accessToken, report, deadlineMs, metho
   const result = await callAndRecord(source, runId, {
     category: 'analytics_api', method
   }, () => ga4.runReport(accessToken, source.property_name, report, { deadlineMs }));
-  return parseReportRows(result.body);
+  return parseReportRows(result.body, {
+    dimensions: report.dimensions || [],
+    metrics: report.metrics || []
+  });
 }
 
 async function fetchAnalytics(source, runId, accessToken, property, deadlineMs, limits) {
